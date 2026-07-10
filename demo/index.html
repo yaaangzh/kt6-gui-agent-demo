@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>KT6 LUI-GUI 联动 Demo</title>
-    <link rel="stylesheet" href="./styles.css?v=lui-textarea1" />
+    <link rel="stylesheet" href="./styles.css?v=perception-cache2" />
   </head>
   <body>
     <main class="app-shell">
@@ -40,6 +40,10 @@
           <div id="canvas-hint" class="canvas-hint">Canvas Scene: 全量节点布局，节点不是 DOM 元素</div>
           <div id="perception-panel" class="perception-panel">
             <p class="eyebrow">UI Perception Pipeline</p>
+            <div class="perception-cache" id="perception-cache" data-status="idle">
+              <span>Scene Cache</span>
+              <strong id="perception-cache-text">等待界面指纹</strong>
+            </div>
             <div class="perception-step" id="perception-capture">
               <span>1</span>
               <strong>捕获业务 Canvas</strong>
@@ -164,6 +168,6 @@
       </section>
     </main>
 
-    <script src="./script.js?v=lui-textarea1"></script>
+    <script src="./script.js?v=perception-cache1"></script>
   </body>
 </html>

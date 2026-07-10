@@ -1,4 +1,6 @@
 {
+  "ui_version": "topology-demo-v1",
+  "topology_revision": 1,
   "site": "站点1",
   "floor": "1F",
   "scene": "全量网络拓扑画布",

@@ -13,6 +13,7 @@ TASK_STATES = {
     "locating",
     "perceiving",
     "reasoning",
+    "replanning",
     "waiting_user",
     "confirming",
     "executing",

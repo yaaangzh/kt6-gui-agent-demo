@@ -1,3 +1,5 @@
+import copy
+import json
 from pathlib import Path
 import time
 import unittest
@@ -17,6 +19,17 @@ def wait_for_state(runtime: KT6Runtime, task_id: str, state: str, timeout: float
         time.sleep(0.02)
     task = runtime.get_task(task_id)
     raise AssertionError(f"Expected state {state}, got {task.state if task else 'missing'}")
+
+
+class MutableTopologyTools(MockBusinessTools):
+    def __init__(self):
+        super().__init__(Path("data"))
+        self.topology = json.loads(Path("data/mock_topology.json").read_text(encoding="utf-8"))
+
+    def _read_json(self, name: str):
+        if name == "mock_topology.json":
+            return copy.deepcopy(self.topology)
+        return super()._read_json(name)
 
 
 class RuntimeTest(unittest.TestCase):
@@ -103,6 +116,53 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(task.context["recovery"]["experience_score"], "normal")
         self.assertEqual(task.locks, set())
         self.assertTrue(any(event.payload.get("view") == "verify" for event in task.events))
+
+    def test_action_replans_when_target_topology_changes(self):
+        tools = MutableTopologyTools()
+        runtime = KT6Runtime(tools, PlaybookLoader(Path("playbooks")), event_delay=0)
+        task = runtime.create_task("用户张三昨天上午9:00反馈网速慢，帮忙看下是啥原因")
+        wait_for_state(runtime, task.task_id, "waiting_user")
+
+        tools.topology["links"] = [
+            link
+            for link in tools.topology["links"]
+            if not (link["source"] == "user_zhangsan" and link["target"] == "ap_001")
+        ]
+        accepted = runtime.execute_action(task.task_id, "execute_solution", {"solution_id": "rf_optimization"})
+        self.assertTrue(accepted)
+
+        deadline = time.time() + 2
+        while time.time() < deadline:
+            task = runtime.get_task(task.task_id)
+            solution_events = [event for event in task.events if event.type == "solutions"]
+            if task.state == "waiting_user" and len(solution_events) >= 2:
+                break
+            time.sleep(0.02)
+
+        self.assertEqual(task.state, "waiting_user")
+        self.assertEqual(task.context["scene_ref"]["revision"], 2)
+        change_events = [event for event in task.events if event.type == "topology_changed"]
+        self.assertTrue(change_events)
+        self.assertFalse(change_events[-1].payload["action_allowed"])
+        self.assertTrue(change_events[-1].payload["invalidate_solutions"])
+        self.assertFalse(any(event.payload.get("gui_action", "").startswith("HITL") for event in task.events))
+
+    def test_action_rebinds_moved_target_before_execution(self):
+        tools = MutableTopologyTools()
+        runtime = KT6Runtime(tools, PlaybookLoader(Path("playbooks")), event_delay=0)
+        task = runtime.create_task("用户张三昨天上午9:00反馈网速慢，帮忙看下是啥原因")
+        wait_for_state(runtime, task.task_id, "waiting_user")
+
+        ap1 = next(obj for obj in tools.topology["objects"] if obj["business_id"] == "ap_001")
+        ap1["x"] += 24
+        accepted = runtime.execute_action(task.task_id, "execute_solution", {"solution_id": "rf_optimization"})
+        self.assertTrue(accepted)
+        task = wait_for_state(runtime, task.task_id, "completed")
+
+        change_events = [event for event in task.events if event.type == "topology_changed"]
+        self.assertTrue(change_events)
+        self.assertTrue(change_events[-1].payload["action_allowed"])
+        self.assertIn("重新绑定目标坐标", change_events[-1].payload["gui_action"])
 
 
 if __name__ == "__main__":

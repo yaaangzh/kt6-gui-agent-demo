@@ -60,6 +60,10 @@ class KT6Runtime:
         action_spec = playbook.actions.get(action)
         if not action_spec or task.state != action_spec["allowed_state"]:
             return False
+        scene_validation = self._validate_scene_for_action(task)
+        if scene_validation and not scene_validation["valid"]:
+            self._start_replan(task, scene_validation)
+            return True
         threading.Thread(target=self._run_action_playbook, args=(task_id, action_spec, payload), daemon=True).start()
         return True
 
@@ -82,6 +86,66 @@ class KT6Runtime:
     def _persist_task(self, task: Task) -> None:
         if self.memory:
             self.memory.save_task(task)
+
+    def _record_perception(self, task: Task, topology: dict[str, Any]) -> None:
+        perception_meta = topology.get("perception_meta", {})
+        focus = topology.get("focus", {})
+        task.context["topology"] = topology
+        task.context["ui_perception"] = topology["ui_perception"]
+        task.context["perception_meta"] = perception_meta
+        task.context["scene_ref"] = {
+            "scene_key": perception_meta.get("scene_key"),
+            "revision": perception_meta.get("scene_revision", 0),
+            "target_ids": focus.get("target_ids", []),
+        }
+        self._persist_task(task)
+
+    def _validate_scene_for_action(self, task: Task) -> dict[str, Any] | None:
+        scene_ref = task.context.get("scene_ref")
+        if not scene_ref or not scene_ref.get("scene_key"):
+            return None
+        validation = self.tools.call("topology.validate_scene", scene_ref=scene_ref)
+        topology = validation["topology"]
+        current_meta = topology["perception_meta"]
+        previous_revision = scene_ref.get("revision", 0)
+        current_revision = current_meta["scene_revision"]
+
+        if validation["valid"]:
+            self._record_perception(task, topology)
+            if current_revision != previous_revision:
+                action = "重新绑定目标坐标后继续执行" if validation.get("rebased") else "变化与当前目标无关，继续执行"
+                self._emit(
+                    task,
+                    "topology_changed",
+                    topology=topology,
+                    perception_meta=current_meta,
+                    topology_changes=validation["changes"],
+                    action_allowed=True,
+                    message=f"检测到拓扑版本变化：{validation['changes']['summary']}；{action}。",
+                    gui_action=f"Topology Sync：{validation['changes']['summary']}，{action}",
+                )
+        return validation
+
+    def _start_replan(self, task: Task, validation: dict[str, Any]) -> None:
+        topology = validation["topology"]
+        self._record_perception(task, topology)
+        self._set_state(task, "replanning")
+        self._emit(
+            task,
+            "topology_changed",
+            topology=topology,
+            perception_meta=topology["perception_meta"],
+            topology_changes=validation["changes"],
+            action_allowed=False,
+            invalidate_solutions=True,
+            message=(
+                f"执行前检测到目标拓扑变化：{validation['changes']['summary']}。"
+                "旧方案已失效，Runtime 正在重新感知和生成方案。"
+            ),
+            scene={"phase": "Topology Changed", "headline": "目标拓扑已变化，正在重新分析", "progress": 12},
+            gui_action="Topology Sync：目标拓扑变化，撤销旧方案并重新分析",
+        )
+        threading.Thread(target=self._run_diagnosis, args=(task.task_id,), daemon=True).start()
 
     def _checkpoint(self, task: Task, step_id: str) -> str | None:
         if not self.memory:
@@ -204,14 +268,14 @@ class KT6Runtime:
         if step_id == "locate_ap_topology":
             entities = task.context["entities"]
             topology = self.tools.call(step["tool"], ap_id=entities["ap_id"])
-            task.context["topology"] = topology
-            task.context["ui_perception"] = topology["ui_perception"]
-            self._persist_task(task)
+            self._record_perception(task, topology)
             self._emit(
                 task,
                 "ui",
                 view="experience",
                 topology=topology,
+                perception_meta=topology["perception_meta"],
+                topology_changes=topology["topology_changes"],
                 actions=step["ui_actions"],
                 metrics={"focus": f"{entities['ap_name']} / {entities['ap_id']}", "ap": entities["ap_name"], "experience": "离线"},
                 scene={"phase": "Step 1 / GUI Navigate", "headline": f"左侧定位 {entities['ap_name']} 所在站点1 / 1F 拓扑", "progress": 18},
@@ -233,14 +297,14 @@ class KT6Runtime:
         if step_id == "locate_user_topology":
             entities = task.context["entities"]
             topology = self.tools.call(step["tool"], user=entities["user"])
-            task.context["topology"] = topology
-            task.context["ui_perception"] = topology["ui_perception"]
-            self._persist_task(task)
+            self._record_perception(task, topology)
             self._emit(
                 task,
                 "ui",
                 view="experience",
                 topology=topology,
+                perception_meta=topology["perception_meta"],
+                topology_changes=topology["topology_changes"],
                 actions=step["ui_actions"],
                 metrics={"focus": "user_zhangsan", "user": entities["user"], "experience": "定位中"},
                 scene={"phase": "Step 1 / GUI Navigate", "headline": "左侧立即跳转张三所在站点1 / 1F 网络拓扑", "progress": 18},
@@ -260,7 +324,9 @@ class KT6Runtime:
                 "runtime",
                 title="UI Perception",
                 message=(
-                    "已执行 DOM 元素识别与 Canvas 截图识别双通道感知，并生成 Scene Graph。\n"
+                    f"界面感知缓存：{topology['perception_meta']['cache_status'].upper()}，"
+                    f"Scene revision={topology['perception_meta']['scene_revision']}，"
+                    f"耗时={topology['perception_meta']['perception_ms']}ms。\n"
                     f"识别模式：{topology['ui_perception']['mode']}；"
                     f"对象数：{topology['ui_perception']['object_count']}；"
                     f"选择原因：{topology['perception_decision']['reason']}；"

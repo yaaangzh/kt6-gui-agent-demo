@@ -94,6 +94,8 @@ const el = {
   perceptionCapture: document.querySelector("#perception-capture"),
   perceptionScene: document.querySelector("#perception-scene"),
   perceptionBinding: document.querySelector("#perception-binding"),
+  perceptionCache: document.querySelector("#perception-cache"),
+  perceptionCacheText: document.querySelector("#perception-cache-text"),
   cursor: document.querySelector("#automation-cursor"),
   guiActionText: document.querySelector("#gui-action-text"),
   guiLog: document.querySelector("#gui-log-list"),
@@ -109,6 +111,21 @@ const ctx = el.canvas.getContext("2d");
 
 function setRuntime(text) {
   el.runtimeState.textContent = `Runtime: ${text}`;
+}
+
+function setPerceptionMeta(meta, changes = null) {
+  if (!meta) {
+    el.perceptionCache.dataset.status = "idle";
+    el.perceptionCacheText.textContent = "等待界面指纹";
+    el.perceptionCache.title = "";
+    return;
+  }
+  const status = meta.cache_status || "miss";
+  const revision = meta.scene_revision ?? "-";
+  const elapsed = Number.isFinite(meta.perception_ms) ? `${meta.perception_ms}ms` : "-";
+  el.perceptionCache.dataset.status = status;
+  el.perceptionCacheText.textContent = `${status.toUpperCase()} · r${revision} · ${elapsed}`;
+  el.perceptionCache.title = changes?.summary || meta.change_summary || "拓扑结构未变化";
 }
 
 function resizeQueryInput() {
@@ -301,6 +318,7 @@ function loadCanvasTopology(topology) {
   canvasState.perceptionMode = "raw";
   canvasState.boundObjects.clear();
   canvasState.focused = null;
+  setPerceptionMeta(topology.perception_meta, topology.topology_changes);
   fitAllIfNeeded();
 }
 
@@ -416,6 +434,7 @@ function resetTopology() {
   [el.progress1, el.progress2, el.progress3].forEach((item) => item.classList.remove("running", "done"));
   setProgressMode("rf");
   resetPerceptionSteps();
+  setPerceptionMeta(canvasState.topology?.perception_meta, canvasState.topology?.topology_changes);
   setStepLabels(DEFAULT_STEP_LABELS);
   resetSteps();
 }
@@ -494,6 +513,7 @@ function playUiActions(actions) {
 function applyEvent(event) {
   state.lastEventId = Math.max(state.lastEventId, event.id);
   if (event.topology) loadCanvasTopology(event.topology);
+  if (event.perception_meta) setPerceptionMeta(event.perception_meta, event.topology_changes);
   if (event.runtime_state) setRuntime(event.runtime_state);
   if (event.playbook) setPlaybook(event.playbook);
   if (event.route_decision) setRouteDecision(event.route_decision);
@@ -512,6 +532,10 @@ function applyEvent(event) {
   }
   if (event.type === "clarification") showClarificationPanel(event.message);
   if (event.type === "step") setStep(event.index, event.status);
+  if (event.invalidate_solutions) {
+    el.solutionPanel.classList.add("hidden");
+    el.solutionList.innerHTML = "";
+  }
 }
 
 async function pollEvents() {

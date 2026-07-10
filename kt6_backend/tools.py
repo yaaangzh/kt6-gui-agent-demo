@@ -4,35 +4,76 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .perception import HybridPerception
+from .perception_runtime import PerceptionRuntime
 
 
 class MockBusinessTools:
-    def __init__(self, data_dir: Path):
+    def __init__(self, data_dir: Path, perception_runtime: PerceptionRuntime | None = None):
         self.data_dir = data_dir
-        self.perception = HybridPerception()
+        self.perception_runtime = perception_runtime or PerceptionRuntime()
+        self.perception = self.perception_runtime.perception
 
     def _read_json(self, name: str) -> dict[str, Any]:
         return json.loads((self.data_dir / name).read_text(encoding="utf-8"))
 
     def query_topology(self, user: str) -> dict[str, Any]:
         topology = self._read_json("mock_topology.json")
-        topology["focused_user"] = user
-        perception_result = self.perception.perceive_topology(topology, user)
-        topology["raw_scenes"] = perception_result["raw_scenes"]
-        topology["ui_perception_candidates"] = perception_result["candidates"]
-        topology["ui_perception"] = perception_result["scene"]
-        topology["perception_decision"] = perception_result["decision"]
-        return topology
+        focus = self._focus(topology, "user", user)
+        return self._attach_perception(topology, self.perception_runtime.resolve(topology, focus), focus)
 
     def query_ap_topology(self, ap_id: str) -> dict[str, Any]:
         topology = self._read_json("mock_topology.json")
-        topology["focused_ap"] = ap_id
-        perception_result = self.perception.perceive_topology(topology, ap_id)
-        topology["raw_scenes"] = perception_result["raw_scenes"]
-        topology["ui_perception_candidates"] = perception_result["candidates"]
-        topology["ui_perception"] = perception_result["scene"]
-        topology["perception_decision"] = perception_result["decision"]
+        focus = self._focus(topology, "ap", ap_id)
+        return self._attach_perception(topology, self.perception_runtime.resolve(topology, focus), focus)
+
+    def validate_scene(self, scene_ref: dict[str, Any]) -> dict[str, Any]:
+        topology = self._read_json("mock_topology.json")
+        validation = self.perception_runtime.validate(topology, scene_ref)
+        focus = {
+            "kind": "validation",
+            "value": None,
+            "target_ids": list(scene_ref.get("target_ids", [])),
+        }
+        validation["topology"] = self._attach_perception(topology, validation["result"], focus)
+        validation.pop("result", None)
+        return validation
+
+    def list_perception_cache(self, limit: int = 20) -> list[dict[str, Any]]:
+        return self.perception_runtime.cache_entries(limit=limit)
+
+    def _focus(self, topology: dict[str, Any], kind: str, value: str) -> dict[str, Any]:
+        target_ids: list[str] = []
+        for obj in topology.get("objects", []):
+            matches = obj.get("business_id") == value or obj.get("label") == value
+            if not matches:
+                continue
+            target_ids.append(obj["business_id"])
+            if kind == "user" and obj.get("connected_ap"):
+                target_ids.append(obj["connected_ap"])
+        return {
+            "kind": kind,
+            "value": value,
+            "target_ids": list(dict.fromkeys(target_ids)),
+        }
+
+    def _attach_perception(
+        self,
+        topology: dict[str, Any],
+        result: dict[str, Any],
+        focus: dict[str, Any],
+    ) -> dict[str, Any]:
+        perception = result["perception"]
+        topology["focus"] = focus
+        if focus.get("kind") == "user":
+            topology["focused_user"] = focus.get("value")
+        if focus.get("kind") == "ap":
+            topology["focused_ap"] = focus.get("value")
+        topology["raw_scenes"] = perception["raw_scenes"]
+        topology["ui_perception_candidates"] = perception["candidates"]
+        topology["ui_perception"] = perception["scene"]
+        topology["perception_decision"] = perception["decision"]
+        topology["perception_meta"] = result["meta"]
+        topology["topology_changes"] = result["changes"]
         return topology
 
     def query_user_experience(self, user: str, time_range: str) -> dict[str, Any]:

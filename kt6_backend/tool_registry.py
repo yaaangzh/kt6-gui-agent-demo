@@ -5,7 +5,7 @@ from typing import Any, Callable
 from .tools import MockBusinessTools
 
 
-ToolFn = Callable[..., dict[str, Any]]
+ToolFn = Callable[..., Any]
 
 
 class ToolRegistry:
@@ -14,6 +14,8 @@ class ToolRegistry:
         self._registry: dict[str, ToolFn] = {
             "topology.query_user_location": self._tools.query_topology,
             "topology.query_ap_location": self._tools.query_ap_topology,
+            "topology.validate_scene": self._tools.validate_scene,
+            "topology.list_perception_cache": self._tools.list_perception_cache,
             "experience.query_user_metrics": self._tools.query_user_experience,
             "wireless.query_associated_ap": self._tools.query_associated_device,
             "wireless.query_ap_status": self._tools.query_ap_status,
@@ -27,7 +29,7 @@ class ToolRegistry:
             "experience.verify_user_recovery": self._tools.verify_user_recovery,
         }
 
-    def call(self, name: str, **kwargs: Any) -> dict[str, Any]:
+    def call(self, name: str, **kwargs: Any) -> Any:
         if name not in self._registry:
             raise KeyError(f"Tool is not registered: {name}")
         return self._registry[name](**kwargs)

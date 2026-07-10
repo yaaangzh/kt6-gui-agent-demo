@@ -6,8 +6,11 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .memory import SQLiteMemoryStore
+from .perception import HybridPerception
+from .perception_runtime import PerceptionRuntime
 from .playbook_loader import PlaybookLoader
 from .runtime import KT6Runtime
+from .scene_store import SQLiteSceneStore
 from .tools import MockBusinessTools
 
 
@@ -16,8 +19,10 @@ DEMO_DIR = ROOT / "demo"
 DATA_DIR = ROOT / "data"
 PLAYBOOK_DIR = ROOT / "playbooks"
 MEMORY = SQLiteMemoryStore(ROOT / "runtime_data" / "kt6_memory.sqlite3")
-RUNTIME = KT6Runtime(MockBusinessTools(DATA_DIR), PlaybookLoader(PLAYBOOK_DIR), memory=MEMORY)
-TOOLS = MockBusinessTools(DATA_DIR)
+SCENE_STORE = SQLiteSceneStore(ROOT / "runtime_data" / "kt6_scene.sqlite3")
+PERCEPTION_RUNTIME = PerceptionRuntime(HybridPerception(), SCENE_STORE)
+TOOLS = MockBusinessTools(DATA_DIR, perception_runtime=PERCEPTION_RUNTIME)
+RUNTIME = KT6Runtime(TOOLS, PlaybookLoader(PLAYBOOK_DIR), memory=MEMORY)
 
 
 class KT6Handler(SimpleHTTPRequestHandler):
@@ -72,6 +77,10 @@ class KT6Handler(SimpleHTTPRequestHandler):
         if path == "/api/tasks":
             limit = int(parse_qs(parsed.query).get("limit", ["20"])[0])
             self._json(200, {"tasks": MEMORY.list_tasks(limit=limit)})
+            return
+        if path == "/api/perception/cache":
+            limit = int(parse_qs(parsed.query).get("limit", ["20"])[0])
+            self._json(200, {"scenes": TOOLS.list_perception_cache(limit=limit)})
             return
         if path == "/api/topology":
             self._json(200, TOOLS.query_topology(""))

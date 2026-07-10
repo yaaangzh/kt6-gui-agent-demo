@@ -3,6 +3,19 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 
+def _object_attributes(obj: dict[str, Any]) -> dict[str, Any]:
+    excluded = {"business_id", "type", "label", "x", "y"}
+    return {key: value for key, value in obj.items() if key not in excluded}
+
+
+def _scene_relations(topology: dict[str, Any]) -> list[dict[str, Any]]:
+    return [dict(relation) for relation in topology.get("links", [])]
+
+
+def _co_channel_relations(topology: dict[str, Any]) -> list[dict[str, Any]]:
+    return [dict(relation) for relation in topology.get("co_channel_relations", [])]
+
+
 class PerceptionAdapter(Protocol):
     mode: str
 
@@ -49,6 +62,7 @@ class DomElementPerception:
                     "selector": selector,
                     "bbox": [obj["x"] - 28, obj["y"] - 28, 56, 56],
                     "center": [obj["x"], obj["y"]],
+                    "attributes": _object_attributes(obj),
                     "confidence": confidence,
                 }
             )
@@ -75,7 +89,14 @@ class DomElementPerception:
             "object_count": len(elements),
             "elements": elements,
             "business_object_bindings": bindings,
+            "relations": _scene_relations(topology),
+            "co_channel_relations": _co_channel_relations(topology),
             "relation_count": len(topology.get("links", [])),
+            "coordinate_space": {
+                "type": "topology_world",
+                "width": topology["canvas"]["width"],
+                "height": topology["canvas"]["height"],
+            },
             "limitations": [
                 "适用于拓扑节点有 DOM、ARIA 或 data-business-id 的页面",
                 "真实接入时由浏览器 DOM snapshot / accessibility tree 生成",
@@ -118,6 +139,7 @@ class CanvasScreenshotPerception:
                     "label": obj["label"],
                     "bbox": [obj["x"] - 30, obj["y"] - 30, 60, 60],
                     "center": [obj["x"], obj["y"]],
+                    "attributes": _object_attributes(obj),
                     "confidence": confidence,
                 }
             )
@@ -135,7 +157,14 @@ class CanvasScreenshotPerception:
             "object_count": len(elements),
             "elements": elements,
             "business_object_bindings": bindings,
+            "relations": _scene_relations(topology),
+            "co_channel_relations": _co_channel_relations(topology),
             "relation_count": len(topology.get("links", [])),
+            "coordinate_space": {
+                "type": "topology_world",
+                "width": topology["canvas"]["width"],
+                "height": topology["canvas"]["height"],
+            },
             "limitations": [
                 "当前为 mock 截图识别结果，不是视觉模型真实识别",
                 "真实接入时应替换为 canvas 截图 + OCR/视觉模型/图形检测",
