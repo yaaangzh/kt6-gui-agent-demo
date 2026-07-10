@@ -1,0 +1,10 @@
+{
+  "ap_id": "ap_001",
+  "ap_name": "AP1",
+  "site": "站点1",
+  "floor": "1F",
+  "band": "5G",
+  "channel": 149,
+  "rssi": "-72dBm",
+  "snr": "18dB"
+}

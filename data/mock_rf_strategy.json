@@ -1,0 +1,8 @@
+{
+  "strategy_id": "strategy_rf_site1_1f_ap1",
+  "target_ap": "AP1",
+  "action": "射频调优",
+  "channel_plan": "降低 AP1 与邻居 AP 同信道冲突",
+  "power_plan": "微调 AP1 与邻居 AP 发射功率",
+  "expected_effect": "降低同频干扰，改善用户吞吐和重传率"
+}

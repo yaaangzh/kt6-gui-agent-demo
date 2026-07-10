@@ -1,0 +1,45 @@
+{
+  "site": "站点1",
+  "floor": "1F",
+  "scene": "全量网络拓扑画布",
+  "canvas": {"width": 1400, "height": 900},
+  "objects": [
+    {"business_id": "core_001", "type": "core", "label": "核心交换机", "x": 690, "y": 128},
+    {"business_id": "agg_001", "type": "aggregation", "label": "汇聚1", "x": 390, "y": 278},
+    {"business_id": "agg_002", "type": "aggregation", "label": "汇聚2", "x": 975, "y": 246},
+    {"business_id": "ap_001", "type": "ap", "label": "AP1", "channel": 149, "band": "5G", "x": 602, "y": 505},
+    {"business_id": "ap_002", "type": "ap", "label": "AP2", "channel": 149, "band": "5G", "x": 885, "y": 402},
+    {"business_id": "ap_003", "type": "ap", "label": "AP3", "channel": 149, "band": "5G", "x": 1018, "y": 632},
+    {"business_id": "ap_004", "type": "ap", "label": "AP4", "channel": 149, "band": "5G", "x": 512, "y": 742},
+    {"business_id": "ap_008", "type": "ap", "label": "AP8", "channel": 36, "band": "5G", "x": 238, "y": 610},
+    {"business_id": "ap_009", "type": "ap", "label": "AP9", "channel": 44, "band": "5G", "x": 1194, "y": 476},
+    {"business_id": "user_zhangsan", "type": "user", "label": "张三", "connected_ap": "ap_001", "x": 455, "y": 587},
+    {"business_id": "user_lisi", "type": "user", "label": "李四", "connected_ap": "ap_008", "x": 186, "y": 710},
+    {"business_id": "user_wangwu", "type": "user", "label": "王五", "connected_ap": "ap_009", "x": 1268, "y": 560}
+  ],
+  "links": [
+    {"source": "core_001", "target": "agg_001", "type": "uplink"},
+    {"source": "core_001", "target": "agg_002", "type": "uplink"},
+    {"source": "agg_001", "target": "ap_001", "type": "wired"},
+    {"source": "agg_001", "target": "ap_004", "type": "wired"},
+    {"source": "agg_001", "target": "ap_008", "type": "wired"},
+    {"source": "agg_002", "target": "ap_002", "type": "wired"},
+    {"source": "agg_002", "target": "ap_003", "type": "wired"},
+    {"source": "agg_002", "target": "ap_009", "type": "wired"},
+    {"source": "user_zhangsan", "target": "ap_001", "type": "access"},
+    {"source": "user_lisi", "target": "ap_008", "type": "access"},
+    {"source": "user_wangwu", "target": "ap_009", "type": "access"}
+  ],
+  "visual_grounding": {
+    "user_zhangsan": {"canvas_ref": "canvas.object.user_zhangsan", "object_type": "user"},
+    "ap_001": {"canvas_ref": "canvas.object.ap_001", "object_type": "ap"},
+    "ap_002": {"canvas_ref": "canvas.object.ap_002", "object_type": "ap"},
+    "ap_003": {"canvas_ref": "canvas.object.ap_003", "object_type": "ap"},
+    "ap_004": {"canvas_ref": "canvas.object.ap_004", "object_type": "ap"}
+  },
+  "co_channel_relations": [
+    {"source": "ap_001", "target": "ap_002", "channel": 149},
+    {"source": "ap_001", "target": "ap_003", "channel": 149},
+    {"source": "ap_001", "target": "ap_004", "channel": 149}
+  ]
+}

@@ -1,0 +1,67 @@
+{
+  "scenario_id": "poe_port_recovery",
+  "name": "AP PoE 恢复执行",
+  "trigger_intents": ["重启 PoE", "恢复 AP", "执行方案"],
+  "required_slots": ["ap_id", "switch_port"],
+  "steps": [
+    {
+      "id": "confirm_and_lock_ap_recovery",
+      "name": "中风险确认与端口锁定",
+      "type": "runtime",
+      "state": "confirming",
+      "risk_level": "medium-risk",
+      "require_human_confirm": true
+    },
+    {
+      "id": "enter_ap_recovery_view",
+      "name": "进入 AP 恢复执行视图",
+      "type": "ui",
+      "state": "executing",
+      "view": "rf",
+      "ui_actions": [
+        {"op": "set_progress_mode", "target": "ap_recovery"},
+        {"op": "focus_object", "target": "ap_003"},
+        {"op": "highlight_object", "target": "ap_003", "status": "running"},
+        {"op": "show_progress_card"},
+        {"op": "set_progress_step", "target": "strategy", "status": "running"}
+      ]
+    },
+    {
+      "id": "restart_poe_port",
+      "name": "重启交换机 PoE 端口",
+      "type": "tool_ui",
+      "state": "executing",
+      "tool": "wireless.restart_poe_port",
+      "outputs": ["poe_action"],
+      "ui_actions": [
+        {"op": "set_progress_step", "target": "strategy", "status": "done"},
+        {"op": "set_progress_step", "target": "dispatch", "status": "running"}
+      ]
+    },
+    {
+      "id": "verify_ap_online",
+      "name": "校验 AP 恢复在线",
+      "type": "tool_ui",
+      "state": "verifying",
+      "tool": "wireless.verify_ap_online",
+      "outputs": ["ap_recovery"],
+      "ui_actions": [
+        {"op": "set_progress_step", "target": "dispatch", "status": "done"},
+        {"op": "set_progress_step", "target": "verify", "status": "running"}
+      ]
+    },
+    {
+      "id": "complete_ap_recovery",
+      "name": "完成 AP 恢复",
+      "type": "runtime",
+      "state": "completed",
+      "view": "verify",
+      "ui_actions": [
+        {"op": "set_progress_step", "target": "verify", "status": "done"},
+        {"op": "highlight_object", "target": "ap_003", "status": "success"},
+        {"op": "focus_object", "target": "ap_003"}
+      ]
+    }
+  ],
+  "actions": {}
+}

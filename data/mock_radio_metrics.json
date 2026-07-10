@@ -1,0 +1,8 @@
+{
+  "channel": 149,
+  "band": "5G",
+  "channel_utilization": "high",
+  "co_channel_neighbor_count": 6,
+  "co_channel_neighbors": ["ap_002", "ap_003", "ap_004", "ap_005", "ap_006", "ap_007"],
+  "noise_floor": "-91dBm"
+}

@@ -1,0 +1,71 @@
+{
+  "scenario_id": "ap_offline_diagnosis",
+  "name": "AP 离线排障",
+  "trigger_intents": ["AP", "离线", "掉线", "无心跳"],
+  "required_slots": ["ap_id", "time_range", "symptom"],
+  "steps": [
+    {
+      "id": "create_context",
+      "name": "创建任务上下文",
+      "type": "runtime",
+      "state": "planning"
+    },
+    {
+      "id": "locate_ap_topology",
+      "name": "定位 AP 所在网络拓扑",
+      "type": "tool_ui",
+      "state": "locating",
+      "tool": "topology.query_ap_location",
+      "outputs": ["topology"],
+      "ui_actions": [
+        {"op": "capture_canvas", "target": "left_topology_canvas"},
+        {"op": "load_canvas_topology"},
+        {"op": "perceive_scene", "target": "irregular_canvas_topology"},
+        {"op": "bind_business_object", "target": "ap_003", "label": "AP3"},
+        {"op": "focus_object", "target": "ap_003"},
+        {"op": "highlight_object", "target": "ap_003", "status": "danger"}
+      ]
+    },
+    {
+      "id": "analyze_ap_status",
+      "name": "AP 状态与交换机端口分析",
+      "type": "tool_ui",
+      "state": "perceiving",
+      "tools": [
+        "wireless.query_ap_status",
+        "wireless.query_switch_port"
+      ],
+      "outputs": ["ap_status", "switch_port"],
+      "ui_actions": [
+        {"op": "focus_object", "target": "ap_003"},
+        {"op": "highlight_object", "target": "ap_003", "status": "danger"}
+      ]
+    },
+    {
+      "id": "infer_ap_offline_root_cause",
+      "name": "AP 离线原因分析",
+      "type": "agent_reasoning",
+      "state": "reasoning",
+      "outputs": ["root_cause", "solutions"],
+      "ui_actions": [
+        {"op": "show_badge", "target": "ap_003", "text": "PoE异常"},
+        {"op": "highlight_object", "target": "ap_003", "status": "danger"}
+      ]
+    },
+    {
+      "id": "recommend_ap_recovery",
+      "name": "推荐恢复方案",
+      "type": "wait_user",
+      "state": "waiting_user"
+    }
+  ],
+  "actions": {
+    "execute_solution": {
+      "playbook": "poe_port_recovery",
+      "allowed_state": "waiting_user",
+      "risk_level": "medium-risk",
+      "require_human_confirm": true,
+      "resource_locks": ["resource:sw_1f_02_ge0_0_18_poe"]
+    }
+  }
+}

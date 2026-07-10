@@ -1,0 +1,79 @@
+{
+  "scenario_id": "user_experience_assurance",
+  "name": "用户体验保障",
+  "trigger_intents": ["网速慢", "上网卡顿", "用户体验差"],
+  "required_slots": ["user", "time_range", "symptom"],
+  "steps": [
+    {
+      "id": "create_context",
+      "name": "创建任务上下文",
+      "type": "runtime",
+      "state": "planning"
+    },
+    {
+      "id": "locate_user_topology",
+      "name": "定位用户所在网络拓扑",
+      "type": "tool_ui",
+      "state": "locating",
+      "tool": "topology.query_user_location",
+      "outputs": ["topology"],
+      "ui_actions": [
+        {"op": "capture_canvas", "target": "left_topology_canvas"},
+        {"op": "load_canvas_topology"},
+        {"op": "perceive_scene", "target": "irregular_canvas_topology"},
+        {"op": "bind_business_object", "target": "user_zhangsan", "label": "张三"},
+        {"op": "bind_business_object", "target": "ap_001", "label": "AP1"},
+        {"op": "focus_object", "target": "user_zhangsan"},
+        {"op": "highlight_object", "target": "user_zhangsan", "status": "active"},
+        {"op": "highlight_relation", "source": "user_zhangsan", "target": "ap_001"}
+      ]
+    },
+    {
+      "id": "analyze_user_and_ap",
+      "name": "用户指标与关联 AP 分析",
+      "type": "tool_ui",
+      "state": "perceiving",
+      "tools": [
+        "experience.query_user_metrics",
+        "wireless.query_associated_ap"
+      ],
+      "outputs": ["user_experience", "associated_device"],
+      "ui_actions": [
+        {"op": "focus_object", "target": "ap_001"},
+        {"op": "highlight_object", "target": "ap_001", "status": "warning"}
+      ]
+    },
+    {
+      "id": "infer_root_cause",
+      "name": "问题原因分析",
+      "type": "agent_reasoning",
+      "state": "reasoning",
+      "tools": [
+        "radio.query_metrics",
+        "network.query_negative_checks"
+      ],
+      "outputs": ["radio_metrics", "negative_checks", "root_cause", "solutions"],
+      "ui_actions": [
+        {"op": "show_interference"},
+        {"op": "focus_object", "target": "ap_001"},
+        {"op": "highlight_object", "target": "ap_001", "status": "danger"},
+        {"op": "show_badge", "target": "ap_001", "text": "同频干扰"}
+      ]
+    },
+    {
+      "id": "recommend_solutions",
+      "name": "推荐优化方案",
+      "type": "wait_user",
+      "state": "waiting_user"
+    }
+  ],
+  "actions": {
+    "execute_solution": {
+      "playbook": "rf_optimization",
+      "allowed_state": "waiting_user",
+      "risk_level": "high-risk",
+      "require_human_confirm": true,
+      "resource_locks": ["resource:site1_1f_ap_radio"]
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "experience_score": "poor",
+  "throughput": "low",
+  "latency": "normal",
+  "packet_loss": "slightly_high",
+  "retransmission_rate": "high"
+}

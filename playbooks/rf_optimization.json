@@ -1,0 +1,78 @@
+{
+  "scenario_id": "rf_optimization",
+  "name": "射频调优执行",
+  "trigger_intents": ["射频调优", "一键执行"],
+  "required_slots": ["ap_id", "user"],
+  "steps": [
+    {
+      "id": "confirm_and_lock",
+      "name": "高风险确认与资源锁定",
+      "type": "runtime",
+      "state": "confirming",
+      "risk_level": "high-risk",
+      "require_human_confirm": true
+    },
+    {
+      "id": "enter_optimization_view",
+      "name": "进入 AP 调优执行视图",
+      "type": "ui",
+      "state": "executing",
+      "view": "rf",
+      "ui_actions": [
+        {"op": "focus_object", "target": "ap_001"},
+        {"op": "highlight_object", "target": "ap_001", "status": "running"},
+        {"op": "show_progress_card"},
+        {"op": "set_progress_step", "target": "strategy", "status": "running"}
+      ]
+    },
+    {
+      "id": "generate_strategy",
+      "name": "生成调优策略",
+      "type": "tool_ui",
+      "state": "executing",
+      "tool": "rf_optimization.generate_strategy",
+      "outputs": ["strategy"],
+      "ui_actions": [
+        {"op": "focus_object", "target": "rfPanel"}
+      ]
+    },
+    {
+      "id": "dispatch_strategy",
+      "name": "下发调优策略",
+      "type": "tool_ui",
+      "state": "executing",
+      "tool": "rf_optimization.dispatch_strategy",
+      "outputs": ["dispatch"],
+      "ui_actions": [
+        {"op": "set_progress_step", "target": "strategy", "status": "done"},
+        {"op": "set_progress_step", "target": "dispatch", "status": "running"}
+      ]
+    },
+    {
+      "id": "verify_recovery",
+      "name": "校验用户体验恢复",
+      "type": "tool_ui",
+      "state": "verifying",
+      "tool": "experience.verify_user_recovery",
+      "outputs": ["recovery"],
+      "ui_actions": [
+        {"op": "set_progress_step", "target": "dispatch", "status": "done"},
+        {"op": "set_progress_step", "target": "verify", "status": "running"}
+      ]
+    },
+    {
+      "id": "complete",
+      "name": "完成任务",
+      "type": "runtime",
+      "state": "completed",
+      "view": "verify",
+      "ui_actions": [
+        {"op": "set_progress_step", "target": "verify", "status": "done"},
+        {"op": "highlight_object", "target": "ap_001", "status": "success"},
+        {"op": "focus_object", "target": "ap_001"},
+        {"op": "clear_interference"}
+      ]
+    }
+  ],
+  "actions": {}
+}

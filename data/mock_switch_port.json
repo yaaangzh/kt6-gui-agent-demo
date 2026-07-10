@@ -1,0 +1,8 @@
+{
+  "ap_id": "ap_003",
+  "switch_name": "SW-1F-02",
+  "port": "GE0/0/18",
+  "link_status": "down",
+  "poe_status": "fault",
+  "error_count": 17
+}
