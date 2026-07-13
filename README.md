@@ -13,7 +13,11 @@ kt6_backend/
   router.py             Intent-to-playbook router for multi-scenario selection
   agent.py              Intent parsing, diagnosis reasoning, recommendation
   memory.py             SQLite-backed task/event/checkpoint/business memory
-  perception.py         Mock UI perception adapter for existing canvas scenes
+  page_perception.py    Live browser DOM/canvas capture, persistence, and scene normalization
+  perception.py         DOM/canvas business topology perception adapters
+  perception_runtime.py Scene cache, revision, and external scene registration
+  scene_store.py        Persistent versioned scene storage
+  topology_change_detector.py  Node/edge/status change detection
   tools.py              Mock business tools for replaceable data access
   tool_registry.py      Tool name -> callable registry
   playbook_loader.py    Loads scenario playbooks
@@ -23,6 +27,7 @@ playbooks/
   ap_offline_diagnosis.json
   user_experience_assurance.json
   rf_optimization.json
+  poe_port_recovery.json
 
 data/
   mock_topology.json
@@ -40,12 +45,17 @@ demo/
   script.js
 
 tests/
+  test_app.py
   test_playbook_loader.py
   test_memory.py
+  test_page_perception.py
   test_runtime.py
 
 runtime_data/
   kt6_memory.sqlite3    Created at runtime. Stores persisted task traces and business memories.
+  kt6_scene.sqlite3     Versioned scene cache.
+  kt6_page_captures.sqlite3  Live page capture metadata.
+  page_captures/        Real canvas screenshots captured by the browser.
 ```
 
 ## Business Thought Chain
@@ -59,6 +69,8 @@ playbooks/rf_optimization.json
 ```
 
 Runtime loads the playbook after intent parsing and executes each step. Agent handles uncertain reasoning and explanation. Tools provide business data access. The frontend only consumes emitted events.
+
+Playbook steps are fail-fast: an unknown step cannot be displayed and silently skipped. Runtime persists executed diagnosis/action step IDs under `context.executed_steps` for audit.
 
 The Runtime is not tied to one Zhangsan scenario anymore. `PlaybookRouter` selects a playbook from `playbooks/*.json` based on intent hints and `trigger_intents`.
 
@@ -95,7 +107,19 @@ existing business UI
   -> frontend canvas pan / zoom / highlight / progress sync
 ```
 
-`perception.py` is still a mock adapter. It now exposes:
+The project now supports a live page capture path in addition to the original business-data adapter:
+
+```text
+browser page
+  -> live DOM/ARIA collection
+  -> canvas.toDataURL() pixel capture
+  -> optional canvas renderer scene adapter
+  -> POST /api/perception/captures
+  -> normalized Scene Graph + page_capture_id
+  -> Runtime task and execution-time scene validation
+```
+
+`perception.py` exposes the business topology adapters:
 
 ```text
 DomElementPerception
@@ -103,7 +127,7 @@ CanvasScreenshotPerception
 HybridPerception
 ```
 
-Real integration should replace these mock capture/perceive functions with browser DOM snapshots, accessibility trees, topology engine APIs, canvas screenshots, OCR, CV, or multimodal vision models. Runtime and playbooks consume the structured scene graph and business bindings, so this layer can be replaced without rewriting the orchestration flow.
+`page_perception.py` performs real DOM and canvas pixel capture. On the current page, canvas node semantics come from the renderer adapter, while pixels are captured and persisted for verification. If a page exposes only canvas pixels and no semantic adapter, the result is explicitly marked `requires_vision_model=true`; the system does not invent node bindings. OCR, CV, or a multimodal vision model remains the next adapter for those unknown canvases.
 
 ```text
 data/mock_topology.json
@@ -137,6 +161,10 @@ GET  /api/tasks/{task_id}
 GET  /api/tasks/{task_id}/events
 POST /api/tasks/{task_id}/actions
 GET  /api/memory
+POST /api/perception/captures
+GET  /api/perception/captures?limit={n}
+GET  /api/perception/captures/{capture_id}
+GET  /api/perception/cache
 ```
 
 The business data is mocked under `data/`, but the runtime flow is real:
@@ -153,6 +181,10 @@ GET  /api/playbooks
 GET  /api/playbooks/{scenario_id}
 GET  /api/tools
 GET  /api/memory?limit={n}
+POST /api/perception/captures
+GET  /api/perception/captures?limit={n}
+GET  /api/perception/captures/{capture_id}
+GET  /api/perception/cache
 POST /api/tasks
 GET  /api/tasks?limit={n}
 GET  /api/tasks/{task_id}
@@ -208,14 +240,12 @@ The expected tool names are registered in:
 kt6_backend/tool_registry.py
 ```
 
-## Run CLI
+## Compatible Entry Points
 
 ```powershell
 python main.py
-```
-
-## Run GUI
-
-```powershell
+# or
 python run_gui.py
 ```
+
+Both commands start the same Runtime-backed Web UI at `http://127.0.0.1:8787/`. The earlier standalone Tkinter prototype has been removed.

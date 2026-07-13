@@ -1,7 +1,31 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Protocol
+
+
+class IntentParser(Protocol):
+    def parse(self, query: str) -> dict[str, Any]: ...
+
+
+class Diagnoser(Protocol):
+    def infer_root_cause(
+        self,
+        user_experience: dict[str, Any],
+        associated_device: dict[str, Any],
+        radio_metrics: dict[str, Any],
+        negative_checks: dict[str, Any],
+    ) -> dict[str, Any]: ...
+
+    def recommend_solutions(self, root_cause: dict[str, Any]) -> list[dict[str, Any]]: ...
+
+    def infer_ap_offline_root_cause(
+        self,
+        ap_status: dict[str, Any],
+        switch_port: dict[str, Any],
+    ) -> dict[str, Any]: ...
+
+    def recommend_ap_recovery_solutions(self, root_cause: dict[str, Any]) -> list[dict[str, Any]]: ...
 
 
 class IntentAgent:

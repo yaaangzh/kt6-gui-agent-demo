@@ -7,6 +7,7 @@ const state = {
   lastEventId: 0,
   pollTimer: null,
   playbookId: null,
+  pageCaptureId: null,
   availableViews: new Set(["experience"]),
 };
 
@@ -64,6 +65,31 @@ const canvasState = {
   tick: 0,
 };
 
+window.__KT6_PAGE_ADAPTER__ = {
+  version: "1.0",
+  captureScene() {
+    const topology = canvasState.topology;
+    if (!topology) return null;
+    return {
+      ui_version: topology.ui_version || document.documentElement.dataset.uiVersion || "unknown",
+      topology_revision: topology.topology_revision ?? topology.perception_meta?.scene_revision ?? null,
+      site: topology.site,
+      floor: topology.floor,
+      scene: topology.scene,
+      canvas: topology.canvas,
+      objects: topology.objects || [],
+      links: topology.links || [],
+      co_channel_relations: topology.co_channel_relations || [],
+      visual_grounding: topology.visual_grounding || {},
+      view_transform: {
+        x: canvasState.camera.x,
+        y: canvasState.camera.y,
+        scale: canvasState.camera.scale,
+      },
+    };
+  },
+};
+
 const el = {
   form: document.querySelector("#query-form"),
   input: document.querySelector("#query-input"),
@@ -82,6 +108,7 @@ const el = {
   metricNeighbor: document.querySelector("#metric-neighbor"),
   metricExperience: document.querySelector("#metric-experience"),
   canvas: document.querySelector("#topology-canvas"),
+  canvasHint: document.querySelector("#canvas-hint"),
   progressCard: document.querySelector("#progress-card"),
   progressTitle: document.querySelector("#progress-title"),
   clarificationPanel: document.querySelector("#clarification-panel"),
@@ -94,6 +121,7 @@ const el = {
   perceptionCapture: document.querySelector("#perception-capture"),
   perceptionScene: document.querySelector("#perception-scene"),
   perceptionBinding: document.querySelector("#perception-binding"),
+  perceptionBindingText: document.querySelector("#perception-binding-text"),
   perceptionCache: document.querySelector("#perception-cache"),
   perceptionCacheText: document.querySelector("#perception-cache-text"),
   cursor: document.querySelector("#automation-cursor"),
@@ -123,9 +151,103 @@ function setPerceptionMeta(meta, changes = null) {
   const status = meta.cache_status || "miss";
   const revision = meta.scene_revision ?? "-";
   const elapsed = Number.isFinite(meta.perception_ms) ? `${meta.perception_ms}ms` : "-";
+  const source = meta.source === "live_page_capture" ? "LIVE" : "DATA";
   el.perceptionCache.dataset.status = status;
-  el.perceptionCacheText.textContent = `${status.toUpperCase()} · r${revision} · ${elapsed}`;
+  el.perceptionCacheText.textContent = `${source} ${status.toUpperCase()} · r${revision} · ${elapsed}`;
   el.perceptionCache.title = changes?.summary || meta.change_summary || "拓扑结构未变化";
+}
+
+function pageElementRef(element, index) {
+  if (element.id) return `#${element.id}`;
+  if (element.dataset.businessId) return `[data-business-id="${element.dataset.businessId}"]`;
+  const ariaLabel = element.getAttribute("aria-label");
+  if (ariaLabel) return `${element.tagName.toLowerCase()}[aria-label="${ariaLabel}"]`;
+  return `${element.tagName.toLowerCase()}:capture(${index})`;
+}
+
+function captureLiveDom() {
+  const root = document.querySelector(".topology-pane") || document.body;
+  const candidates = [
+    ...root.querySelectorAll(
+      "[data-business-id], [aria-label], button, input, textarea, select, [role]",
+    ),
+  ];
+  const elements = [];
+  candidates.slice(0, 400).forEach((element, index) => {
+    const rect = element.getBoundingClientRect();
+    const style = window.getComputedStyle(element);
+    if (rect.width <= 0 || rect.height <= 0 || style.display === "none" || style.visibility === "hidden") return;
+    const ariaLabel = element.getAttribute("aria-label") || "";
+    const placeholder = element.getAttribute("placeholder") || "";
+    const visibleText = ["INPUT", "TEXTAREA", "SELECT"].includes(element.tagName)
+      ? ""
+      : (element.innerText || "").trim().replace(/\s+/g, " ").slice(0, 300);
+    elements.push({
+      ref: pageElementRef(element, index),
+      tag: element.tagName.toLowerCase(),
+      role: element.getAttribute("role") || "",
+      label: visibleText,
+      aria_label: ariaLabel,
+      placeholder,
+      business_id: element.dataset.businessId || "",
+      business_type: element.dataset.businessType || "",
+      bbox: [rect.left, rect.top, rect.width, rect.height],
+      disabled: Boolean(element.disabled),
+      checked: Boolean(element.checked),
+    });
+  });
+  return { elements };
+}
+
+function captureLiveCanvases() {
+  return [...document.querySelectorAll("canvas")].slice(0, 4).map((canvas, index) => {
+    const rect = canvas.getBoundingClientRect();
+    const result = {
+      canvas_id: canvas.id || `canvas_${index}`,
+      width: canvas.width,
+      height: canvas.height,
+      client_width: rect.width,
+      client_height: rect.height,
+      bbox: [rect.left, rect.top, rect.width, rect.height],
+    };
+    try {
+      result.data_url = canvas.toDataURL("image/png");
+    } catch (error) {
+      result.capture_error = error instanceof Error ? error.message : "canvas capture failed";
+    }
+    return result;
+  });
+}
+
+async function capturePagePerception() {
+  const adapterScene = window.__KT6_PAGE_ADAPTER__?.captureScene?.() || null;
+  const payload = {
+    page: {
+      url: window.location.href,
+      title: document.title,
+      language: document.documentElement.lang,
+      ui_version: document.documentElement.dataset.uiVersion || "unknown",
+      viewport: {
+        width: window.innerWidth,
+        height: window.innerHeight,
+        device_pixel_ratio: window.devicePixelRatio || 1,
+      },
+    },
+    dom: captureLiveDom(),
+    canvases: captureLiveCanvases(),
+    adapter_scene: adapterScene ? JSON.parse(JSON.stringify(adapterScene)) : null,
+    captured_at: Date.now() / 1000,
+  };
+  const response = await fetch(`${API_BASE}/api/perception/captures`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.error || "page perception capture failed");
+  }
+  return response.json();
 }
 
 function resizeQueryInput() {
@@ -288,6 +410,11 @@ function resetPerceptionSteps() {
   });
 }
 
+function updatePerceptionBindingLabel() {
+  const labels = [...canvasState.boundObjects].map((id) => canvasState.objectMap.get(id)?.label || id);
+  el.perceptionBindingText.textContent = labels.length ? `绑定${labels.join(" / ")}` : "等待绑定对象";
+}
+
 function resetSteps() {
   el.steps.forEach((step) => step.classList.remove("running", "done"));
 }
@@ -317,6 +444,7 @@ function loadCanvasTopology(topology) {
   canvasState.badge = null;
   canvasState.perceptionMode = "raw";
   canvasState.boundObjects.clear();
+  updatePerceptionBindingLabel();
   canvasState.focused = null;
   setPerceptionMeta(topology.perception_meta, topology.topology_changes);
   fitAllIfNeeded();
@@ -360,6 +488,10 @@ function showBadge(target, text) {
   canvasState.badge = { target, text };
 }
 
+function clearBadge(target) {
+  if (!target || canvasState.badge?.target === target) canvasState.badge = null;
+}
+
 function setProgressStep(target, status) {
   const map = { strategy: el.progress1, dispatch: el.progress2, verify: el.progress3 };
   const item = map[target];
@@ -400,6 +532,7 @@ function perceiveScene() {
 function bindBusinessObject(id) {
   canvasState.perceptionMode = "bound";
   canvasState.boundObjects.add(id);
+  updatePerceptionBindingLabel();
   setPerceptionStep("binding", "running");
   window.setTimeout(() => setPerceptionStep("binding", "done"), 360);
 }
@@ -414,9 +547,11 @@ function resetTopology() {
   canvasState.badge = null;
   canvasState.perceptionMode = "raw";
   canvasState.boundObjects.clear();
+  updatePerceptionBindingLabel();
   canvasState.focused = null;
   fitAllIfNeeded();
   el.progressCard.classList.add("hidden");
+  el.canvasHint.classList.remove("hidden");
   el.clarificationPanel.classList.add("hidden");
   el.clarificationMessage.textContent = "请补充必要输入。";
   el.solutionPanel.classList.add("hidden");
@@ -446,6 +581,7 @@ function resetDemo() {
   state.lastEventId = 0;
   state.pollTimer = null;
   state.playbookId = null;
+  state.pageCaptureId = null;
   state.availableViews = new Set(["experience"]);
   el.input.value = "";
   el.input.placeholder = "输入用户问题，Runtime 会自动选择对应思维链";
@@ -499,8 +635,12 @@ function applyUiAction(action) {
   if (action.op === "show_interference") showInterference();
   if (action.op === "clear_interference") clearInterference();
   if (action.op === "show_badge") showBadge(action.target, action.text);
+  if (action.op === "clear_badge") clearBadge(action.target);
   if (action.op === "set_progress_mode") setProgressMode(action.target);
-  if (action.op === "show_progress_card") el.progressCard.classList.remove("hidden");
+  if (action.op === "show_progress_card") {
+    el.progressCard.classList.remove("hidden");
+    el.canvasHint.classList.add("hidden");
+  }
   if (action.op === "set_progress_step") setProgressStep(action.target, action.status);
 }
 
@@ -538,23 +678,39 @@ function applyEvent(event) {
   }
 }
 
+function stopPolling(placeholder) {
+  state.running = false;
+  if (state.pollTimer) window.clearInterval(state.pollTimer);
+  state.pollTimer = null;
+  el.input.placeholder = placeholder;
+}
+
 async function pollEvents() {
   if (!state.taskId) return;
-  const response = await fetch(`${API_BASE}/api/tasks/${state.taskId}/events?since=${state.lastEventId}`);
-  if (!response.ok) return;
-  const payload = await response.json();
+  let response;
+  let payload;
+  try {
+    response = await fetch(`${API_BASE}/api/tasks/${state.taskId}/events?since=${state.lastEventId}`);
+    if (!response.ok) {
+      if (response.status === 404) {
+        stopPolling("任务已不存在，可以重新输入问题");
+        setRuntime("missing");
+        setGuiAction("任务事件流已失效，请重新提交问题");
+      }
+      return;
+    }
+    payload = await response.json();
+  } catch (error) {
+    if (state.running) setRuntime("reconnecting");
+    return;
+  }
   payload.events.forEach(applyEvent);
   if (payload.state === "completed") {
-    state.running = false;
-    window.clearInterval(state.pollTimer);
-    state.pollTimer = null;
-    el.input.placeholder = "可以继续输入新的问题";
-  }
-  if (payload.state === "waiting_input") {
-    state.running = false;
-    window.clearInterval(state.pollTimer);
-    state.pollTimer = null;
-    el.input.placeholder = "请补充缺失信息后重新输入完整问题";
+    stopPolling("可以继续输入新的问题");
+  } else if (payload.state === "waiting_input") {
+    stopPolling("请补充缺失信息后重新输入完整问题");
+  } else if (payload.state === "failed") {
+    stopPolling("任务执行失败，可以修改问题后重新提交");
   }
 }
 
@@ -562,14 +718,34 @@ async function runDiagnosis(query) {
   if (state.running) return;
   resetDemo();
   state.running = true;
-  const response = await fetch(`${API_BASE}/api/tasks`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query }),
-  });
+  try {
+    const capture = await capturePagePerception();
+    state.pageCaptureId = capture.capture_id;
+    setPerceptionMeta(capture.perception_meta, capture.topology_changes);
+    setGuiAction(
+      `Page Perception：实时采集 DOM ${capture.summary.dom_element_count} 个、Canvas ${capture.summary.canvas_count} 个，模式 ${capture.summary.selected_mode}`,
+    );
+  } catch (error) {
+    setGuiAction(`Page Perception：实时采集失败，降级使用业务数据适配器（${error.message}）`);
+  }
+  let response;
+  try {
+    response = await fetch(`${API_BASE}/api/tasks`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, page_capture_id: state.pageCaptureId }),
+    });
+  } catch (error) {
+    state.running = false;
+    setRuntime("offline");
+    setGuiAction(`任务创建失败，无法连接 Runtime（${error.message}）`);
+    el.input.placeholder = "Runtime 不可用，请稍后重试";
+    return;
+  }
   if (!response.ok) {
     setGuiAction("任务创建失败，请确认后端服务已启动");
     state.running = false;
+    el.input.placeholder = "任务创建失败，请修改后重试";
     return;
   }
   const payload = await response.json();
@@ -584,12 +760,33 @@ async function runDiagnosis(query) {
 async function executeOptimization(solutionId, button) {
   if (!state.taskId || button.disabled) return;
   button.disabled = true;
-  const response = await fetch(`${API_BASE}/api/tasks/${state.taskId}/actions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "execute_solution", solution_id: solutionId }),
-  });
-  if (!response.ok) setGuiAction("执行动作被 Runtime 拒绝，可能任务状态已变化或资源锁不可用");
+  try {
+    const capture = await capturePagePerception();
+    state.pageCaptureId = capture.capture_id;
+    setPerceptionMeta(capture.perception_meta, capture.topology_changes);
+  } catch (error) {
+    setGuiAction(`执行前页面复核失败，将使用任务原始快照（${error.message}）`);
+  }
+  let response;
+  try {
+    response = await fetch(`${API_BASE}/api/tasks/${state.taskId}/actions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "execute_solution",
+        solution_id: solutionId,
+        page_capture_id: state.pageCaptureId,
+      }),
+    });
+  } catch (error) {
+    button.disabled = false;
+    setGuiAction(`执行请求发送失败，请检查 Runtime 连接（${error.message}）`);
+    return;
+  }
+  if (!response.ok) {
+    button.disabled = false;
+    setGuiAction("执行动作被 Runtime 拒绝，可能任务状态已变化或资源锁不可用");
+  }
 }
 
 function drawGrid(width, height) {

@@ -59,6 +59,7 @@
       "ui_actions": [
         {"op": "set_progress_step", "target": "verify", "status": "done"},
         {"op": "highlight_object", "target": "ap_003", "status": "success"},
+        {"op": "clear_badge", "target": "ap_003"},
         {"op": "focus_object", "target": "ap_003"}
       ]
     }

@@ -4,29 +4,58 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .page_perception import PagePerceptionService
 from .perception_runtime import PerceptionRuntime
 
 
 class MockBusinessTools:
-    def __init__(self, data_dir: Path, perception_runtime: PerceptionRuntime | None = None):
+    def __init__(
+        self,
+        data_dir: Path,
+        perception_runtime: PerceptionRuntime | None = None,
+        page_perception: PagePerceptionService | None = None,
+    ):
         self.data_dir = data_dir
         self.perception_runtime = perception_runtime or PerceptionRuntime()
         self.perception = self.perception_runtime.perception
+        self.page_perception = page_perception
 
     def _read_json(self, name: str) -> dict[str, Any]:
         return json.loads((self.data_dir / name).read_text(encoding="utf-8"))
 
-    def query_topology(self, user: str) -> dict[str, Any]:
-        topology = self._read_json("mock_topology.json")
+    def query_topology(self, user: str, page_capture_id: str | None = None) -> dict[str, Any]:
+        topology = self._captured_topology(page_capture_id) or self._read_json("mock_topology.json")
         focus = self._focus(topology, "user", user)
+        if topology.get("page_capture"):
+            return self._attach_focus(topology, focus)
         return self._attach_perception(topology, self.perception_runtime.resolve(topology, focus), focus)
 
-    def query_ap_topology(self, ap_id: str) -> dict[str, Any]:
-        topology = self._read_json("mock_topology.json")
+    def query_ap_topology(self, ap_id: str, page_capture_id: str | None = None) -> dict[str, Any]:
+        topology = self._captured_topology(page_capture_id) or self._read_json("mock_topology.json")
         focus = self._focus(topology, "ap", ap_id)
+        if topology.get("page_capture"):
+            return self._attach_focus(topology, focus)
         return self._attach_perception(topology, self.perception_runtime.resolve(topology, focus), focus)
 
-    def validate_scene(self, scene_ref: dict[str, Any]) -> dict[str, Any]:
+    def validate_scene(
+        self,
+        scene_ref: dict[str, Any],
+        current_capture_id: str | None = None,
+    ) -> dict[str, Any]:
+        capture_id = current_capture_id or scene_ref.get("page_capture_id")
+        if capture_id and self.page_perception:
+            topology = self.page_perception.get_topology(capture_id)
+            result = self.page_perception.get_result(capture_id)
+            if topology and result:
+                validation = self.perception_runtime.validate_result(scene_ref, result)
+                focus = {
+                    "kind": "validation",
+                    "value": None,
+                    "target_ids": list(scene_ref.get("target_ids", [])),
+                }
+                validation["topology"] = self._attach_focus(topology, focus)
+                return validation
+
         topology = self._read_json("mock_topology.json")
         validation = self.perception_runtime.validate(topology, scene_ref)
         focus = {
@@ -37,6 +66,11 @@ class MockBusinessTools:
         validation["topology"] = self._attach_perception(topology, validation["result"], focus)
         validation.pop("result", None)
         return validation
+
+    def _captured_topology(self, capture_id: str | None) -> dict[str, Any] | None:
+        if not capture_id or not self.page_perception:
+            return None
+        return self.page_perception.get_topology(capture_id)
 
     def list_perception_cache(self, limit: int = 20) -> list[dict[str, Any]]:
         return self.perception_runtime.cache_entries(limit=limit)
@@ -63,17 +97,21 @@ class MockBusinessTools:
         focus: dict[str, Any],
     ) -> dict[str, Any]:
         perception = result["perception"]
-        topology["focus"] = focus
-        if focus.get("kind") == "user":
-            topology["focused_user"] = focus.get("value")
-        if focus.get("kind") == "ap":
-            topology["focused_ap"] = focus.get("value")
+        self._attach_focus(topology, focus)
         topology["raw_scenes"] = perception["raw_scenes"]
         topology["ui_perception_candidates"] = perception["candidates"]
         topology["ui_perception"] = perception["scene"]
         topology["perception_decision"] = perception["decision"]
         topology["perception_meta"] = result["meta"]
         topology["topology_changes"] = result["changes"]
+        return topology
+
+    def _attach_focus(self, topology: dict[str, Any], focus: dict[str, Any]) -> dict[str, Any]:
+        topology["focus"] = focus
+        if focus.get("kind") == "user":
+            topology["focused_user"] = focus.get("value")
+        if focus.get("kind") == "ap":
+            topology["focused_ap"] = focus.get("value")
         return topology
 
     def query_user_experience(self, user: str, time_range: str) -> dict[str, Any]:

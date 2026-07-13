@@ -1,4 +1,6 @@
+import json
 from pathlib import Path
+import tempfile
 import unittest
 
 from kt6_backend.agent import IntentAgent
@@ -36,6 +38,24 @@ class PlaybookRouterTest(unittest.TestCase):
         self.assertIn("user_experience_assurance", candidate_ids)
         self.assertNotIn("rf_optimization", candidate_ids)
         self.assertNotIn("poe_port_recovery", candidate_ids)
+
+    def test_route_fails_clearly_when_no_diagnosis_playbook_exists(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            playbook_dir = Path(temp_dir)
+            (playbook_dir / "action_only.json").write_text(
+                json.dumps(
+                    {
+                        "scenario_id": "action_only",
+                        "name": "Action only",
+                        "steps": [{"id": "execute", "state": "executing"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            router = PlaybookRouter(PlaybookLoader(playbook_dir))
+
+            with self.assertRaisesRegex(RuntimeError, "No diagnosis playbook available"):
+                router.route("test", self.intent_agent.parse("test"))
 
 
 if __name__ == "__main__":

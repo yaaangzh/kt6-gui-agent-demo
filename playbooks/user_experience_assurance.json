@@ -70,6 +70,7 @@
   "actions": {
     "execute_solution": {
       "playbook": "rf_optimization",
+      "solution_ids": ["rf_optimization"],
       "allowed_state": "waiting_user",
       "risk_level": "high-risk",
       "require_human_confirm": true,

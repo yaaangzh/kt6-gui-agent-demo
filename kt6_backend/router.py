@@ -59,6 +59,8 @@ class PlaybookRouter:
             (self._score(query, intent, playbook), self._matched_triggers(query, playbook), playbook)
             for playbook in diagnosis_playbooks
         ]
+        if not scored:
+            raise RuntimeError("No diagnosis playbook available")
         scored.sort(key=lambda item: (item[0], len(item[1])), reverse=True)
         score, matched_triggers, playbook = scored[0]
         candidates = [

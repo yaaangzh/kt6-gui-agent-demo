@@ -78,6 +78,7 @@ class PerceptionRuntime:
             "previous_revision": latest.revision if latest else None,
             "template_hash": template_hash,
             "content_hash": content_hash,
+            "source": "business_topology_adapter",
             "source_revision": base_topology.get("topology_revision", content_hash[:12]),
             "schema_version": self.SCHEMA_VERSION,
             "cache_status": cache_status,
@@ -93,8 +94,92 @@ class PerceptionRuntime:
             "focus": copy.deepcopy(focus or {}),
         }
 
+    def register_external(
+        self,
+        *,
+        scene_key: str,
+        template_hash: str,
+        content_hash: str,
+        perception: dict[str, Any],
+        source: str,
+        source_revision: str | int | None = None,
+        focus: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        started_at = time.perf_counter()
+        with self._lock:
+            latest = self.store.get_latest(scene_key)
+            if latest and latest.template_hash == template_hash and latest.content_hash == content_hash:
+                # Reuse the semantic revision while retaining this capture's raw DOM/canvas evidence.
+                selected_perception = copy.deepcopy(perception)
+                revision = latest.revision
+                changes = self.detector.empty()
+                cache_status = "hit"
+                cache_age_ms = max(0, int((time.time() - latest.created_at) * 1000))
+                self._decorate_scene(
+                    selected_perception,
+                    scene_key=scene_key,
+                    revision=revision,
+                    template_hash=template_hash,
+                    content_hash=content_hash,
+                )
+            else:
+                selected_perception = copy.deepcopy(perception)
+                revision = latest.revision + 1 if latest else 1
+                changes = (
+                    self.detector.diff(latest.perception["scene"], selected_perception["scene"])
+                    if latest and latest.template_hash == template_hash
+                    else self.detector.empty()
+                )
+                cache_status = "incremental" if latest else "miss"
+                cache_age_ms = 0
+                self._decorate_scene(
+                    selected_perception,
+                    scene_key=scene_key,
+                    revision=revision,
+                    template_hash=template_hash,
+                    content_hash=content_hash,
+                )
+                self.store.save_snapshot(
+                    SceneSnapshot(
+                        scene_key=scene_key,
+                        revision=revision,
+                        template_hash=template_hash,
+                        content_hash=content_hash,
+                        perception=selected_perception,
+                        created_at=time.time(),
+                    )
+                )
+                if latest:
+                    self.store.save_change(scene_key, latest.revision, revision, changes)
+
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+        meta = {
+            "scene_key": scene_key,
+            "scene_revision": revision,
+            "previous_revision": latest.revision if latest else None,
+            "template_hash": template_hash,
+            "content_hash": content_hash,
+            "source": source,
+            "source_revision": source_revision if source_revision is not None else content_hash[:12],
+            "schema_version": self.SCHEMA_VERSION,
+            "cache_status": cache_status,
+            "cache_age_ms": cache_age_ms,
+            "perception_ms": elapsed_ms,
+            "validated": cache_status == "hit",
+            "change_summary": changes["summary"],
+        }
+        return {
+            "perception": copy.deepcopy(selected_perception),
+            "meta": meta,
+            "changes": copy.deepcopy(changes),
+            "focus": copy.deepcopy(focus or {}),
+        }
+
     def validate(self, topology: dict[str, Any], scene_ref: dict[str, Any]) -> dict[str, Any]:
         result = self.resolve(topology)
+        return self.validate_result(scene_ref, result)
+
+    def validate_result(self, scene_ref: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
         current_meta = result["meta"]
         expected_key = scene_ref.get("scene_key")
         expected_revision = int(scene_ref.get("revision", 0))

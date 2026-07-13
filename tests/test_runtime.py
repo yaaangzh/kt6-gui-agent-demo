@@ -1,6 +1,7 @@
 import copy
 import json
 from pathlib import Path
+import threading
 import time
 import unittest
 
@@ -32,6 +33,11 @@ class MutableTopologyTools(MockBusinessTools):
         return super()._read_json(name)
 
 
+class FailingStrategyTools(MockBusinessTools):
+    def generate_rf_strategy(self, ap_id: str):
+        raise RuntimeError(f"strategy backend unavailable for {ap_id}")
+
+
 class RuntimeTest(unittest.TestCase):
     def setUp(self):
         self.runtime = KT6Runtime(
@@ -53,6 +59,10 @@ class RuntimeTest(unittest.TestCase):
         self.assertIn("solutions", event_types)
         self.assertIn("ui", event_types)
         self.assertTrue(any(event.payload.get("route_decision") for event in task.events))
+        self.assertEqual(
+            task.context["executed_steps"]["diagnosis"],
+            ["create_context", "locate_user_topology", "analyze_user_and_ap", "infer_root_cause", "recommend_solutions"],
+        )
 
     def test_ap_offline_query_routes_to_ap_offline_playbook(self):
         task = self.runtime.create_task("AP3 昨晚一直离线，帮我看下")
@@ -105,6 +115,84 @@ class RuntimeTest(unittest.TestCase):
 
         self.assertFalse(accepted)
 
+    def test_action_rejected_when_task_intent_has_no_playbook_id(self):
+        task = Task(query="corrupt restored task", state="waiting_user")
+        task.context["intent"] = {}
+        self.runtime.tasks[task.task_id] = task
+
+        accepted = self.runtime.execute_action(
+            task.task_id,
+            "execute_solution",
+            {"solution_id": "rf_optimization"},
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(task.state, "waiting_user")
+
+    def test_execute_solution_rejects_missing_or_unrecommended_solution_id(self):
+        task = self.runtime.create_task("用户张三昨天上午9:00反馈网速慢，帮忙看下是啥原因")
+        task = wait_for_state(self.runtime, task.task_id, "waiting_user")
+
+        self.assertFalse(self.runtime.execute_action(task.task_id, "execute_solution", {}))
+        self.assertFalse(
+            self.runtime.execute_action(
+                task.task_id,
+                "execute_solution",
+                {"solution_id": "channel_set_optimization"},
+            )
+        )
+        self.assertFalse(
+            self.runtime.execute_action(
+                task.task_id,
+                "execute_solution",
+                {"solution_id": "unknown_solution"},
+            )
+        )
+        self.assertEqual(task.state, "waiting_user")
+        self.assertEqual(task.locks, set())
+        self.assertEqual(self.runtime.resource_owners, {})
+
+    def test_unknown_playbook_steps_fail_instead_of_being_silently_skipped(self):
+        diagnosis_task = Task(query="test")
+        with self.assertRaisesRegex(ValueError, "Unsupported diagnosis step"):
+            self.runtime._execute_diagnosis_step(
+                diagnosis_task,
+                {"id": "unknown_diagnosis", "state": "planning"},
+            )
+        self.assertEqual(diagnosis_task.state, "created")
+
+        action_task = Task(query="test")
+        with self.assertRaisesRegex(ValueError, "Unsupported action step"):
+            self.runtime._execute_action_step(
+                action_task,
+                {"id": "unknown_action", "state": "executing"},
+                {},
+            )
+        self.assertEqual(action_task.state, "created")
+
+    def test_task_snapshots_are_thread_safe_and_detached(self):
+        task = Task(query="snapshot")
+        self.runtime.tasks[task.task_id] = task
+        source = {"items": ["original"]}
+        self.runtime._update_context(task, source=source)
+        source["items"].append("mutated outside runtime")
+
+        def write_context():
+            for index in range(300):
+                self.runtime._update_context(task, **{f"key_{index}": index})
+
+        writer = threading.Thread(target=write_context)
+        writer.start()
+        while writer.is_alive():
+            snapshot = self.runtime.get_task_snapshot(task.task_id)
+            json.dumps(snapshot, ensure_ascii=False)
+        writer.join()
+
+        snapshot = self.runtime.get_task_snapshot(task.task_id)
+        snapshot["context"]["key_0"] = "changed"
+        self.assertEqual(task.context["key_0"], 0)
+        self.assertEqual(task.context["source"], {"items": ["original"]})
+
     def test_execute_solution_completes_and_releases_locks(self):
         task = self.runtime.create_task("用户张三昨天上午9:00反馈网速慢，帮忙看下是啥原因")
         wait_for_state(self.runtime, task.task_id, "waiting_user")
@@ -115,7 +203,56 @@ class RuntimeTest(unittest.TestCase):
 
         self.assertEqual(task.context["recovery"]["experience_score"], "normal")
         self.assertEqual(task.locks, set())
+        self.assertEqual(self.runtime.resource_owners, {})
         self.assertTrue(any(event.payload.get("view") == "verify" for event in task.events))
+
+    def test_action_failure_releases_only_its_declared_resources(self):
+        runtime = KT6Runtime(
+            FailingStrategyTools(Path("data")),
+            PlaybookLoader(Path("playbooks")),
+            event_delay=0,
+        )
+        task = runtime.create_task("用户张三昨天上午9:00反馈网速慢，帮忙看下是啥原因")
+        task = wait_for_state(runtime, task.task_id, "waiting_user")
+        unrelated_resource = "resource:external_audit"
+        with runtime.lock:
+            task.locks.add(unrelated_resource)
+            runtime.resource_owners[unrelated_resource] = task.task_id
+
+        accepted = runtime.execute_action(
+            task.task_id,
+            "execute_solution",
+            {"solution_id": "rf_optimization"},
+        )
+        self.assertTrue(accepted)
+        task = wait_for_state(runtime, task.task_id, "failed")
+
+        self.assertEqual(task.locks, {unrelated_resource})
+        self.assertEqual(runtime.resource_owners, {unrelated_resource: task.task_id})
+
+    def test_resource_lock_rejects_overlapping_actions_across_tasks(self):
+        runtime = KT6Runtime(
+            MockBusinessTools(Path("data")),
+            PlaybookLoader(Path("playbooks")),
+            event_delay=0.05,
+        )
+        first = runtime.create_task("用户张三昨天上午9:00反馈网速慢，帮忙看下是啥原因")
+        second = runtime.create_task("用户张三昨天上午9:00反馈网速慢，帮忙看下是啥原因")
+        wait_for_state(runtime, first.task_id, "waiting_user")
+        wait_for_state(runtime, second.task_id, "waiting_user")
+
+        self.assertTrue(
+            runtime.execute_action(first.task_id, "execute_solution", {"solution_id": "rf_optimization"})
+        )
+        self.assertFalse(
+            runtime.execute_action(second.task_id, "execute_solution", {"solution_id": "rf_optimization"})
+        )
+        wait_for_state(runtime, first.task_id, "completed")
+        self.assertTrue(
+            runtime.execute_action(second.task_id, "execute_solution", {"solution_id": "rf_optimization"})
+        )
+        wait_for_state(runtime, second.task_id, "completed")
+        self.assertEqual(runtime.resource_owners, {})
 
     def test_action_replans_when_target_topology_changes(self):
         tools = MutableTopologyTools()

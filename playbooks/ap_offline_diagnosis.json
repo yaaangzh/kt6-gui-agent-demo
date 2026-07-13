@@ -62,6 +62,7 @@
   "actions": {
     "execute_solution": {
       "playbook": "poe_port_recovery",
+      "solution_ids": ["restart_poe_port"],
       "allowed_state": "waiting_user",
       "risk_level": "medium-risk",
       "require_human_confirm": true,

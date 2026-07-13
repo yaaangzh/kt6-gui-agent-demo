@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import copy
 import threading
 import time
 from typing import Any
 
-from .agent import DiagnosisAgent, IntentAgent
+from .agent import Diagnoser, DiagnosisAgent, IntentAgent, IntentParser
 from .memory import SQLiteMemoryStore
 from .models import TASK_STATES, Task
 from .playbook_loader import PlaybookLoader
@@ -14,25 +15,59 @@ from .tools import MockBusinessTools
 
 
 class KT6Runtime:
+    DIAGNOSIS_STEP_IDS = frozenset(
+        {
+            "create_context",
+            "locate_ap_topology",
+            "locate_user_topology",
+            "analyze_user_and_ap",
+            "infer_root_cause",
+            "analyze_ap_status",
+            "infer_ap_offline_root_cause",
+            "recommend_ap_recovery",
+            "recommend_solutions",
+        }
+    )
+    ACTION_STEP_IDS = frozenset(
+        {
+            "confirm_and_lock",
+            "confirm_and_lock_ap_recovery",
+            "enter_optimization_view",
+            "enter_ap_recovery_view",
+            "generate_strategy",
+            "dispatch_strategy",
+            "restart_poe_port",
+            "verify_recovery",
+            "verify_ap_online",
+            "complete",
+            "complete_ap_recovery",
+        }
+    )
+
     def __init__(
         self,
         tools: MockBusinessTools,
         playbooks: PlaybookLoader,
         event_delay: float = 0.45,
         memory: SQLiteMemoryStore | None = None,
+        intent_parser: IntentParser | None = None,
+        diagnoser: Diagnoser | None = None,
     ):
-        self.intent_agent = IntentAgent()
-        self.diagnosis_agent = DiagnosisAgent()
+        self.intent_agent = intent_parser or IntentAgent()
+        self.diagnosis_agent = diagnoser or DiagnosisAgent()
         self.tools = ToolRegistry(tools)
         self.playbooks = playbooks
         self.router = PlaybookRouter(playbooks)
         self.tasks: dict[str, Task] = {}
-        self.lock = threading.Lock()
+        self.resource_owners: dict[str, str] = {}
+        self.lock = threading.RLock()
         self.event_delay = event_delay
         self.memory = memory
 
-    def create_task(self, query: str) -> Task:
+    def create_task(self, query: str, page_capture_id: str | None = None) -> Task:
         task = Task(query=query)
+        if page_capture_id:
+            task.context["page_capture_id"] = page_capture_id
         with self.lock:
             self.tasks[task.task_id] = task
         self._persist_task(task)
@@ -43,6 +78,19 @@ class KT6Runtime:
         with self.lock:
             return self.tasks.get(task_id)
 
+    def get_task_snapshot(self, task_id: str) -> dict[str, Any] | None:
+        with self.lock:
+            task = self.tasks.get(task_id)
+            if not task:
+                return None
+            return {
+                "task_id": task.task_id,
+                "query": task.query,
+                "state": task.state,
+                "context": copy.deepcopy(task.context),
+                "locks": sorted(task.locks),
+            }
+
     def get_events(self, task_id: str, since: int = 0) -> list[dict[str, Any]]:
         task = self.get_task(task_id)
         if not task:
@@ -51,60 +99,141 @@ class KT6Runtime:
             return [event.to_dict() for event in task.events if event.id > since]
 
     def execute_action(self, task_id: str, action: str, payload: dict[str, Any]) -> bool:
-        task = self.get_task(task_id)
-        if not task:
+        with self.lock:
+            task = self.tasks.get(task_id)
+            if not task:
+                return False
+            context = copy.deepcopy(task.context)
+            intent = context.get("intent", {})
+            current_state = task.state
+        playbook_id = intent.get("playbook_id")
+        if not playbook_id:
             return False
-        intent = task.context.get("intent", {})
-        playbook_id = intent.get("playbook_id", "user_experience_assurance")
-        playbook = self.playbooks.load(playbook_id)
+        try:
+            playbook = self.playbooks.load(playbook_id)
+        except (FileNotFoundError, KeyError, TypeError, ValueError):
+            return False
         action_spec = playbook.actions.get(action)
-        if not action_spec or task.state != action_spec["allowed_state"]:
+        if not action_spec or current_state != action_spec["allowed_state"]:
             return False
-        scene_validation = self._validate_scene_for_action(task)
+        if action == "execute_solution":
+            solution_id = payload.get("solution_id")
+            allowed_solution_ids = set(action_spec.get("solution_ids", []))
+            recommended_solution_ids = {
+                solution.get("solution_id")
+                for solution in context.get("solutions", [])
+                if solution.get("solution_id")
+            }
+            if not solution_id or solution_id not in allowed_solution_ids or solution_id not in recommended_solution_ids:
+                return False
+        scene_validation = self._validate_scene_for_action(task, payload.get("page_capture_id"))
         if scene_validation and not scene_validation["valid"]:
             self._start_replan(task, scene_validation)
             return True
-        threading.Thread(target=self._run_action_playbook, args=(task_id, action_spec, payload), daemon=True).start()
+        resources = set(action_spec.get("resource_locks", []))
+        if not self._acquire_resources(task, action_spec["allowed_state"], resources):
+            return False
+        try:
+            threading.Thread(
+                target=self._run_action_playbook,
+                args=(task_id, action_spec, payload, resources),
+                daemon=True,
+            ).start()
+        except RuntimeError:
+            self._release_resources(task, resources)
+            return False
         return True
+
+    def _acquire_resources(self, task: Task, allowed_state: str, resources: set[str]) -> bool:
+        with self.lock:
+            if task.state != allowed_state:
+                return False
+            if any(resource in self.resource_owners for resource in resources):
+                return False
+            for resource in resources:
+                self.resource_owners[resource] = task.task_id
+            task.locks.update(resources)
+        self._persist_task(task)
+        return True
+
+    def _release_resources(self, task: Task, resources: set[str]) -> None:
+        with self.lock:
+            for resource in resources:
+                if self.resource_owners.get(resource) == task.task_id:
+                    self.resource_owners.pop(resource, None)
+                    task.locks.discard(resource)
+        self._persist_task(task)
+
+    def _update_context(self, task: Task, **updates: Any) -> None:
+        with self.lock:
+            task.context.update(copy.deepcopy(updates))
+
+    def _context_snapshot(self, task: Task) -> dict[str, Any]:
+        with self.lock:
+            return copy.deepcopy(task.context)
+
+    def _task_copy(self, task: Task) -> Task:
+        with self.lock:
+            return copy.deepcopy(task)
 
     def _emit(self, task: Task, event_type: str, **payload: Any) -> None:
         with self.lock:
-            event = task.append_event(event_type, payload)
-        if self.memory:
-            self.memory.save_event(event)
-            self.memory.save_task(task)
+            event = task.append_event(event_type, copy.deepcopy(payload))
+            if self.memory:
+                self.memory.save_event(event)
+                self.memory.save_task(copy.deepcopy(task))
 
     def _set_state(self, task: Task, state: str) -> None:
         if state not in TASK_STATES:
             raise ValueError(f"Unknown task state: {state}")
         with self.lock:
             task.state = state
+            event = task.append_event("runtime_state", {"runtime_state": state})
             if self.memory:
-                self.memory.save_task(task)
-        self._emit(task, "runtime_state", runtime_state=state)
+                self.memory.save_event(event)
+                self.memory.save_task(copy.deepcopy(task))
 
     def _persist_task(self, task: Task) -> None:
         if self.memory:
-            self.memory.save_task(task)
+            with self.lock:
+                self.memory.save_task(copy.deepcopy(task))
+
+    def _fail_task(self, task: Task, message: str) -> None:
+        self._emit(task, "runtime", title="Runtime", message=message)
+        self._set_state(task, "failed")
 
     def _record_perception(self, task: Task, topology: dict[str, Any]) -> None:
         perception_meta = topology.get("perception_meta", {})
         focus = topology.get("focus", {})
-        task.context["topology"] = topology
-        task.context["ui_perception"] = topology["ui_perception"]
-        task.context["perception_meta"] = perception_meta
-        task.context["scene_ref"] = {
-            "scene_key": perception_meta.get("scene_key"),
-            "revision": perception_meta.get("scene_revision", 0),
-            "target_ids": focus.get("target_ids", []),
-        }
+        self._update_context(
+            task,
+            topology=topology,
+            ui_perception=topology["ui_perception"],
+            perception_meta=perception_meta,
+            scene_ref={
+                "scene_key": perception_meta.get("scene_key"),
+                "revision": perception_meta.get("scene_revision", 0),
+                "target_ids": focus.get("target_ids", []),
+                "page_capture_id": topology.get("page_capture", {}).get("capture_id"),
+            },
+        )
         self._persist_task(task)
 
-    def _validate_scene_for_action(self, task: Task) -> dict[str, Any] | None:
-        scene_ref = task.context.get("scene_ref")
+    def _validate_scene_for_action(
+        self,
+        task: Task,
+        current_capture_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        scene_ref = self._context_snapshot(task).get("scene_ref")
         if not scene_ref or not scene_ref.get("scene_key"):
             return None
-        validation = self.tools.call("topology.validate_scene", scene_ref=scene_ref)
+        if current_capture_id:
+            self._update_context(task, page_capture_id=current_capture_id)
+        validation = self.tools.call(
+            "topology.validate_scene",
+            scene_ref=scene_ref,
+            current_capture_id=current_capture_id,
+        )
         topology = validation["topology"]
         current_meta = topology["perception_meta"]
         previous_revision = scene_ref.get("revision", 0)
@@ -150,18 +279,19 @@ class KT6Runtime:
     def _checkpoint(self, task: Task, step_id: str) -> str | None:
         if not self.memory:
             return None
-        checkpoint_id = self.memory.save_checkpoint(task, step_id)
-        task.context["last_checkpoint_id"] = checkpoint_id
+        checkpoint_id = self.memory.save_checkpoint(self._task_copy(task), step_id)
+        self._update_context(task, last_checkpoint_id=checkpoint_id)
         self._persist_task(task)
         return checkpoint_id
 
     def _remember_completion(self, task: Task) -> None:
         if not self.memory:
             return
-        entities = task.context.get("entities", {})
-        associated_device = task.context.get("associated_device", {})
-        root_cause = task.context.get("root_cause", {})
-        recovery = task.context.get("recovery", {})
+        context = self._context_snapshot(task)
+        entities = context.get("entities", {})
+        associated_device = context.get("associated_device", {})
+        root_cause = context.get("root_cause", {})
+        recovery = context.get("recovery", {})
         self.memory.remember(
             scope="business_incident",
             subject=f"{entities.get('user', 'unknown')}:{associated_device.get('ap_id', 'unknown')}",
@@ -194,18 +324,21 @@ class KT6Runtime:
                 "confidence": route.confidence,
                 "reason": route.reason,
             }
-            task.context["intent"] = intent
-            task.context["entities"] = intent["entities"]
             playbook = route.playbook
-            task.context["playbook"] = {"scenario_id": playbook.scenario_id, "name": playbook.name}
-            task.context["route_decision"] = route.to_dict()
-            task.context["playbook_steps"] = [step for step in playbook.steps if step["id"] != "create_context"]
+            self._update_context(
+                task,
+                intent=intent,
+                entities=intent["entities"],
+                playbook={"scenario_id": playbook.scenario_id, "name": playbook.name},
+                route_decision=route.to_dict(),
+                playbook_steps=[step for step in playbook.steps if step["id"] != "create_context"],
+            )
             self._persist_task(task)
 
             self._emit(task, "chat", role="user", title="用户", message=task.query)
             missing_slots = self._missing_required_slots(playbook.required_slots, intent)
             if missing_slots:
-                task.context["missing_slots"] = missing_slots
+                self._update_context(task, missing_slots=missing_slots)
                 self._persist_task(task)
                 self._set_state(task, "waiting_input")
                 self._emit(
@@ -223,9 +356,9 @@ class KT6Runtime:
                 return
             for step in playbook.steps:
                 self._execute_diagnosis_step(task, step)
+                self._mark_step_executed(task, "diagnosis", step["id"])
         except Exception as exc:
-            self._set_state(task, "failed")
-            self._emit(task, "runtime", title="Runtime", message=f"任务执行失败：{exc}")
+            self._fail_task(task, f"任务执行失败：{exc}")
 
     def _missing_required_slots(self, required_slots: list[str], intent: dict[str, Any]) -> list[dict[str, str]]:
         entities = intent.get("entities", {})
@@ -246,8 +379,16 @@ class KT6Runtime:
         labels = "、".join(item["label"] for item in missing_slots)
         return f"当前输入缺少{labels}，请补充后重新提交。"
 
+    def _mark_step_executed(self, task: Task, phase: str, step_id: str) -> None:
+        with self.lock:
+            executed_steps = task.context.setdefault("executed_steps", {})
+            executed_steps.setdefault(phase, []).append(step_id)
+        self._persist_task(task)
+
     def _execute_diagnosis_step(self, task: Task, step: dict[str, Any]) -> None:
         step_id = step["id"]
+        if step_id not in self.DIAGNOSIS_STEP_IDS:
+            raise ValueError(f"Unsupported diagnosis step: {step_id}")
         self._set_state(task, step["state"])
 
         if step_id == "create_context":
@@ -267,7 +408,11 @@ class KT6Runtime:
 
         if step_id == "locate_ap_topology":
             entities = task.context["entities"]
-            topology = self.tools.call(step["tool"], ap_id=entities["ap_id"])
+            topology = self.tools.call(
+                step["tool"],
+                ap_id=entities["ap_id"],
+                page_capture_id=task.context.get("page_capture_id"),
+            )
             self._record_perception(task, topology)
             self._emit(
                 task,
@@ -296,7 +441,11 @@ class KT6Runtime:
 
         if step_id == "locate_user_topology":
             entities = task.context["entities"]
-            topology = self.tools.call(step["tool"], user=entities["user"])
+            topology = self.tools.call(
+                step["tool"],
+                user=entities["user"],
+                page_capture_id=task.context.get("page_capture_id"),
+            )
             self._record_perception(task, topology)
             self._emit(
                 task,
@@ -341,8 +490,11 @@ class KT6Runtime:
             entities = task.context["entities"]
             user_exp = self.tools.call("experience.query_user_metrics", user=entities["user"], time_range=entities["time_range"])
             associated_device = self.tools.call("wireless.query_associated_ap", user=entities["user"], time_range=entities["time_range"])
-            task.context["user_experience"] = user_exp
-            task.context["associated_device"] = associated_device
+            self._update_context(
+                task,
+                user_experience=user_exp,
+                associated_device=associated_device,
+            )
             self._persist_task(task)
             self._emit(
                 task,
@@ -380,10 +532,13 @@ class KT6Runtime:
                 negative_checks,
             )
             solutions = self.diagnosis_agent.recommend_solutions(root_cause)
-            task.context["radio_metrics"] = radio_metrics
-            task.context["negative_checks"] = negative_checks
-            task.context["root_cause"] = root_cause
-            task.context["solutions"] = solutions
+            self._update_context(
+                task,
+                radio_metrics=radio_metrics,
+                negative_checks=negative_checks,
+                root_cause=root_cause,
+                solutions=solutions,
+            )
             self._persist_task(task)
             self._emit(
                 task,
@@ -411,8 +566,7 @@ class KT6Runtime:
             entities = task.context["entities"]
             ap_status = self.tools.call("wireless.query_ap_status", ap_id=entities["ap_id"], time_range=entities["time_range"])
             switch_port = self.tools.call("wireless.query_switch_port", ap_id=entities["ap_id"])
-            task.context["ap_status"] = ap_status
-            task.context["switch_port"] = switch_port
+            self._update_context(task, ap_status=ap_status, switch_port=switch_port)
             self._persist_task(task)
             self._emit(
                 task,
@@ -444,8 +598,7 @@ class KT6Runtime:
                 task.context["switch_port"],
             )
             solutions = self.diagnosis_agent.recommend_ap_recovery_solutions(root_cause)
-            task.context["root_cause"] = root_cause
-            task.context["solutions"] = solutions
+            self._update_context(task, root_cause=root_cause, solutions=solutions)
             self._persist_task(task)
             self._emit(
                 task,
@@ -494,24 +647,37 @@ class KT6Runtime:
                 step={"index": 4, "status": "running"},
             )
 
-    def _run_action_playbook(self, task_id: str, action_spec: dict[str, Any], payload: dict[str, Any]) -> None:
+    def _run_action_playbook(
+        self,
+        task_id: str,
+        action_spec: dict[str, Any],
+        payload: dict[str, Any],
+        resources: set[str],
+    ) -> None:
         task = self.get_task(task_id)
         if not task:
             return
+        completed = False
+        failure: Exception | None = None
         try:
-            for resource in action_spec.get("resource_locks", []):
-                task.locks.add(resource)
-            self._persist_task(task)
             playbook = self.playbooks.load(action_spec["playbook"])
             for step in playbook.steps:
                 self._execute_action_step(task, step, payload)
+                self._mark_step_executed(task, "action", step["id"])
+            completed = True
         except Exception as exc:
-            task.locks.clear()
-            self._set_state(task, "failed")
-            self._emit(task, "runtime", title="Runtime", message=f"动作执行失败：{exc}")
+            failure = exc
+        finally:
+            self._release_resources(task, resources)
+        if completed:
+            self._set_state(task, "completed")
+        elif failure is not None:
+            self._fail_task(task, f"动作执行失败：{failure}")
 
     def _execute_action_step(self, task: Task, step: dict[str, Any], payload: dict[str, Any]) -> None:
         step_id = step["id"]
+        if step_id not in self.ACTION_STEP_IDS:
+            raise ValueError(f"Unsupported action step: {step_id}")
         if step_id not in {"complete", "complete_ap_recovery"}:
             self._set_state(task, step["state"])
 
@@ -584,7 +750,7 @@ class KT6Runtime:
         if step_id == "generate_strategy":
             associated_device = task.context["associated_device"]
             strategy = self.tools.call(step["tool"], ap_id=associated_device["ap_id"])
-            task.context["strategy"] = strategy
+            self._update_context(task, strategy=strategy)
             self._persist_task(task)
             self._emit(
                 task,
@@ -601,7 +767,7 @@ class KT6Runtime:
         if step_id == "dispatch_strategy":
             strategy = task.context["strategy"]
             dispatch = self.tools.call(step["tool"], strategy_id=strategy["strategy_id"])
-            task.context["dispatch"] = dispatch
+            self._update_context(task, dispatch=dispatch)
             self._persist_task(task)
             self._emit(
                 task,
@@ -623,7 +789,7 @@ class KT6Runtime:
                 port=switch_port["port"],
                 ap_id=entities["ap_id"],
             )
-            task.context["poe_action"] = poe_action
+            self._update_context(task, poe_action=poe_action)
             self._persist_task(task)
             self._emit(
                 task,
@@ -639,7 +805,7 @@ class KT6Runtime:
         if step_id == "verify_recovery":
             user = task.context["entities"]["user"]
             recovery = self.tools.call(step["tool"], user=user)
-            task.context["recovery"] = recovery
+            self._update_context(task, recovery=recovery)
             self._persist_task(task)
             self._emit(
                 task,
@@ -656,7 +822,7 @@ class KT6Runtime:
         if step_id == "verify_ap_online":
             entities = task.context["entities"]
             ap_recovery = self.tools.call(step["tool"], ap_id=entities["ap_id"])
-            task.context["ap_recovery"] = ap_recovery
+            self._update_context(task, ap_recovery=ap_recovery)
             self._persist_task(task)
             self._emit(
                 task,
@@ -671,9 +837,7 @@ class KT6Runtime:
             return
 
         if step_id == "complete":
-            task.locks.clear()
             recovery = task.context["recovery"]
-            self._persist_task(task)
             self._emit(
                 task,
                 "ui",
@@ -693,13 +857,10 @@ class KT6Runtime:
                 message=f"站点1/1F AP 射频调优已完成。\n\n已重新校验用户张三的体验指标：\n- {recovery['summary']}\n\n用户张三体验恢复正常。",
             )
             self._remember_completion(task)
-            self._set_state(task, "completed")
 
         if step_id == "complete_ap_recovery":
-            task.locks.clear()
             entities = task.context["entities"]
             ap_recovery = task.context["ap_recovery"]
-            self._persist_task(task)
             self._emit(
                 task,
                 "ui",
@@ -718,4 +879,3 @@ class KT6Runtime:
                 title="Copilot",
                 message=f"{entities['ap_name']} PoE 端口恢复操作已完成。\n\n校验结果：\n- {ap_recovery['summary']}\n\n{entities['ap_name']} 已恢复在线。",
             )
-            self._set_state(task, "completed")
