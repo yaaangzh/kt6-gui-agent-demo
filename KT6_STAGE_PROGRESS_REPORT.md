@@ -1,6 +1,7 @@
 # KT6 意图驱动 UI 联动项目阶段成果汇报
 
 > 汇报日期：2026-07-10  
+> 最近验证：2026-07-14（102 项自动化测试）
 > 当前阶段：工程原型（PoC）  
 > 汇报范围：KT6 界面感知、LUI-GUI 联动、Runtime 编排与人在环执行
 
@@ -20,10 +21,10 @@
 | Runtime 状态机与人在环 | 已完成 |
 | 任务、事件、检查点和业务记忆 | 已完成本地持久化 |
 | 界面感知缓存与拓扑变化检测 | 已完成第一期 |
-| 真实页面感知采集 | 已完成第一期：实时 DOM、Canvas 像素和渲染器 Scene 采集 |
+| 真实页面感知采集 | 已完成第一期：DOM、Canvas 像素、渲染器 Scene 和结构化拓扑文本 |
 | KT5 场景化拓扑生成接入能力 | 接口与运行底座已具备，KT5 生成器尚未接入 |
 | 真实业务数据接入 | 尚未接入，当前使用 Mock Adapter |
-| 真实 Canvas 视觉模型 | 尚未接入，当前使用结构化 Mock 感知 |
+| 真实 Canvas 视觉模型 | 生产 HTTP Adapter 与验收 CLI 已完成，外部模型待生产配置和评测 |
 | 真实设备配置下发 | 尚未接入，当前使用 Mock Action |
 | 生产化能力 | 尚未开始系统建设 |
 
@@ -285,6 +286,7 @@ Runtime 在用户执行方案前重新校验 Scene revision：
 -> 浏览器实时采集左侧页面 DOM/ARIA
 -> 调用 canvas.toDataURL() 捕获真实 Canvas 像素
 -> 读取可选 Canvas 渲染器 Scene Adapter
+-> 可选提交人工 ASCII 或外部 OCR 的拓扑文本观察
 -> POST /api/perception/captures
 -> 后端持久化截图和 Capture 元数据
 -> 生成 page_capture_id 和统一 Scene Graph
@@ -298,8 +300,12 @@ Runtime 在用户执行方案前重新校验 Scene revision：
 - 当前拓扑节点语义来自页面实时渲染器适配器，感知模式为 `canvas_renderer_adapter`。
 - 执行方案前会再次采集页面；页面未变化时显示 `LIVE HIT` 并复用 Scene revision。
 - 陌生 Canvas 如果只有像素、没有 DOM 或渲染器语义，将明确标记 `requires_vision_model=true`，不会伪造节点识别结果。
+- 结构化拓扑文本可重建语义，但强制标记为非像素、不可执行；截断输入不会以部分结果进入选中 Scene。
+- CanvasVisionAdapter 只接收已落盘截图；异常、越界坐标或低置信度结果均按 fail-closed 处理。
+- 生产 HTTP Adapter 已支持 HTTPS、Bearer、严格 JSON Schema、图片真实尺寸/SHA 校验和 prompt-injection 防护。
+- pixels-only CLI 强制排除 Renderer/DOM/Text 干扰，并核对本地图片与感知 provenance。
 
-该阶段完成的是“真实采集与语义适配框架”。截图 OCR、目标检测和多模态视觉模型尚未接入，外部业务页面也需要安装采集脚本、浏览器扩展或页面 Adapter 后才能使用。
+该阶段完成的是“真实采集、语义适配和生产视觉调用框架”。外部 OCR、目标检测或多模态模型可以通过配置 endpoint 接入，但其真实图片准确率仍需在生产环境使用独立标注集评测。
 
 ## 5. 已打通的业务场景
 
@@ -352,11 +358,11 @@ Runtime 在用户执行方案前重新校验 Scene revision：
 
 | 目录 | 数量 | 主要内容 |
 |---|---:|---|
-| `kt6_backend/` | 16 个模块 | Runtime、Agent、Router、Step Registry、Memory、Page Perception、Cache、Change Detector |
+| `kt6_backend/` | 20 个模块 | Runtime、Agent、Router、Memory、Page Perception、文本识别、HTTP Vision、图片 CLI、Cache、Change Detector |
 | `playbooks/` | 4 个文件 | 两个诊断 Playbook、两个动作 Playbook |
 | `data/` | 8 份数据 | 当前业务场景 Mock 数据 |
 | `demo/` | 3 个文件 | 事件驱动的 LUI-GUI 交互界面 |
-| `tests/` | 9 个模块 | Runtime、步骤注册、拓扑变化、路由、感知、页面采集、缓存、记忆和 Playbook 测试 |
+| `tests/` | 12 个模块 | Runtime、步骤注册、拓扑变化、文本/图片拓扑、HTTP Vision、页面感知、缓存、记忆和 Playbook 测试 |
 
 ### 6.2 设计文档
 
@@ -364,6 +370,8 @@ Runtime 在用户执行方案前重新校验 Scene revision：
 - `KT6_SCENARIO_FLOW.md`：张三网速慢场景的完整业务链和左右联动细化。
 - `README.md`：当前工程能力、运行方式、API、真实与 Mock 边界说明。
 - `7.13.md`：当前阶段进展的简版汇报材料。
+- `TOPOLOGY_PERCEPTION_TEST.md`：拓扑界面感知 Ground Truth、证据边界和真实图片验收口径。
+- `PRODUCTION_TOPOLOGY_VISION.md`：生产视觉 endpoint 契约、环境配置、CLI 和安全边界。
 
 ### 6.3 Runtime API
 
@@ -393,7 +401,7 @@ GET  /api/memory
 | 可执行 Playbook | 4 个 |
 | 注册业务工具 | 15 个 |
 | Runtime 状态 | 13 个 |
-| 自动化测试 | 55 项全部通过 |
+| 自动化测试 | 102 项全部通过 |
 | 业务诊断场景 | 2 个 |
 | 动作执行场景 | 2 个 |
 | 浏览器控制台错误 | 0 |
@@ -413,6 +421,8 @@ GET  /api/memory
 - 目标仅移动时重新绑定后继续执行。
 - 浏览器实时 Canvas 截图落盘并生成 Page Capture。
 - Runtime 使用 `page_capture_id`，而不是重新读取固定拓扑。
+- Unicode 企业拓扑黄金样例稳定识别 22 个设备和 19 条明确关系，不补叙述性关系。
+- 文本 grounding 不可执行，视觉坐标不合格时 Runtime 不获取资源锁或启动动作。
 - 未知 Canvas 正确标记为需要视觉模型，不生成虚假业务绑定。
 - Canvas 截图失败时保留错误并回退可用 DOM，不虚报视觉输入。
 - 未知、类型不匹配或结构损坏的步骤在场景校验和资源锁之前失败。
@@ -433,7 +443,7 @@ GET  /api/memory
 | Intent Agent | 关键词与规则 | 接入正式 NLU/LLM 和实体服务 |
 | DOM 感知 | 已实现当前页面实时 DOM/ARIA 采集 | 部署到真实业务页面并扩展语义标注 |
 | Canvas 像素采集 | 已通过 `canvas.toDataURL()` 实时截图并持久化 | 增加脱敏、保留策略和跨域页面采集能力 |
-| Canvas 节点语义 | 当前页面使用实时渲染器 Adapter | 陌生 Canvas 接入 OCR、检测模型或多模态视觉模型 |
+| Canvas 节点语义 | Renderer、文本重建、HTTP Vision 与 semantic_tree 已接入 | 在生产配置并评测具体 OCR、检测或多模态模型 |
 | 拓扑变化来源 | Scene Graph 数据比较 | 接入 WebSocket、消息总线或真实截图差分 |
 | KT5 场景化拓扑生成 | 已具备统一 Scene Graph 和接入底座 | 对接 KT5 生成器、布局策略和交互协议 |
 | 资源锁 | 单进程内存锁 | 接入分布式锁和统一任务调度 |
@@ -445,7 +455,7 @@ GET  /api/memory
 | 风险 | 影响 | 应对方向 |
 |---|---|---|
 | 真实业务页面尚未接入 | 无法验证页面适配成本 | 尽快选定一个真实页面完成端到端接入 |
-| Canvas 视觉模型尚未接入 | 截图可获取，但陌生 Canvas 无法识别节点语义 | 先接拓扑引擎数据，视觉模型作为降级路径 |
+| Canvas 模型尚未完成生产评测 | HTTP 调用链可用，但尚无真实像素准确率 | 配置生产 endpoint，并用原图与独立标注集评测 |
 | KT5 输入输出协议尚未最终确定 | 可能导致场景生成结果无法直接被 KT6 消费 | 优先确定统一 Scene Graph 和 Scene Event 协议 |
 | Intent 解析仍为规则 | 长尾表达和多轮对话能力有限 | 接入 LLM 并保留 required_slots 硬校验 |
 | 当前锁为单进程 | 多实例和多任务冲突不可控 | 引入任务队列、分布式锁和幂等键 |
@@ -570,7 +580,7 @@ http://127.0.0.1:8787/
 
 建议表述：
 
-> 本阶段完成了 KT6 LUI-GUI 协同 Runtime 的可运行工程原型。系统已经实现输入驱动的业务思维链选择、左右界面事件联动、人在环执行、运行记忆、界面缓存和拓扑变化重规划，并打通用户网速慢和 AP 离线两个业务场景。浏览器已经能够实时采集 DOM、Canvas 像素和渲染器 Scene，并通过 page_capture_id 驱动 Runtime。同时，系统已经形成统一 Scene Graph、Scene revision 和事件协议，具备接入 KT5 场景化拓扑生成能力。当前 KT5 生成器、陌生 Canvas 视觉模型、真实业务数据和设备操作仍待接入。
+> 本阶段完成了 KT6 LUI-GUI 协同 Runtime 的可运行工程原型。系统已经实现输入驱动的业务思维链选择、左右界面事件联动、人在环执行、运行记忆、界面缓存和拓扑变化重规划，并打通用户网速慢和 AP 离线两个业务场景。浏览器能够实时采集 DOM、Canvas 像素和渲染器 Scene；结构化文本与生产 HTTP Vision 均可生成统一 Scene Graph 和 DOM-like semantic_tree。当前仍需在生产配置具体视觉模型、真实业务数据和设备操作，并完成准确率与安全评测。
 
 不建议表述：
 
@@ -598,4 +608,4 @@ http://127.0.0.1:8787/
 -> KT5 场景化拓扑生成接入位
 ```
 
-当前项目已经具备进入真实业务联调和 KT5 能力接入阶段的工程基础。下一阶段是否能够形成业务价值，主要取决于实时采集框架能否部署到目标业务页面，以及 KT5 生成服务、真实数据接口、陌生 Canvas 视觉模型和受控执行接口能否按计划接入。
+当前项目已经具备进入真实业务联调和 KT5 能力接入阶段的工程基础。下一阶段是否能够形成业务价值，主要取决于生产视觉 endpoint 的准确率、实时采集框架在目标页面的适配成本，以及 KT5、真实数据接口和受控执行接口能否按计划接入。

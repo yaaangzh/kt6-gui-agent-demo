@@ -232,8 +232,14 @@ class KT6Runtime:
             self.step_handlers.validate_steps("action", action_playbook.steps)
         except (FileNotFoundError, KeyError, TypeError, ValueError):
             return False
+        if self._scene_is_explicitly_non_actionable(context.get("ui_perception")):
+            self._reject_non_actionable_scene(task)
+            return False
         scene_validation = self._validate_scene_for_action(task, payload.get("page_capture_id"))
         if scene_validation and not scene_validation["valid"]:
+            if scene_validation.get("reason") == "non_actionable_grounding":
+                self._reject_non_actionable_scene(task)
+                return False
             self._start_replan(task, scene_validation)
             return True
         resources = set(action_spec.get("resource_locks", []))
@@ -341,6 +347,16 @@ class KT6Runtime:
             current_capture_id=current_capture_id,
         )
         topology = validation["topology"]
+        if self._scene_is_explicitly_non_actionable(topology.get("ui_perception")):
+            self._record_perception(task, topology)
+            validation.update(
+                {
+                    "valid": False,
+                    "rebased": False,
+                    "reason": "non_actionable_grounding",
+                }
+            )
+            return validation
         current_meta = topology["perception_meta"]
         previous_revision = scene_ref.get("revision", 0)
         current_revision = current_meta["scene_revision"]
@@ -360,6 +376,23 @@ class KT6Runtime:
                     gui_action=f"Topology Sync：{validation['changes']['summary']}，{action}",
                 )
         return validation
+
+    @staticmethod
+    def _scene_is_explicitly_non_actionable(scene: Any) -> bool:
+        return isinstance(scene, dict) and scene.get("actionable_grounding") is False
+
+    def _reject_non_actionable_scene(self, task: Task) -> None:
+        self._emit(
+            task,
+            "runtime",
+            title="Runtime",
+            message=(
+                "当前界面感知结果仅完成语义重建，没有可执行的像素或业务对象定位；"
+                "已拒绝动作，需先获取可操作的 DOM、渲染器对象或经验证的截图定位。"
+            ),
+            action_allowed=False,
+            reason="non_actionable_grounding",
+        )
 
     def _start_replan(self, task: Task, validation: dict[str, Any]) -> None:
         topology = validation["topology"]

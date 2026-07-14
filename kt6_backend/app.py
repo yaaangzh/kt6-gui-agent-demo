@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import math
+import os
 from dataclasses import dataclass
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Type
 from urllib.parse import parse_qs, urlparse
 
+from .http_canvas_vision import HTTPTopologyVisionAdapter
 from .memory import SQLiteMemoryStore
 from .page_perception import PagePerceptionService, SQLitePageCaptureStore
 from .perception import HybridPerception
@@ -14,11 +17,78 @@ from .perception_runtime import PerceptionRuntime
 from .playbook_loader import PlaybookLoader
 from .runtime import KT6Runtime
 from .scene_store import SQLiteSceneStore
+from .topology_text_recognizer import TopologyTextRecognizer
 from .tools import MockBusinessTools
+from .vision_recognition import CanvasVisionAdapter
 
 
 ROOT = Path(__file__).resolve().parent.parent
 DEMO_DIR = ROOT / "demo"
+VISION_ENDPOINT_ENV = "KT6_VISION_ENDPOINT"
+VISION_API_KEY_ENV = "KT6_VISION_API_KEY"
+VISION_TIMEOUT_ENV = "KT6_VISION_TIMEOUT_SECONDS"
+DEFAULT_VISION_TIMEOUT_SECONDS = 30.0
+MAX_VISION_TIMEOUT_SECONDS = 300.0
+MAX_JSON_REQUEST_BYTES = 32 * 1024 * 1024
+
+
+class RequestBodyTooLarge(ValueError):
+    pass
+
+
+def _optional_env(name: str) -> str | None:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+def _create_canvas_vision_from_env() -> CanvasVisionAdapter | None:
+    """Build the production vision adapter without exposing secret config."""
+
+    endpoint = _optional_env(VISION_ENDPOINT_ENV)
+    api_key = _optional_env(VISION_API_KEY_ENV)
+    timeout_text = _optional_env(VISION_TIMEOUT_ENV)
+
+    if endpoint is None:
+        configured_companions = [
+            name
+            for name, value in (
+                (VISION_API_KEY_ENV, api_key),
+                (VISION_TIMEOUT_ENV, timeout_text),
+            )
+            if value is not None
+        ]
+        if configured_companions:
+            names = ", ".join(configured_companions)
+            raise ValueError(
+                f"{VISION_ENDPOINT_ENV} is required when {names} is configured"
+            )
+        return None
+
+    timeout_seconds = DEFAULT_VISION_TIMEOUT_SECONDS
+    if timeout_text is not None:
+        try:
+            timeout_seconds = float(timeout_text)
+        except ValueError:
+            raise ValueError(
+                f"{VISION_TIMEOUT_ENV} must be a finite number in (0, "
+                f"{MAX_VISION_TIMEOUT_SECONDS:g}]"
+            ) from None
+        if not math.isfinite(timeout_seconds) or not (
+            0 < timeout_seconds <= MAX_VISION_TIMEOUT_SECONDS
+        ):
+            raise ValueError(
+                f"{VISION_TIMEOUT_ENV} must be a finite number in (0, "
+                f"{MAX_VISION_TIMEOUT_SECONDS:g}]"
+            )
+
+    return HTTPTopologyVisionAdapter(
+        endpoint=endpoint,
+        api_key=api_key,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 @dataclass(frozen=True)
@@ -34,6 +104,7 @@ class AppServices:
 
 def create_services(root: Path = ROOT) -> AppServices:
     root = root.resolve()
+    canvas_vision = _create_canvas_vision_from_env()
     runtime_dir = root / "runtime_data"
     memory = SQLiteMemoryStore(runtime_dir / "kt6_memory.sqlite3")
     scene_store = SQLiteSceneStore(runtime_dir / "kt6_scene.sqlite3")
@@ -42,7 +113,12 @@ def create_services(root: Path = ROOT) -> AppServices:
         runtime_dir / "kt6_page_captures.sqlite3",
         runtime_dir / "page_captures",
     )
-    page_perception = PagePerceptionService(page_capture_store, perception_runtime)
+    page_perception = PagePerceptionService(
+        page_capture_store,
+        perception_runtime,
+        canvas_vision=canvas_vision,
+        text_recognizer=TopologyTextRecognizer(),
+    )
     tools = MockBusinessTools(
         root / "data",
         perception_runtime=perception_runtime,
@@ -84,10 +160,29 @@ class KT6Handler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def _body(self) -> dict:
-        length = int(self.headers.get("Content-Length", "0"))
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if content_type != "application/json":
+            raise ValueError("Content-Type must be application/json")
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError as exc:
+            raise ValueError("Content-Length must be an integer") from exc
+        if length < 0:
+            raise ValueError("Content-Length must not be negative")
+        if length > MAX_JSON_REQUEST_BYTES:
+            raise RequestBodyTooLarge("JSON request body exceeds 32 MB")
         if not length:
             return {}
-        return json.loads(self.rfile.read(length).decode("utf-8"))
+        raw = self.rfile.read(length)
+        if len(raw) != length:
+            raise ValueError("request body is incomplete")
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("request body must be valid UTF-8 JSON") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("request body must be a JSON object")
+        return payload
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -180,16 +275,30 @@ class KT6Handler(SimpleHTTPRequestHandler):
         path = urlparse(self.path).path
         services = self.app
         runtime = services.runtime
+        known_path = (
+            path in {"/api/perception/captures", "/api/tasks"}
+            or (path.startswith("/api/tasks/") and path.endswith("/actions"))
+        )
+        if not known_path:
+            self._json(404, {"error": "not found"})
+            return
+        try:
+            payload = self._body()
+        except RequestBodyTooLarge as exc:
+            self._json(413, {"error": str(exc)})
+            return
+        except ValueError as exc:
+            self._json(400, {"error": str(exc)})
+            return
         if path == "/api/perception/captures":
             try:
-                capture = services.page_perception.ingest(self._body())
+                capture = services.page_perception.ingest(payload)
             except (TypeError, ValueError) as exc:
                 self._json(400, {"error": str(exc)})
                 return
             self._json(201, capture)
             return
         if path == "/api/tasks":
-            payload = self._body()
             query = payload.get("query", "").strip()
             if not query:
                 self._json(400, {"error": "query is required"})
@@ -203,7 +312,6 @@ class KT6Handler(SimpleHTTPRequestHandler):
             return
         if path.startswith("/api/tasks/") and path.endswith("/actions"):
             task_id = path.split("/")[3]
-            payload = self._body()
             page_capture_id = payload.get("page_capture_id")
             if page_capture_id and not services.page_perception.get_capture(page_capture_id):
                 self._json(400, {"error": "page_capture_id is invalid"})
@@ -214,7 +322,6 @@ class KT6Handler(SimpleHTTPRequestHandler):
                 return
             self._json(202, {"accepted": True})
             return
-        self._json(404, {"error": "not found"})
 
 
 def create_handler(

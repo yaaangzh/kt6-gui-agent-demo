@@ -340,6 +340,33 @@ class RuntimeTest(unittest.TestCase):
                 self.assertEqual(task.locks, set())
                 self.assertEqual(runtime.resource_owners, {})
 
+    def test_action_rejects_explicitly_non_actionable_text_grounding(self):
+        tools = TrackingSceneValidationTools()
+        runtime = KT6Runtime(tools, PlaybookLoader(Path("playbooks")), event_delay=0)
+        task = runtime.create_task("用户张三昨天上午9:00反馈网速慢，帮忙看下是啥原因")
+        task = wait_for_state(runtime, task.task_id, "waiting_user")
+        task.context["ui_perception"]["actionable_grounding"] = False
+        task.context["ui_perception"]["mode"] = "topology_text_reconstruction"
+
+        accepted = runtime.execute_action(
+            task.task_id,
+            "execute_solution",
+            {"solution_id": "rf_optimization"},
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(task.state, "waiting_user")
+        self.assertEqual(tools.scene_validation_calls, 0)
+        self.assertEqual(task.locks, set())
+        self.assertEqual(runtime.resource_owners, {})
+        self.assertTrue(
+            any(
+                event.payload.get("reason") == "non_actionable_grounding"
+                and event.payload.get("action_allowed") is False
+                for event in task.events
+            )
+        )
+
     def test_task_snapshots_are_thread_safe_and_detached(self):
         task = Task(query="snapshot")
         self.runtime.tasks[task.task_id] = task
