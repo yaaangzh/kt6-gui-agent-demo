@@ -1,10 +1,13 @@
 import copy
 import json
 from pathlib import Path
+import shutil
 import threading
+import tempfile
 import time
 import unittest
 
+from kt6_backend.memory import SQLiteMemoryStore
 from kt6_backend.playbook_loader import PlaybookLoader
 from kt6_backend.runtime import KT6Runtime
 from kt6_backend.tools import MockBusinessTools
@@ -38,6 +41,65 @@ class FailingStrategyTools(MockBusinessTools):
         raise RuntimeError(f"strategy backend unavailable for {ap_id}")
 
 
+class FailingDispatchTools(MockBusinessTools):
+    def dispatch_rf_strategy(self, strategy_id: str):
+        return {
+            "strategy_id": strategy_id,
+            "dispatch_status": "failed",
+            "message": "controller rejected strategy",
+        }
+
+
+class FailingPoeRestartTools(MockBusinessTools):
+    def restart_poe_port(self, switch_name: str, port: str, ap_id: str):
+        return {
+            "ap_id": ap_id,
+            "switch_name": switch_name,
+            "port": port,
+            "status": "failed",
+            "message": "switch rejected restart",
+        }
+
+
+class UnrecoveredExperienceTools(MockBusinessTools):
+    def verify_user_recovery(self, user: str):
+        return {
+            "user": user,
+            "experience_score": "poor",
+            "summary": "用户体验仍未恢复",
+        }
+
+
+class OfflineVerificationTools(MockBusinessTools):
+    def verify_ap_online(self, ap_id: str):
+        return {
+            "ap_id": ap_id,
+            "status": "offline",
+            "heartbeat": "missing",
+            "summary": "AP 仍离线",
+        }
+
+
+class AbnormalHeartbeatTools(MockBusinessTools):
+    def verify_ap_online(self, ap_id: str):
+        return {
+            "ap_id": ap_id,
+            "status": "online",
+            "heartbeat": "abnormal",
+            "summary": "AP 状态字段在线但心跳异常",
+        }
+
+
+class TrackingSceneValidationTools(MockBusinessTools):
+    def __init__(self):
+        super().__init__(Path("data"))
+        self.scene_validation_calls = 0
+
+    def validate_scene(self, scene_ref, current_capture_id=None):
+        self.scene_validation_calls += 1
+        return super().validate_scene(scene_ref, current_capture_id)
+
+
 class RuntimeTest(unittest.TestCase):
     def setUp(self):
         self.runtime = KT6Runtime(
@@ -45,6 +107,32 @@ class RuntimeTest(unittest.TestCase):
             PlaybookLoader(Path("playbooks")),
             event_delay=0,
         )
+
+    def assert_failed_without_completion(self, runtime, task_id, failed_step):
+        task = wait_for_state(runtime, task_id, "failed")
+        action_steps = task.context.get("executed_steps", {}).get("action", [])
+        self.assertNotIn(failed_step, action_steps)
+        self.assertEqual(task.locks, set())
+        self.assertEqual(runtime.resource_owners, {})
+        self.assertFalse(
+            any(
+                event.type == "runtime_state"
+                and event.payload.get("runtime_state") == "completed"
+                for event in task.events
+            )
+        )
+        self.assertFalse(
+            any(
+                event.payload.get("gui_action", "").startswith("左侧完成态")
+                for event in task.events
+            )
+        )
+        return task
+
+    def copy_playbooks(self, root):
+        target = Path(root) / "playbooks"
+        shutil.copytree(Path("playbooks"), target)
+        return target
 
     def test_diagnosis_reaches_waiting_user_with_playbook_events(self):
         task = self.runtime.create_task("用户张三昨天上午9:00反馈网速慢，帮忙看下是啥原因")
@@ -170,6 +258,88 @@ class RuntimeTest(unittest.TestCase):
             )
         self.assertEqual(action_task.state, "created")
 
+    def test_diagnosis_preflight_rejects_late_unknown_step_before_side_effects(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            playbook_dir = self.copy_playbooks(temp_dir)
+            path = playbook_dir / "user_experience_assurance.json"
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["steps"].append(
+                {
+                    "id": "unknown_diagnosis",
+                    "name": "Unknown diagnosis",
+                    "type": "runtime",
+                    "state": "reasoning",
+                }
+            )
+            path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            runtime = KT6Runtime(
+                MockBusinessTools(Path("data")),
+                PlaybookLoader(playbook_dir),
+                event_delay=0,
+            )
+
+            task = runtime.create_task("用户张三昨天上午9:00反馈网速慢，帮忙看下是啥原因")
+            task = wait_for_state(runtime, task.task_id, "failed")
+
+            self.assertEqual(task.context, {})
+            self.assertFalse(any(event.type in {"chat", "ui", "solutions"} for event in task.events))
+
+    def test_action_preflight_rejects_unknown_step_before_scene_validation_or_lock(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            playbook_dir = self.copy_playbooks(temp_dir)
+            path = playbook_dir / "rf_optimization.json"
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["steps"].append(
+                {
+                    "id": "unknown_action",
+                    "name": "Unknown action",
+                    "type": "runtime",
+                    "state": "executing",
+                }
+            )
+            path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            tools = TrackingSceneValidationTools()
+            runtime = KT6Runtime(tools, PlaybookLoader(playbook_dir), event_delay=0)
+            task = runtime.create_task("用户张三昨天上午9:00反馈网速慢，帮忙看下是啥原因")
+            task = wait_for_state(runtime, task.task_id, "waiting_user")
+
+            accepted = runtime.execute_action(
+                task.task_id,
+                "execute_solution",
+                {"solution_id": "rf_optimization"},
+            )
+
+            self.assertFalse(accepted)
+            self.assertEqual(task.state, "waiting_user")
+            self.assertEqual(tools.scene_validation_calls, 0)
+            self.assertEqual(task.locks, set())
+            self.assertEqual(runtime.resource_owners, {})
+
+    def test_action_preflight_rejects_non_mapping_steps_without_side_effects(self):
+        for invalid_step in (None, "not-a-step"):
+            with self.subTest(invalid_step=invalid_step), tempfile.TemporaryDirectory() as temp_dir:
+                playbook_dir = self.copy_playbooks(temp_dir)
+                path = playbook_dir / "rf_optimization.json"
+                data = json.loads(path.read_text(encoding="utf-8"))
+                tools = TrackingSceneValidationTools()
+                runtime = KT6Runtime(tools, PlaybookLoader(playbook_dir), event_delay=0)
+                task = runtime.create_task("用户张三昨天上午9:00反馈网速慢，帮忙看下是啥原因")
+                task = wait_for_state(runtime, task.task_id, "waiting_user")
+                data["steps"].append(invalid_step)
+                path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+                accepted = runtime.execute_action(
+                    task.task_id,
+                    "execute_solution",
+                    {"solution_id": "rf_optimization"},
+                )
+
+                self.assertFalse(accepted)
+                self.assertEqual(task.state, "waiting_user")
+                self.assertEqual(tools.scene_validation_calls, 0)
+                self.assertEqual(task.locks, set())
+                self.assertEqual(runtime.resource_owners, {})
+
     def test_task_snapshots_are_thread_safe_and_detached(self):
         task = Task(query="snapshot")
         self.runtime.tasks[task.task_id] = task
@@ -229,6 +399,87 @@ class RuntimeTest(unittest.TestCase):
 
         self.assertEqual(task.locks, {unrelated_resource})
         self.assertEqual(runtime.resource_owners, {unrelated_resource: task.task_id})
+
+    def test_failed_strategy_dispatch_never_completes(self):
+        runtime = KT6Runtime(
+            FailingDispatchTools(Path("data")),
+            PlaybookLoader(Path("playbooks")),
+            event_delay=0,
+        )
+        task = runtime.create_task("用户张三昨天上午9:00反馈网速慢，帮忙看下是啥原因")
+        wait_for_state(runtime, task.task_id, "waiting_user")
+
+        self.assertTrue(
+            runtime.execute_action(
+                task.task_id,
+                "execute_solution",
+                {"solution_id": "rf_optimization"},
+            )
+        )
+        task = self.assert_failed_without_completion(runtime, task.task_id, "dispatch_strategy")
+        self.assertEqual(task.context["dispatch"]["dispatch_status"], "failed")
+
+    def test_failed_poe_restart_never_completes(self):
+        runtime = KT6Runtime(
+            FailingPoeRestartTools(Path("data")),
+            PlaybookLoader(Path("playbooks")),
+            event_delay=0,
+        )
+        task = runtime.create_task("AP3 昨晚一直离线，帮我看下")
+        wait_for_state(runtime, task.task_id, "waiting_user")
+
+        self.assertTrue(
+            runtime.execute_action(
+                task.task_id,
+                "execute_solution",
+                {"solution_id": "restart_poe_port"},
+            )
+        )
+        task = self.assert_failed_without_completion(runtime, task.task_id, "restart_poe_port")
+        self.assertEqual(task.context["poe_action"]["status"], "failed")
+
+    def test_unrecovered_user_experience_never_completes_or_writes_success_memory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            memory = SQLiteMemoryStore(Path(temp_dir) / "memory.sqlite3")
+            runtime = KT6Runtime(
+                UnrecoveredExperienceTools(Path("data")),
+                PlaybookLoader(Path("playbooks")),
+                event_delay=0,
+                memory=memory,
+            )
+            task = runtime.create_task("用户张三昨天上午9:00反馈网速慢，帮忙看下是啥原因")
+            wait_for_state(runtime, task.task_id, "waiting_user")
+
+            self.assertTrue(
+                runtime.execute_action(
+                    task.task_id,
+                    "execute_solution",
+                    {"solution_id": "rf_optimization"},
+                )
+            )
+            task = self.assert_failed_without_completion(runtime, task.task_id, "verify_recovery")
+            self.assertEqual(task.context["recovery"]["experience_score"], "poor")
+            self.assertEqual(memory.list_memories(), [])
+
+    def test_ap_requires_online_status_and_normal_heartbeat_to_complete(self):
+        for tools_type in (OfflineVerificationTools, AbnormalHeartbeatTools):
+            with self.subTest(tools=tools_type.__name__):
+                runtime = KT6Runtime(
+                    tools_type(Path("data")),
+                    PlaybookLoader(Path("playbooks")),
+                    event_delay=0,
+                )
+                task = runtime.create_task("AP3 昨晚一直离线，帮我看下")
+                wait_for_state(runtime, task.task_id, "waiting_user")
+
+                self.assertTrue(
+                    runtime.execute_action(
+                        task.task_id,
+                        "execute_solution",
+                        {"solution_id": "restart_poe_port"},
+                    )
+                )
+                self.assert_failed_without_completion(runtime, task.task_id, "verify_ap_online")
 
     def test_resource_lock_rejects_overlapping_actions_across_tasks(self):
         runtime = KT6Runtime(

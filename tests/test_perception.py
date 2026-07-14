@@ -50,6 +50,43 @@ class PerceptionTest(unittest.TestCase):
         self.assertTrue(any(edge["type"] == "access" for edge in second["changes"]["removed_edges"]))
         self.assertIn("user_zhangsan", second["changes"]["blocking_business_ids"])
 
+    def test_link_status_change_invalidates_target_scene_reference(self):
+        topology = json.loads(Path("data/mock_topology.json").read_text(encoding="utf-8"))
+        target_link = next(
+            link
+            for link in topology["links"]
+            if link["source"] == "user_zhangsan" and link["target"] == "ap_001"
+        )
+        target_link["status"] = "up"
+        runtime = PerceptionRuntime()
+        first = runtime.resolve(topology)
+        scene_ref = {
+            "scene_key": first["meta"]["scene_key"],
+            "revision": first["meta"]["scene_revision"],
+            "target_ids": ["user_zhangsan", "ap_001"],
+        }
+
+        changed = copy.deepcopy(topology)
+        changed_link = next(
+            link
+            for link in changed["links"]
+            if link["source"] == "user_zhangsan" and link["target"] == "ap_001"
+        )
+        changed_link["status"] = "down"
+        second = runtime.resolve(changed)
+        validation = runtime.validate_result(scene_ref, second)
+
+        self.assertEqual(second["meta"]["cache_status"], "incremental")
+        self.assertEqual(second["changes"]["added_edges"], [])
+        self.assertEqual(second["changes"]["removed_edges"], [])
+        self.assertEqual(
+            second["changes"]["edge_attribute_changes"][0]["changes"],
+            {"status": {"from": "up", "to": "down"}},
+        )
+        self.assertFalse(validation["valid"])
+        self.assertEqual(validation["reason"], "target_topology_changed")
+        self.assertEqual(validation["blocking_targets"], ["ap_001", "user_zhangsan"])
+
 
 if __name__ == "__main__":
     unittest.main()

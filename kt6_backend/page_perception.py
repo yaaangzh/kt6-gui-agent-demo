@@ -308,6 +308,9 @@ class PagePerceptionService:
                 "client_height": round(float(item.get("client_height", 0)), 2),
                 "bbox": [round(float(value), 2) for value in item.get("bbox", [0, 0, 0, 0])],
             }
+            capture_error = str(item.get("capture_error", "")).strip()
+            if capture_error:
+                canvas["capture_error"] = capture_error[:500]
             data_url = item.get("data_url")
             if data_url:
                 try:
@@ -420,22 +423,39 @@ class PagePerceptionService:
             "url": page["url"],
             "canvases": copy.deepcopy(canvases),
         }
+        pixel_capture_available = any(canvas.get("screenshot_path") for canvas in canvases)
         if not adapter_scene:
+            if pixel_capture_available:
+                limitations = [
+                    "已捕获真实 Canvas 像素，但页面未提供语义适配器",
+                    "需要 OCR、目标检测或多模态视觉模型识别节点和关系",
+                ]
+            elif canvases:
+                limitations = [
+                    "检测到 Canvas，但本次像素截图不可用",
+                    "没有可供视觉模型识别节点和关系的截图输入",
+                ]
+            else:
+                limitations = [
+                    "页面未提供 Canvas 像素或语义适配器",
+                ]
             return {
-                "mode": "canvas_screenshot_capture",
+                "mode": "canvas_screenshot_capture" if pixel_capture_available else "canvas_capture_unavailable",
                 "input": input_payload,
-                "scene_type": "unrecognized_canvas_capture",
+                "scene_type": (
+                    "unrecognized_canvas_capture"
+                    if pixel_capture_available
+                    else "unavailable_canvas_capture"
+                ),
                 "object_count": 0,
                 "elements": [],
                 "business_object_bindings": {},
                 "relations": [],
                 "co_channel_relations": [],
                 "relation_count": 0,
-                "requires_vision_model": bool(canvases),
-                "limitations": [
-                    "已捕获真实 Canvas 像素，但页面未提供语义适配器",
-                    "需要 OCR、目标检测或多模态视觉模型识别节点和关系",
-                ],
+                "pixel_capture_available": pixel_capture_available,
+                "requires_vision_model": pixel_capture_available,
+                "limitations": limitations,
             }
 
         elements = []
@@ -487,11 +507,19 @@ class PagePerceptionService:
                 "height": adapter_scene.get("canvas", {}).get("height", 0),
                 "view_transform": copy.deepcopy(adapter_scene.get("view_transform", {})),
             },
+            "pixel_capture_available": pixel_capture_available,
             "requires_vision_model": False,
-            "limitations": [
-                "Canvas 像素来自浏览器实时截图",
-                "节点语义来自页面渲染器适配器，不是视觉模型推断",
-            ],
+            "limitations": (
+                [
+                    "Canvas 像素来自浏览器实时截图",
+                    "节点语义来自页面渲染器适配器，不是视觉模型推断",
+                ]
+                if pixel_capture_available
+                else [
+                    "本次 Canvas 像素截图不可用",
+                    "节点语义来自页面渲染器适配器，不是视觉模型推断",
+                ]
+            ),
         }
 
     def _select_scene(self, dom_scene: dict[str, Any], canvas_scene: dict[str, Any]) -> dict[str, Any]:
@@ -499,6 +527,8 @@ class PagePerceptionService:
             return canvas_scene
         if dom_scene["business_object_bindings"]:
             return dom_scene
+        if canvas_scene.get("requires_vision_model"):
+            return canvas_scene
         if dom_scene["object_count"]:
             return dom_scene
         return canvas_scene
@@ -510,15 +540,24 @@ class PagePerceptionService:
         selected: dict[str, Any],
     ) -> dict[str, Any]:
         if selected["mode"] == "canvas_renderer_adapter":
-            reason = "页面提供 Canvas 渲染器语义数据，同时保留真实像素截图用于校验"
+            if selected.get("pixel_capture_available"):
+                reason = "页面提供 Canvas 渲染器语义数据，同时保留真实像素截图用于校验"
+            else:
+                reason = "页面提供 Canvas 渲染器语义数据，但本次像素截图不可用"
         elif selected["mode"] == "live_dom_snapshot":
-            reason = "使用浏览器实时 DOM/ARIA 元素；Canvas 语义不可用时不虚构节点"
-        else:
+            if canvas_scene["input"].get("canvases") and not canvas_scene.get("pixel_capture_available"):
+                reason = "Canvas 像素截图不可用，使用浏览器实时 DOM/ARIA 元素"
+            else:
+                reason = "使用浏览器实时 DOM/ARIA 元素；Canvas 语义不可用时不虚构节点"
+        elif selected.get("pixel_capture_available"):
             reason = "仅捕获到 Canvas 像素，等待视觉模型补充语义识别"
+        else:
+            reason = "检测到 Canvas，但本次像素截图不可用，无法进行视觉语义识别"
         return {
             "reason": reason,
             "dom_element_count": dom_scene["object_count"],
             "canvas_count": len(canvas_scene["input"].get("canvases", [])),
+            "canvas_pixel_capture_available": canvas_scene.get("pixel_capture_available", False),
             "canvas_adapter_available": canvas_scene["mode"] == "canvas_renderer_adapter",
             "selected_mode": selected["mode"],
             "requires_vision_model": selected.get("requires_vision_model", False),

@@ -352,18 +352,18 @@ Runtime 在用户执行方案前重新校验 Scene revision：
 
 | 目录 | 数量 | 主要内容 |
 |---|---:|---|
-| `kt6_backend/` | 15 个模块 | Runtime、Agent、Router、Memory、Page Perception、Cache、Change Detector |
+| `kt6_backend/` | 16 个模块 | Runtime、Agent、Router、Step Registry、Memory、Page Perception、Cache、Change Detector |
 | `playbooks/` | 4 个文件 | 两个诊断 Playbook、两个动作 Playbook |
 | `data/` | 8 份数据 | 当前业务场景 Mock 数据 |
 | `demo/` | 3 个文件 | 事件驱动的 LUI-GUI 交互界面 |
-| `tests/` | 7 个模块 | Runtime、路由、感知、页面采集、缓存、记忆和 Playbook 测试 |
+| `tests/` | 9 个模块 | Runtime、步骤注册、拓扑变化、路由、感知、页面采集、缓存、记忆和 Playbook 测试 |
 
 ### 6.2 设计文档
 
 - `DESIGN.md`：KT6 总体设计、Runtime 和 Agent 分工、跨 KT 协作、多任务与原子操作。
 - `KT6_SCENARIO_FLOW.md`：张三网速慢场景的完整业务链和左右联动细化。
-- `PROJECT_STATUS.md`：项目基础状态说明。
-- `README.md`：工程结构、运行方式、API 和 Mock 替换入口。
+- `README.md`：当前工程能力、运行方式、API、真实与 Mock 边界说明。
+- `7.13.md`：当前阶段进展的简版汇报材料。
 
 ### 6.3 Runtime API
 
@@ -393,7 +393,7 @@ GET  /api/memory
 | 可执行 Playbook | 4 个 |
 | 注册业务工具 | 15 个 |
 | Runtime 状态 | 13 个 |
-| 自动化测试 | 21 项全部通过 |
+| 自动化测试 | 55 项全部通过 |
 | 业务诊断场景 | 2 个 |
 | 动作执行场景 | 2 个 |
 | 浏览器控制台错误 | 0 |
@@ -414,6 +414,10 @@ GET  /api/memory
 - 浏览器实时 Canvas 截图落盘并生成 Page Capture。
 - Runtime 使用 `page_capture_id`，而不是重新读取固定拓扑。
 - 未知 Canvas 正确标记为需要视觉模型，不生成虚假业务绑定。
+- Canvas 截图失败时保留错误并回退可用 DOM，不虚报视觉输入。
+- 未知、类型不匹配或结构损坏的步骤在场景校验和资源锁之前失败。
+- 策略下发、PoE 重启、体验恢复或 AP 心跳校验失败时不会误报完成。
+- 链路状态和并行链路属性变化能够阻断旧方案并触发重新规划。
 
 ## 8. 当前 Mock 范围和真实边界
 

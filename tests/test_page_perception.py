@@ -122,6 +122,65 @@ class PagePerceptionTest(unittest.TestCase):
         self.assertTrue(capture["summary"]["requires_vision_model"])
         self.assertEqual(capture["scene"]["business_object_bindings"], {})
 
+    def test_accessible_canvas_dom_does_not_hide_missing_canvas_semantics(self):
+        payload = live_capture_payload()
+        payload["adapter_scene"] = None
+
+        capture = self.service.ingest(payload)
+        result = self.service.get_result(capture["capture_id"])
+
+        self.assertEqual(capture["summary"]["selected_mode"], "canvas_screenshot_capture")
+        self.assertTrue(capture["summary"]["requires_vision_model"])
+        self.assertEqual(capture["scene"]["business_object_bindings"], {})
+        dom_candidate = result["perception"]["candidates"]["dom"]
+        self.assertEqual(dom_candidate["object_count"], 1)
+        self.assertEqual(dom_candidate["elements"][0]["label"], "不规则 canvas 网络拓扑画布")
+
+    def test_failed_canvas_capture_falls_back_to_dom_and_preserves_errors(self):
+        payload = live_capture_payload()
+        payload["adapter_scene"] = None
+        frontend_failure = copy.deepcopy(payload["canvases"][0])
+        frontend_failure.pop("data_url")
+        frontend_failure["capture_error"] = "SecurityError: canvas is tainted"
+        backend_failure = copy.deepcopy(payload["canvases"][0])
+        backend_failure["canvas_id"] = "unsupported-canvas"
+        backend_failure["data_url"] = "data:image/gif;base64,AAAA"
+        payload["canvases"] = [frontend_failure, backend_failure]
+
+        capture = self.service.ingest(payload)
+        result = self.service.get_result(capture["capture_id"])
+
+        self.assertEqual(capture["summary"]["selected_mode"], "live_dom_snapshot")
+        self.assertFalse(capture["summary"]["requires_vision_model"])
+        canvas_candidate = result["perception"]["candidates"]["canvas"]
+        self.assertEqual(canvas_candidate["mode"], "canvas_capture_unavailable")
+        self.assertFalse(canvas_candidate["pixel_capture_available"])
+        self.assertFalse(canvas_candidate["requires_vision_model"])
+        errors = [item.get("capture_error") for item in canvas_candidate["input"]["canvases"]]
+        self.assertEqual(
+            errors,
+            ["SecurityError: canvas is tainted", "unsupported canvas data URL"],
+        )
+        self.assertTrue(all("screenshot_path" not in item for item in canvas_candidate["input"]["canvases"]))
+        self.assertIn("截图不可用", result["perception"]["decision"]["reason"])
+        self.assertTrue(any("截图不可用" in item for item in canvas_candidate["limitations"]))
+        self.assertFalse(any("已捕获真实 Canvas 像素" in item for item in canvas_candidate["limitations"]))
+
+    def test_renderer_adapter_does_not_claim_pixels_when_screenshot_failed(self):
+        payload = live_capture_payload()
+        payload["canvases"][0].pop("data_url")
+        payload["canvases"][0]["capture_error"] = "SecurityError: canvas is tainted"
+
+        capture = self.service.ingest(payload)
+        result = self.service.get_result(capture["capture_id"])
+
+        self.assertEqual(capture["summary"]["selected_mode"], "canvas_renderer_adapter")
+        self.assertEqual(capture["summary"]["canvas_screenshot_count"], 0)
+        self.assertFalse(capture["scene"]["pixel_capture_available"])
+        self.assertIn("截图不可用", result["perception"]["decision"]["reason"])
+        self.assertIn("截图不可用", capture["scene"]["limitations"][0])
+        self.assertNotIn("像素来自浏览器实时截图", capture["scene"]["limitations"][0])
+
     def test_runtime_uses_live_page_capture_and_detects_movement(self):
         first = self.service.ingest(live_capture_payload())
         tools = MockBusinessTools(
