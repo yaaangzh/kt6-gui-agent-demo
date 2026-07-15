@@ -1,0 +1,4 @@
+# Optional, offline-capable single-image topology perception runtime.
+# Install only when KT6_VISION_DRIVER=local_cv_ocr is used.
+rapidocr==3.9.1
+onnxruntime==1.27.0

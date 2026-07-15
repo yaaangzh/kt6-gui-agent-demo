@@ -4,7 +4,7 @@
 
 这不是纯前端动画演示：前端负责采集页面和呈现事件，后端负责意图路由、任务状态、业务步骤、方案授权、资源锁、场景校验、执行结果与运行记忆。
 
-当前阶段结论：**KT6 核心架构和端到端 PoC 已完成，真实业务系统、纯视觉 Canvas 模型和真实设备下发尚未接入。**
+当前阶段结论：**KT6 核心架构、端到端 PoC 和三种 Canvas 像素识别驱动已完成；真实业务系统、真实图片准确率评测和真实设备下发尚未完成。**
 
 ## 已实现能力
 
@@ -17,12 +17,12 @@
 | Human-In-The-Loop | 诊断完成后由用户确认方案，动作不能绕过授权直接执行 |
 | 执行安全 | `solution_id`、场景版本、资源锁、执行前 checkpoint 与动作后置条件校验 |
 | 步骤扩展 | 按诊断/动作 phase 和 step ID 注册处理器，校验步骤 type、state 与必填字段 |
-| 页面感知 | DOM/ARIA、Canvas 截图、渲染器 Scene、拓扑文本重建及生产 HTTP CanvasVision Adapter |
+| 页面感知 | DOM/ARIA、Canvas 截图、渲染器 Scene、拓扑文本重建及 Local CV/HTTP/CodeAgent CanvasVision Adapter |
 | 感知缓存 | Scene Graph 缓存、`scene_revision`、`HIT/MISS/INCREMENTAL` |
 | 拓扑变化检测 | 节点、位置、链路增删及链路语义属性变化检测；关键变化触发重规划 |
 | 运行记忆 | SQLite 持久化任务、事件、检查点、场景和业务处理结果 |
 | KT5 接入基础 | 感知拓扑与生成拓扑共用统一 Scene Graph 契约 |
-| 自动化测试 | 当前 102 项测试通过 |
+| 自动化测试 | 当前 136 项测试通过 |
 
 ## 业务场景
 
@@ -112,13 +112,13 @@ flowchart LR
 | DOM 感知 | 按钮、表格、表单等可访问 DOM/ARIA 的页面 | 已完成第一期 |
 | Canvas Renderer Adapter | 可以读取图引擎、Store、接口或渲染前 `nodes/edges` 的 Canvas | 当前 Demo 已使用 |
 | Topology Text Recognizer | 人工 ASCII 或外部 OCR 已转写出的结构化拓扑文本 | 已完成首个严格样例 |
-| Canvas Vision Adapter | 只能获得截图、图片、远程桌面或封闭 Canvas | 生产 HTTP Adapter、严格协议和 CLI 已完成；外部模型服务由环境配置 |
+| Canvas Vision Adapter | 只能获得截图、图片、远程桌面或封闭 Canvas | 本地 RapidOCR/OpenCV、HTTP 服务与 CodeAgent read-tool 三种驱动、严格协议和 pixels-only CLI 已完成 |
 
 当前 Canvas 截图由浏览器实时采集，但 Demo 中的节点语义主要来自 `window.__KT6_PAGE_ADAPTER__` 暴露的渲染器数据，其底层业务拓扑仍为 Mock。遇到只有像素、没有内部语义的 Canvas 时，后端会明确返回 `requires_vision_model=true`，不会伪造节点绑定；若 `toDataURL()` 失败，则保留采集错误并回退可用 DOM，也不会虚报已有视觉输入。
 
 结构化拓扑文本现在可以重建节点、关系、视觉组、证据和冲突信息，但其 provenance 会被强制标记为非像素、不可执行。文本坐标不能用于 GUI 点击；Runtime 会拒绝 `actionable_grounding=false` 的动作。当前企业拓扑黄金样例稳定识别 22 个设备和 19 条明确关系，详细规则见 [拓扑界面感知测试](TOPOLOGY_PERCEPTION_TEST.md)。
 
-生产图片可以通过 `HTTPTopologyVisionAdapter` 发送给外部 OCR、目标检测或多模态服务，并生成 `elements + relations + semantic_tree`。使用 `KT6_VISION_ENDPOINT`、`KT6_VISION_API_KEY` 和 `KT6_VISION_TIMEOUT_SECONDS` 配置；具体服务契约和 pixels-only 测试命令见 [生产拓扑图片识别接入](PRODUCTION_TOPOLOGY_VISION.md)。视觉业务 ID 未经资产库核验前固定为 analysis-only。
+生产图片有三条可选路径：`LocalCVTopologyVisionAdapter` 在 KT6 进程内使用本地 RapidOCR ONNX 与 OpenCV，完全不启动 Agent，也不调用外部 API；`HTTPTopologyVisionAdapter` 把图片发送给外部 OCR、目标检测或多模态服务；`CodeAgentCanvasVisionAdapter` 启动本机 `codeagent` 并强制其使用 read 工具读取已验签的临时图片。本地单图模式只需安装可选依赖并设置 `KT6_VISION_DRIVER=local_cv_ocr`，不得同时设置 endpoint、key、CodeAgent 或视觉 timeout 变量。三条路径共用严格的 `TopologyVisionContract`，并生成 `elements + relations + semantic_tree`。具体配置和 pixels-only 测试命令见 [生产拓扑图片识别接入](PRODUCTION_TOPOLOGY_VISION.md)。视觉业务 ID 未经资产库核验前固定为 analysis-only。
 
 Browser Use 后续可以作为浏览器会话、DOM 获取、截图和通用 GUI 操作底座，但其内置视觉不能单独替代拓扑感知：稳定的节点/链路重建、业务 ID 绑定、跨帧对象一致性和拓扑版本判断仍需要 Renderer Adapter 或专用 Canvas Vision Adapter。
 
@@ -157,7 +157,7 @@ Browser Use 后续可以作为浏览器会话、DOM 获取、截图和通用 GUI
 ### 环境要求
 
 - Python 3.10 或更高版本。
-- 当前仅使用 Python 标准库，无需安装第三方依赖。
+- KT6 核心链路仅使用 Python 标准库；启用不依赖 Agent 的本地单图识别时，执行 `python -m pip install -r requirements-local-vision.txt` 安装 RapidOCR ONNX 与 OpenCV 运行依赖。
 - Chrome、Edge 或其他现代浏览器。
 
 ### 启动
@@ -250,7 +250,7 @@ runtime_data/
 - Runtime 状态流转、事件、锁、checkpoint、持久化是真实实现。
 - DOM、Canvas 像素采集和 Scene 缓存是真实实现。
 - Demo 拓扑业务语义、指标、根因输入和设备动作结果仍是 Mock。
-- CanvasVision HTTP 接入已经具备，但外部模型服务及准确率验证、企业鉴权、真实设备下发和生产级回滚尚未完成。
+- CanvasVision 本地 RapidOCR/OpenCV、HTTP 与 CodeAgent read-tool 接入已经具备，但真实图片准确率验证、企业鉴权、真实设备下发和生产级回滚尚未完成。
 
 接入真实系统时，应保留 Runtime 与 Playbook，替换 `kt6_backend/tools.py` 中的业务适配实现，并通过 `kt6_backend/tool_registry.py` 注册真实工具。
 
@@ -267,7 +267,10 @@ kt6_backend/
   tool_registry.py             工具注册表
   tools.py                     当前 Mock 业务适配器
   page_perception.py           实时页面采集、持久化和 Scene 规范化
+  local_cv_canvas_vision.py    本地 RapidOCR/OpenCV 单图片视觉 Adapter
+  codeagent_canvas_vision.py   本机 CodeAgent read-tool 视觉 Adapter
   http_canvas_vision.py        生产 HTTP 视觉 Adapter 与严格输入输出协议
+  topology_vision_contract.py  三种视觉驱动共用的图片与拓扑严格契约
   topology_image_cli.py        pixels-only 图片验收命令行工具
   topology_text_recognizer.py  Unicode 拓扑文本的保守语义重建
   vision_recognition.py        CanvasVision 帧与适配器协议
@@ -290,7 +293,7 @@ tests/                         自动化测试
 python -m unittest discover -s tests
 ```
 
-当前覆盖 102 项测试，包括意图路由、缺参澄清、动作授权、Playbook 预检、步骤注册、资源锁、执行后置条件、运行记忆、页面采集失败回退、文本拓扑重建、HTTP Vision 契约/TLS/图片完整性、pixels-only CLI、DOM-like 语义树、不可执行 grounding 门禁、缓存命中、并行链路变化、重新绑定和重新规划。
+当前覆盖 136 项测试，包括意图路由、缺参澄清、动作授权、Playbook 预检、步骤注册、资源锁、执行后置条件、运行记忆、页面采集失败回退、DOM/ARIA `ui_tree`、文本拓扑重建、本地 RapidOCR/OpenCV、HTTP/CodeAgent Vision、read 工具像素证据、共享契约、TLS/图片完整性、pixels-only CLI、DOM-like 语义树、不可执行 grounding 门禁、缓存命中、并行链路变化、重新绑定和重新规划。
 
 ## 项目文档
 

@@ -5,11 +5,12 @@
 > 二次深查：2026-07-13（30 测试通过，全量代码逐行验证）
 > 三次补强：2026-07-14（55 测试通过，步骤注册与负路径安全补强）
 > 四次补强：2026-07-14（72 测试通过，拓扑文本感知与不可执行 grounding 门禁）
-> 五次补强：2026-07-14（102 测试通过，生产 HTTP Vision 与 pixels-only 验收链路）
+> 六次补强：2026-07-15（120 测试通过，生产 HTTP/CodeAgent Vision 与 pixels-only 验收链路）
+> 七次补强：2026-07-15（136 测试通过，本地 CV/OCR 单图识别与 DOM/ARIA ui_tree）
 
 ---
 
-## 最新验证矩阵（2026-07-14 五次补强）
+## 最新验证矩阵（2026-07-15 七次补强）
 
 | 项目 | 结论 | 验证方法 |
 |---|---|---|
@@ -31,8 +32,11 @@
 | 新问题-12 无效视觉坐标获得执行资格 | ✅ 已修复，边界、尺寸、置信度和单 Canvas 校验 | `page_perception.py` + `test_page_perception.py` |
 | 新问题-13 生产环境无实际 Vision 实现 | ✅ 已修复，可配置 HTTPS Adapter + 严格 vendor-neutral 契约 | `http_canvas_vision.py` + 专项测试 |
 | 新问题-14 Demo Renderer 掩盖像素测试 | ✅ 已修复，pixels-only CLI 强制空 DOM/Renderer/Text 并核对 SHA | `topology_image_cli.py` + 专项测试 |
-| 新问题-15 模型 ID 未核验却可执行 | ✅ 已修复，HTTP Vision 固定 analysis-only + Runtime 门禁 | Vision Adapter + PagePerception + Runtime |
+| 新问题-15 模型 ID 未核验却可执行 | ✅ 已修复，本地 CV/HTTP/CodeAgent Vision 固定 analysis-only + Runtime 门禁 | Vision Adapter + PagePerception + Runtime |
 | 新问题-16 图片/请求体资源滥用 | ✅ 已补强，图片头尺寸/像素/字节与 JSON 请求体上限 | HTTP Adapter + CLI + `app.py` |
+| 新问题-17 工具增强模型未读图却返回 JSON | ✅ 已修复，CodeAgent 专用只读 Agent + 逐帧成功 `read` 事件和精确临时路径校验 | `codeagent_canvas_vision.py` + 专项测试 |
+| 新问题-18 单图像素识别完全依赖 Agent | ✅ 已修复，新增本地 RapidOCR/ONNXRuntime + OpenCV 驱动，无 Agent、外部 API 或密钥 | `local_cv_canvas_vision.py` + 专项测试 |
+| 新问题-19 DOM 感知只有扁平数组 | ✅ 已修复，Demo 采集 parent/depth/order，后端生成独立 `ui_tree` 且不制造拓扑边 | `script.js` + `page_perception.py` + 专项测试 |
 
 ---
 
@@ -78,13 +82,15 @@
 
 ---
 
-## 测试覆盖（102/102 通过）
+## 测试覆盖（136/136 通过）
 
 ```
-test_app.py                      10 tests ─ 工厂/WAL + Vision env + 请求体上限
-test_http_canvas_vision.py       15 tests ─ TLS/协议/图片完整性/响应与信任边界
+test_app.py                      15 tests ─ 工厂/WAL + Local CV/HTTP/CodeAgent Vision env + 请求体上限
+test_codeagent_canvas_vision.py  11 tests ─ read 事件证据 + CLI/PagePerception 联测 + 严格拓扑输出
+test_http_canvas_vision.py       19 tests ─ 共享契约 + TLS/协议/图片完整性/响应与信任边界
+test_local_cv_canvas_vision.py   12 tests ─ RapidOCR 输出 + CV/表格关系 + PagePerception 联测 + 安全边界
 test_memory.py                    1 test  ─ 全链路持久化
-test_page_perception.py          17 tests ─ 实时采集 + semantic tree + provenance + fail-closed
+test_page_perception.py          19 tests ─ DOM ui_tree + 实时采集 + semantic tree + provenance + fail-closed
 test_perception.py                4 tests ─ DOM/Canvas hybrid + 缓存命中 + 增量 revision + 链路阻断
 test_playbook_loader.py           2 tests ─ 加载 + 列表
 test_router.py                    4 tests ─ 路由选择 + 排除 action playbook + 空 playbook 拒绝

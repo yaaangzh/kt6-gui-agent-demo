@@ -9,7 +9,9 @@ from pathlib import Path
 from typing import Type
 from urllib.parse import parse_qs, urlparse
 
+from .codeagent_canvas_vision import CodeAgentCanvasVisionAdapter
 from .http_canvas_vision import HTTPTopologyVisionAdapter
+from .local_cv_canvas_vision import LocalCVTopologyVisionAdapter
 from .memory import SQLiteMemoryStore
 from .page_perception import PagePerceptionService, SQLitePageCaptureStore
 from .perception import HybridPerception
@@ -24,10 +26,16 @@ from .vision_recognition import CanvasVisionAdapter
 
 ROOT = Path(__file__).resolve().parent.parent
 DEMO_DIR = ROOT / "demo"
+VISION_DRIVER_ENV = "KT6_VISION_DRIVER"
 VISION_ENDPOINT_ENV = "KT6_VISION_ENDPOINT"
 VISION_API_KEY_ENV = "KT6_VISION_API_KEY"
 VISION_TIMEOUT_ENV = "KT6_VISION_TIMEOUT_SECONDS"
+CODEAGENT_EXECUTABLE_ENV = "KT6_CODEAGENT_EXECUTABLE"
+CODEAGENT_AGENT_ENV = "KT6_CODEAGENT_AGENT"
 DEFAULT_VISION_TIMEOUT_SECONDS = 30.0
+DEFAULT_CODEAGENT_TIMEOUT_SECONDS = 120.0
+DEFAULT_CODEAGENT_EXECUTABLE = "codeagent"
+DEFAULT_CODEAGENT_AGENT = "kt6-topology-vision"
 MAX_VISION_TIMEOUT_SECONDS = 300.0
 MAX_JSON_REQUEST_BYTES = 32 * 1024 * 1024
 
@@ -44,14 +52,23 @@ def _optional_env(name: str) -> str | None:
     return value or None
 
 
-def _create_canvas_vision_from_env() -> CanvasVisionAdapter | None:
+def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | None:
     """Build the production vision adapter without exposing secret config."""
 
+    driver = _optional_env(VISION_DRIVER_ENV)
     endpoint = _optional_env(VISION_ENDPOINT_ENV)
     api_key = _optional_env(VISION_API_KEY_ENV)
     timeout_text = _optional_env(VISION_TIMEOUT_ENV)
+    codeagent_executable = _optional_env(CODEAGENT_EXECUTABLE_ENV)
+    codeagent_agent = _optional_env(CODEAGENT_AGENT_ENV)
 
-    if endpoint is None:
+    if driver is None and (codeagent_executable is not None or codeagent_agent is not None):
+        raise ValueError(
+            f"{VISION_DRIVER_ENV}=codeagent_cli is required when "
+            f"{CODEAGENT_EXECUTABLE_ENV} or {CODEAGENT_AGENT_ENV} is configured"
+        )
+
+    if driver is None and endpoint is None:
         configured_companions = [
             name
             for name, value in (
@@ -67,7 +84,36 @@ def _create_canvas_vision_from_env() -> CanvasVisionAdapter | None:
             )
         return None
 
-    timeout_seconds = DEFAULT_VISION_TIMEOUT_SECONDS
+    selected_driver = (driver or "http").strip().lower()
+    if selected_driver not in {"http", "codeagent_cli", "local_cv_ocr"}:
+        raise ValueError(
+            f"{VISION_DRIVER_ENV} must be http, codeagent_cli or local_cv_ocr"
+        )
+
+    if selected_driver == "local_cv_ocr":
+        conflicting = [
+            name
+            for name, value in (
+                (VISION_ENDPOINT_ENV, endpoint),
+                (VISION_API_KEY_ENV, api_key),
+                (VISION_TIMEOUT_ENV, timeout_text),
+                (CODEAGENT_EXECUTABLE_ENV, codeagent_executable),
+                (CODEAGENT_AGENT_ENV, codeagent_agent),
+            )
+            if value is not None
+        ]
+        if conflicting:
+            raise ValueError(
+                f"{', '.join(conflicting)} must not be configured for local_cv_ocr"
+            )
+        return LocalCVTopologyVisionAdapter()
+
+    default_timeout = (
+        DEFAULT_CODEAGENT_TIMEOUT_SECONDS
+        if selected_driver == "codeagent_cli"
+        else DEFAULT_VISION_TIMEOUT_SECONDS
+    )
+    timeout_seconds = default_timeout
     if timeout_text is not None:
         try:
             timeout_seconds = float(timeout_text)
@@ -84,6 +130,33 @@ def _create_canvas_vision_from_env() -> CanvasVisionAdapter | None:
                 f"{MAX_VISION_TIMEOUT_SECONDS:g}]"
             )
 
+    if selected_driver == "codeagent_cli":
+        conflicting = [
+            name
+            for name, value in (
+                (VISION_ENDPOINT_ENV, endpoint),
+                (VISION_API_KEY_ENV, api_key),
+            )
+            if value is not None
+        ]
+        if conflicting:
+            raise ValueError(
+                f"{', '.join(conflicting)} must not be configured for codeagent_cli"
+            )
+        return CodeAgentCanvasVisionAdapter(
+            workdir=Path(root).resolve(),
+            executable=codeagent_executable or DEFAULT_CODEAGENT_EXECUTABLE,
+            agent=codeagent_agent or DEFAULT_CODEAGENT_AGENT,
+            timeout_seconds=timeout_seconds,
+        )
+
+    if codeagent_executable is not None or codeagent_agent is not None:
+        raise ValueError(
+            f"{CODEAGENT_EXECUTABLE_ENV} and {CODEAGENT_AGENT_ENV} require "
+            f"{VISION_DRIVER_ENV}=codeagent_cli"
+        )
+    if endpoint is None:
+        raise ValueError(f"{VISION_ENDPOINT_ENV} is required for the http vision driver")
     return HTTPTopologyVisionAdapter(
         endpoint=endpoint,
         api_key=api_key,
@@ -104,7 +177,7 @@ class AppServices:
 
 def create_services(root: Path = ROOT) -> AppServices:
     root = root.resolve()
-    canvas_vision = _create_canvas_vision_from_env()
+    canvas_vision = _create_canvas_vision_from_env(root)
     runtime_dir = root / "runtime_data"
     memory = SQLiteMemoryStore(runtime_dir / "kt6_memory.sqlite3")
     scene_store = SQLiteSceneStore(runtime_dir / "kt6_scene.sqlite3")

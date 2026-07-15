@@ -172,18 +172,42 @@ function captureLiveDom() {
       "[data-business-id], [aria-label], button, input, textarea, select, [role]",
     ),
   ];
-  const elements = [];
-  candidates.slice(0, 400).forEach((element, index) => {
+  const visibleCandidates = [];
+  for (const element of candidates) {
     const rect = element.getBoundingClientRect();
     const style = window.getComputedStyle(element);
-    if (rect.width <= 0 || rect.height <= 0 || style.display === "none" || style.visibility === "hidden") return;
+    if (rect.width <= 0 || rect.height <= 0 || style.display === "none" || style.visibility === "hidden") continue;
+    visibleCandidates.push({ element, rect });
+    if (visibleCandidates.length >= 400) break;
+  }
+
+  // Resolve refs before parent links so hierarchy capture does not depend on
+  // whether an ancestor appeared earlier in the candidate selector list.
+  const refByElement = new Map();
+  visibleCandidates.forEach(({ element }, index) => {
+    refByElement.set(element, pageElementRef(element, index));
+  });
+
+  const elements = visibleCandidates.map(({ element, rect }, index) => {
+    let parent = element.parentElement;
+    while (parent && parent !== root && !refByElement.has(parent)) parent = parent.parentElement;
+    const parentRef = refByElement.get(parent) || "";
+    let depth = 0;
+    let ancestor = element;
+    while (ancestor && ancestor !== root) {
+      depth += 1;
+      ancestor = ancestor.parentElement;
+    }
     const ariaLabel = element.getAttribute("aria-label") || "";
     const placeholder = element.getAttribute("placeholder") || "";
     const visibleText = ["INPUT", "TEXTAREA", "SELECT"].includes(element.tagName)
       ? ""
       : (element.innerText || "").trim().replace(/\s+/g, " ").slice(0, 300);
-    elements.push({
-      ref: pageElementRef(element, index),
+    return {
+      ref: refByElement.get(element),
+      parent_ref: parentRef,
+      depth,
+      document_order: index,
       tag: element.tagName.toLowerCase(),
       role: element.getAttribute("role") || "",
       label: visibleText,
@@ -194,7 +218,7 @@ function captureLiveDom() {
       bbox: [rect.left, rect.top, rect.width, rect.height],
       disabled: Boolean(element.disabled),
       checked: Boolean(element.checked),
-    });
+    };
   });
   return { elements };
 }

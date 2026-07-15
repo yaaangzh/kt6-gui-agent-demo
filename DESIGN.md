@@ -54,7 +54,7 @@ KT6 的完整执行链路如下：
    管理跨页面、跨轮对话、跨任务的上下文。
 
 4. UI Perception & Grounding
-   将 GUI 页面、拓扑图、canvas、图片和组件转换为可交互元素树，并将业务动作映射到页面元素。
+   分别采集真实 DOM/ARIA UI Tree、业务对象图和图片语义投影，并在证据足够时将业务动作映射到页面元素。
 
 5. Business Object Grounding
    将业务对象与 GUI 对象绑定，例如 AP1 <-> 拓扑节点 <-> 表格行 <-> 指标数据 <-> 可执行动作。
@@ -146,9 +146,27 @@ actionable_grounding：该定位能否用于 GUI 副作用。
 
 对于拓扑图中的叙述性说明，识别器遵循“显式图形/表格事实优先，说明只作注释”的原则。例如表中出现但图中无连线的汇聚设备必须保留为孤立节点，不能根据“三层架构”文字自动补边。
 
-生产像素路径通过可配置的 `HTTPTopologyVisionAdapter` 调用外部 OCR、目标检测或多模态服务。远端只返回受约束的对象、像素框、置信度和关系；provenance 与执行资格由 PagePerception 强制生成。Scene Graph 另派生 `semantic_tree` 供 DOM-like 消费，但多父、环和并行边仍保留在 `relations/non_tree_relations` 中。
+生产像素路径提供三种驱动。`LocalCVTopologyVisionAdapter` 在 KT6 进程内使用 RapidOCR ONNX 与 OpenCV 做单图片识别，不依赖 Agent 或外部 API；`HTTPTopologyVisionAdapter` 调用外部 OCR、目标检测或多模态服务；`CodeAgentCanvasVisionAdapter` 通过本机 CodeAgent read 工具读图。三者只返回受约束的对象、像素框、置信度和关系，provenance 与执行资格由 PagePerception 强制生成。Scene Graph 另派生 `semantic_tree` 供 DOM-like 消费，但多父、环和并行边仍保留在 `relations/non_tree_relations` 中。
 
-视觉模型读出的业务 ID 默认不等于资产库已绑定对象。HTTP Vision 因此固定为 analysis-only；只有后续完成生产资产库 exact binding、场景时效校验和独立授权，才允许进入可执行 grounding。
+图片识别出的业务 ID 默认不等于资产库已绑定对象。本地 CV/OCR、HTTP Vision 与 CodeAgent read-tool Vision 因此固定为 analysis-only；只有后续完成生产资产库 exact binding、场景时效校验和独立授权，才允许进入可执行 grounding。
+
+## 2.3 UI Tree、Business Graph 与图片 Semantic Tree
+
+这三种结构服务于不同问题，不能都称为 DOM：
+
+| 结构 | 来源与语义 | 当前用途 |
+|---|---|---|
+| `ui_tree` | 浏览器真实 DOM/ARIA 采集；节点保留 `parent_ref`、`depth` 和 `document_order` | 表达页面控件的真实父子层级、可访问角色、文本、状态与边界 |
+| `business_graph` | Renderer Scene、业务接口或识别结果中的 `elements + relations` | 表达设备、用户、链路、多父节点、环和并行边；它本质上是图，不强行树化 |
+| `semantic_tree` | 从图片识别得到的 `business_graph` 派生的 DOM-like 只读投影 | 便于树形查看和调试；不是浏览器 DOM，也不能单独作为点击依据 |
+
+本轮 DOM/ARIA 感知已从扁平元素快照扩展为基础 `ui_tree`：采集父子引用、深度
+和文档顺序，同时继续保留元素角色、名称、文本、边界与可交互状态。这个树能够
+描述当前文档中的基础结构，但还不是生产级元素定位协议。
+
+后续仍需补齐稳定 selector/stable ref、Shadow DOM 与 iframe 跨边界采集，以及
+动作执行前基于最新页面重新感知并 rebind。执行器不能长期复用旧截图坐标或一次
+采集得到的临时引用。
 
 ## 3. 问题一：如何得到业务的思维链
 
@@ -555,5 +573,5 @@ STEP 3 问题原因分析完成
 1. UI 原子操作协议字段定义。
 2. Runtime 上下文模型。
 3. 多任务状态机和锁机制。
-4. UI 感知元素树结构。
+4. UI Tree 的 stable ref/selector、Shadow DOM/iframe 采集与执行前 rebind。
 5. 无线用户体验保障场景的端到端执行样例。

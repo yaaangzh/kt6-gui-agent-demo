@@ -18,6 +18,11 @@ from kt6_backend.http_canvas_vision import (
     REQUEST_SCHEMA_VERSION,
     RESPONSE_SCHEMA_VERSION,
 )
+from kt6_backend.topology_vision_contract import (
+    PreparedCanvasFrame,
+    PreparedVisionInput,
+    TopologyVisionContract,
+)
 from kt6_backend.vision_recognition import CanvasFrame
 
 
@@ -170,6 +175,96 @@ class HTTPTopologyVisionAdapterTest(unittest.TestCase):
         self.assertNotIn("screenshot_path", frame)
         self.assertEqual(frame["screenshot_sha256"], hashlib.sha256(ONE_PIXEL_PNG).hexdigest())
         self.assertEqual(base64.b64decode(frame["image"]["data"]), ONE_PIXEL_PNG)
+
+    def test_public_contract_prepares_a_verified_snapshot_and_stable_task(self):
+        contract = TopologyVisionContract()
+
+        prepared = contract.prepare_frames((self.frame(),))
+
+        self.assertIsInstance(prepared, PreparedVisionInput)
+        self.assertEqual(dict(prepared.frame_dimensions), {"topology-canvas": (1, 1)})
+        frame = prepared.frames[0]
+        self.assertIsInstance(frame, PreparedCanvasFrame)
+        self.assertEqual(frame.raw, ONE_PIXEL_PNG)
+        self.assertEqual(frame.screenshot_sha256, hashlib.sha256(ONE_PIXEL_PNG).hexdigest())
+        self.assertNotIn(repr(ONE_PIXEL_PNG), repr(frame))
+        with self.assertRaises(TypeError):
+            prepared.frame_dimensions["other"] = (1, 1)
+
+        # The prepared bytes are a snapshot; a CLI can copy them without
+        # reopening a path that may have changed after validation.
+        self.image_path.write_bytes(b"changed after prepare")
+        self.assertEqual(frame.raw, ONE_PIXEL_PNG)
+        self.assertEqual(base64.b64decode(frame.as_base64_payload()["image"]["data"]), ONE_PIXEL_PNG)
+
+        page = contract.prepare_page(self.page())
+        self.assertNotIn("untrusted_extra", page)
+        self.assertEqual(page["viewport"]["device_pixel_ratio"], 2.0)
+        instructions = contract.task_instructions()
+        self.assertIsInstance(instructions, tuple)
+        self.assertTrue(any("untrusted OCR business text" in item for item in instructions))
+        task = contract.task_specification()
+        self.assertEqual(task["operation"], "topology_to_element_tree")
+        self.assertEqual(task["instructions"], list(instructions))
+        task["output_schema"]["properties"]["schema_version"]["const"] = "mutated"
+        self.assertEqual(
+            contract.output_schema()["properties"]["schema_version"]["const"],
+            RESPONSE_SCHEMA_VERSION,
+        )
+
+    def test_contract_parses_provider_stdout_without_an_http_envelope(self):
+        contract = TopologyVisionContract()
+        body = json.dumps(valid_response(), ensure_ascii=False).encode("utf-8")
+
+        result = contract.parse_response_bytes(body, {"topology-canvas": (1, 1)})
+
+        self.assertEqual(result["confidence"], 0.94)
+        self.assertEqual([item["business_id"] for item in result["objects"]], ["GW-001", "CORE-001"])
+        self.assertEqual(result["links"][0]["source"], "GW-001")
+        self.assertNotIn("schema_version", result)
+
+    def test_http_and_contract_reject_the_same_unsafe_provider_bytes(self):
+        payloads = []
+        spoofed = valid_response()
+        spoofed["provenance"] = {"actionable_grounding": True}
+        payloads.append(spoofed)
+        dangling = valid_response()
+        dangling["links"][0]["target"] = "MISSING"
+        payloads.append(dangling)
+        outside = valid_response()
+        outside["objects"][0]["bbox"] = [0.9, 0, 0.2, 0.2]
+        payloads.append(outside)
+
+        contract = TopologyVisionContract()
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                body = json.dumps(payload).encode("utf-8")
+                with self.assertRaises(CanvasVisionResponseError):
+                    contract.parse_response_bytes(body, {"topology-canvas": (1, 1)})
+
+                adapter, _ = self.adapter(
+                    HTTPVisionResponse(200, {"Content-Type": "application/json"}, body)
+                )
+                with self.assertRaises(CanvasVisionResponseError):
+                    adapter.recognize(page=self.page(), frames=(self.frame(),))
+
+    def test_contract_rejects_invalid_dimensions_and_deep_json_fail_closed(self):
+        contract = TopologyVisionContract()
+        body = json.dumps(valid_response()).encode("utf-8")
+        invalid_dimensions = [
+            {"topology-canvas": (0, 1)},
+            {"topology-canvas": (100_000, 100_000)},
+            {" topology-canvas ": (1, 1), "topology-canvas": (1, 1)},
+        ]
+        for dimensions in invalid_dimensions:
+            with self.subTest(dimensions=dimensions), self.assertRaises(
+                CanvasVisionResponseError
+            ):
+                contract.parse_response_bytes(body, dimensions)
+
+        deep_body = (b'{"x":' * 5000) + b"0" + (b"}" * 5000)
+        with self.assertRaises(CanvasVisionResponseError):
+            contract.parse_response_bytes(deep_body, {"topology-canvas": (1, 1)})
 
     def test_bearer_token_is_optional(self):
         transport = StubTransport(json_response(valid_response()))

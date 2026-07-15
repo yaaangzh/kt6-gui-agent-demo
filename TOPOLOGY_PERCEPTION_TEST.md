@@ -84,7 +84,9 @@ Renderer Scene
 | 来源 | `semantic_source` | `pixel_inference_performed` | `actionable_grounding` |
 |---|---|---:|---:|
 | Renderer Adapter | `canvas_renderer_adapter` | false | 有业务绑定时 true |
+| Local CV/OCR | `canvas_pixels` | true | false；`adapter_id=local-cv-ocr` |
 | HTTP Canvas Vision | `canvas_pixels` | true | 默认 false；资产库 exact binding 后才可另行授权 |
+| CodeAgent read-tool Vision | `canvas_pixels` | true | false |
 | 用户文本 | `provided_text` | false | false |
 | 外部 OCR 转写 | `external_ocr_transcript` | false | false |
 | 仅截图未识别 | `unrecognized_canvas_pixels` | false | false |
@@ -111,11 +113,11 @@ python -m unittest tests.test_page_perception tests.test_runtime -v
 python -m unittest discover -s tests -t .
 ```
 
-当前结果为 102/102 通过。
+当前结果为 136/136 通过。
 
 ## 6. 生产环境真实图片测试
 
-生产 HTTP Vision Adapter 和 pixels-only CLI 已完成，部署及命令见 `PRODUCTION_TOPOLOGY_VISION.md`。真实截图测试应准备同一拓扑的原始 PNG/JPEG 和独立标注 JSON，并分别统计：
+本地 RapidOCR/OpenCV、生产 HTTP Vision、CodeAgent read-tool Adapter 和 pixels-only CLI 已完成，部署及命令见 `PRODUCTION_TOPOLOGY_VISION.md`。其中 `local_cv_ocr` 不依赖 Agent 或外部 API，只依赖本机 RapidOCR ONNX 与 OpenCV；CodeAgent 路径会要求逐帧成功 `read` 事件，拒绝“未读图直接返回 JSON”的假阳性。真实截图测试应准备同一拓扑的原始 PNG/JPEG 和独立标注 JSON，并分别统计：
 
 - 设备框检测 precision / recall；
 - 设备 ID OCR 的完整匹配率；
@@ -126,3 +128,34 @@ python -m unittest discover -s tests -t .
 - 同一界面重复截图的对象 ID 稳定性和 Scene revision 变化。
 
 只有通过真实像素输入得到的结果才允许设置 `pixel_inference_performed=true`；“截图旁附一段人工文本”仍属于文本语义重建，不能计入视觉准确率。
+
+只验证单张图片时，可以在 KT6 Demo 根目录执行：
+
+```powershell
+python -m pip install -r requirements-local-vision.txt
+
+Remove-Item Env:KT6_VISION_ENDPOINT -ErrorAction SilentlyContinue
+Remove-Item Env:KT6_VISION_API_KEY -ErrorAction SilentlyContinue
+Remove-Item Env:KT6_CODEAGENT_EXECUTABLE -ErrorAction SilentlyContinue
+Remove-Item Env:KT6_CODEAGENT_AGENT -ErrorAction SilentlyContinue
+Remove-Item Env:KT6_VISION_TIMEOUT_SECONDS -ErrorAction SilentlyContinue
+$env:KT6_VISION_DRIVER = 'local_cv_ocr'
+
+python -m kt6_backend.app
+```
+
+另开终端，复用现有单图 CLI：
+
+```powershell
+python -m kt6_backend.topology_image_cli D:\data\topology.png `
+  --api-base http://127.0.0.1:8787 `
+  --source-id enterprise-local-cv-v1 `
+  --out D:\data\topology-local-result.json
+```
+
+除通用像素验收字段外，本地模式还必须满足：
+
+```text
+scene.provenance.adapter_id == local-cv-ocr
+scene.actionable_grounding == false
+```

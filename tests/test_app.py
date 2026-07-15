@@ -81,6 +81,118 @@ class AppFactoryTest(unittest.TestCase):
             timeout_seconds=30.0,
         )
 
+    def test_create_services_builds_read_only_codeagent_vision_without_auth(self):
+        adapter = object()
+        environment = {
+            "KT6_VISION_DRIVER": "codeagent_cli",
+            "KT6_CODEAGENT_EXECUTABLE": "codeagent-test",
+            "KT6_CODEAGENT_AGENT": "site-topology-reader",
+            "KT6_VISION_TIMEOUT_SECONDS": "75",
+        }
+        with (
+            patch.dict(os.environ, environment, clear=True),
+            patch.object(app, "CodeAgentCanvasVisionAdapter", return_value=adapter) as constructor,
+            tempfile.TemporaryDirectory() as temp_dir,
+        ):
+            root = Path(temp_dir).resolve()
+            services = app.create_services(root)
+
+        self.assertIs(services.page_perception.canvas_vision, adapter)
+        constructor.assert_called_once_with(
+            workdir=root,
+            executable="codeagent-test",
+            agent="site-topology-reader",
+            timeout_seconds=75.0,
+        )
+
+    def test_codeagent_vision_uses_safe_defaults_and_rejects_http_secrets(self):
+        adapter = object()
+        with (
+            patch.dict(
+                os.environ,
+                {"KT6_VISION_DRIVER": "codeagent_cli"},
+                clear=True,
+            ),
+            patch.object(app, "CodeAgentCanvasVisionAdapter", return_value=adapter) as constructor,
+            tempfile.TemporaryDirectory() as temp_dir,
+        ):
+            root = Path(temp_dir).resolve()
+            services = app.create_services(root)
+
+        self.assertIs(services.page_perception.canvas_vision, adapter)
+        constructor.assert_called_once_with(
+            workdir=root,
+            executable="codeagent",
+            agent="kt6-topology-vision",
+            timeout_seconds=120.0,
+        )
+
+        for conflicting in (
+            {"KT6_VISION_ENDPOINT": "https://vision.internal/v1"},
+            {"KT6_VISION_API_KEY": "must-not-be-passed"},
+        ):
+            environment = {"KT6_VISION_DRIVER": "codeagent_cli", **conflicting}
+            with self.subTest(conflicting=tuple(conflicting)), patch.dict(
+                os.environ, environment, clear=True
+            ), tempfile.TemporaryDirectory() as temp_dir, self.assertRaisesRegex(
+                ValueError, "must not be configured"
+            ):
+                app.create_services(Path(temp_dir))
+
+    def test_codeagent_specific_config_requires_explicit_driver(self):
+        for environment in (
+            {"KT6_CODEAGENT_EXECUTABLE": "codeagent"},
+            {"KT6_CODEAGENT_AGENT": "kt6-topology-vision"},
+            {"KT6_VISION_DRIVER": "unknown"},
+        ):
+            with self.subTest(environment=tuple(environment)), patch.dict(
+                os.environ, environment, clear=True
+            ), tempfile.TemporaryDirectory() as temp_dir, self.assertRaises(ValueError):
+                app.create_services(Path(temp_dir))
+
+    def test_create_services_builds_local_cv_ocr_vision_without_remote_config(self):
+        adapter = object()
+        with (
+            patch.dict(
+                os.environ,
+                {"KT6_VISION_DRIVER": "local_cv_ocr"},
+                clear=True,
+            ),
+            patch.object(
+                app,
+                "LocalCVTopologyVisionAdapter",
+                return_value=adapter,
+            ) as constructor,
+            tempfile.TemporaryDirectory() as temp_dir,
+        ):
+            services = app.create_services(Path(temp_dir))
+
+        self.assertIs(services.page_perception.canvas_vision, adapter)
+        constructor.assert_called_once_with()
+
+    def test_local_cv_ocr_rejects_remote_and_codeagent_configuration(self):
+        for conflicting in (
+            {"KT6_VISION_ENDPOINT": "https://vision.internal/v1/topology"},
+            {"KT6_VISION_API_KEY": "must-not-be-passed"},
+            {"KT6_VISION_TIMEOUT_SECONDS": "30"},
+            {"KT6_CODEAGENT_EXECUTABLE": "codeagent"},
+            {"KT6_CODEAGENT_AGENT": "kt6-topology-vision"},
+        ):
+            environment = {"KT6_VISION_DRIVER": "local_cv_ocr", **conflicting}
+            with (
+                self.subTest(conflicting=tuple(conflicting)),
+                patch.dict(os.environ, environment, clear=True),
+                patch.object(app, "LocalCVTopologyVisionAdapter") as constructor,
+                tempfile.TemporaryDirectory() as temp_dir,
+                self.assertRaisesRegex(
+                    ValueError,
+                    "must not be configured for local_cv_ocr",
+                ),
+            ):
+                app.create_services(Path(temp_dir))
+
+            constructor.assert_not_called()
+
     def test_maximum_vision_timeout_is_accepted_by_factory_and_adapter(self):
         with (
             patch.dict(

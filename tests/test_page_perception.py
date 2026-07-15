@@ -240,6 +240,105 @@ class PagePerceptionTest(unittest.TestCase):
         self.assertEqual(dom_candidate["object_count"], 1)
         self.assertEqual(dom_candidate["elements"][0]["label"], "不规则 canvas 网络拓扑画布")
 
+    def test_dom_scene_builds_browser_hierarchy_without_topology_relations(self):
+        payload = live_capture_payload()
+        payload["adapter_scene"] = None
+        payload["canvases"] = []
+        payload["dom"] = {
+            "elements": [
+                {
+                    "ref": "#panel",
+                    "parent_ref": "",
+                    "depth": 1,
+                    "document_order": 0,
+                    "tag": "section",
+                    "role": "region",
+                    "label": "设备面板",
+                    "bbox": [10, 10, 300, 200],
+                },
+                {
+                    "ref": "#later-child",
+                    "parent_ref": "#panel",
+                    "depth": 3,
+                    "document_order": 2,
+                    "tag": "button",
+                    "label": "稍后按钮",
+                    "bbox": [30, 80, 80, 30],
+                },
+                {
+                    "ref": "#earlier-child",
+                    "parent_ref": "#panel",
+                    "depth": 2,
+                    "document_order": 1,
+                    "tag": "div",
+                    "role": "status",
+                    "label": "状态",
+                    "bbox": [30, 40, 80, 30],
+                },
+            ]
+        }
+
+        capture = self.service.ingest(payload)
+        tree = capture["scene"]["ui_tree"]
+
+        self.assertEqual(capture["summary"]["selected_mode"], "live_dom_snapshot")
+        self.assertEqual(tree["tree_type"], "browser_dom_hierarchy")
+        self.assertEqual(tree["roots"], ["#panel"])
+        self.assertEqual(
+            tree["nodes"]["#panel"]["children"],
+            ["#earlier-child", "#later-child"],
+        )
+        self.assertEqual(tree["nodes"]["#earlier-child"]["parent_ref"], "#panel")
+        self.assertTrue(tree["complete"])
+        self.assertEqual(tree["issues"], [])
+        self.assertEqual(capture["scene"]["relations"], [])
+        self.assertEqual(capture["scene"]["relation_count"], 0)
+
+        stored = self.store.get(capture["capture_id"])["capture"]["dom"]["elements"]
+        self.assertEqual(stored[2]["parent_ref"], "#panel")
+        self.assertEqual(stored[2]["depth"], 2)
+        self.assertEqual(stored[2]["document_order"], 1)
+
+    def test_dom_hierarchy_records_bad_refs_without_losing_nodes(self):
+        payload = live_capture_payload()
+        payload["adapter_scene"] = None
+        payload["canvases"] = []
+        payload["dom"] = {
+            "elements": [
+                {"ref": "", "bbox": [0, 0, 10, 10]},
+                {"ref": "#same", "bbox": [20, 0, 10, 10]},
+                {"ref": "#same", "bbox": [40, 0, 10, 10]},
+                {
+                    "ref": "#orphan",
+                    "parent_ref": "#missing",
+                    "bbox": [60, 0, 10, 10],
+                },
+                {
+                    "ref": "#ambiguous-child",
+                    "parent_ref": "#same",
+                    "bbox": [80, 0, 10, 10],
+                },
+            ]
+        }
+
+        capture = self.service.ingest(payload)
+        tree = capture["scene"]["ui_tree"]
+
+        self.assertEqual(len(tree["nodes"]), 5)
+        self.assertFalse(tree["complete"])
+        self.assertEqual(
+            {issue["code"] for issue in tree["issues"]},
+            {
+                "dom_ref_missing",
+                "dom_ref_duplicate",
+                "dom_parent_unknown",
+                "dom_parent_ambiguous",
+            },
+        )
+        self.assertIn("#orphan", tree["roots"])
+        self.assertIn("#ambiguous-child", tree["roots"])
+        self.assertEqual(capture["scene"]["relations"], [])
+
     def test_failed_canvas_capture_falls_back_to_dom_and_preserves_errors(self):
         payload = live_capture_payload()
         payload["adapter_scene"] = None

@@ -299,13 +299,24 @@ class PagePerceptionService:
 
     def _normalize_dom(self, dom: dict[str, Any]) -> dict[str, Any]:
         elements = []
-        for item in list(dom.get("elements", []))[: self.MAX_DOM_ELEMENTS]:
+        for index, item in enumerate(list(dom.get("elements", []))[: self.MAX_DOM_ELEMENTS]):
             bbox = item.get("bbox", [])
             if len(bbox) != 4:
                 continue
+            try:
+                depth = max(0, int(item.get("depth", 0)))
+            except (TypeError, ValueError):
+                depth = 0
+            try:
+                document_order = max(0, int(item.get("document_order", index)))
+            except (TypeError, ValueError):
+                document_order = index
             elements.append(
                 {
-                    "ref": str(item.get("ref", ""))[:500],
+                    "ref": str(item.get("ref") or "")[:500],
+                    "parent_ref": str(item.get("parent_ref") or "")[:500],
+                    "depth": depth,
+                    "document_order": document_order,
                     "tag": str(item.get("tag", ""))[:50].lower(),
                     "role": str(item.get("role", ""))[:100],
                     "label": str(item.get("label", ""))[:300],
@@ -428,6 +439,9 @@ class PagePerceptionService:
                 "type": item.get("business_type") or item.get("role") or item.get("tag") or "element",
                 "label": item.get("aria_label") or item.get("label") or item.get("placeholder") or element_id,
                 "selector": item.get("ref"),
+                "parent_ref": item.get("parent_ref", ""),
+                "depth": item.get("depth", 0),
+                "document_order": item.get("document_order", index - 1),
                 "bbox": item["bbox"],
                 "center": [round(x + width / 2, 2), round(y + height / 2, 2)],
                 "attributes": {
@@ -446,6 +460,7 @@ class PagePerceptionService:
                     "confidence": confidence,
                     "method": "live_dom_snapshot",
                 }
+        ui_tree = self._dom_ui_tree(elements)
         scene = {
             "mode": "live_dom_snapshot",
             "input": {
@@ -456,6 +471,7 @@ class PagePerceptionService:
             "scene_type": "live_dom_page",
             "object_count": len(elements),
             "elements": elements,
+            "ui_tree": ui_tree,
             "business_object_bindings": bindings,
             "relations": [],
             "co_channel_relations": [],
@@ -473,6 +489,180 @@ class PagePerceptionService:
             pixel_verified=False,
             actionable_grounding=bool(bindings),
         )
+
+    def _dom_ui_tree(self, elements: list[dict[str, Any]]) -> dict[str, Any]:
+        ordered = sorted(
+            enumerate(elements),
+            key=lambda entry: (
+                int(entry[1].get("document_order", entry[0])),
+                entry[0],
+            ),
+        )
+        nodes: dict[str, dict[str, Any]] = {}
+        source_ref_index: dict[str, str] = {}
+        ambiguous_source_refs: set[str] = set()
+        node_refs: dict[str, str] = {}
+        issues: list[dict[str, Any]] = []
+
+        def generated_ref(element_id: str) -> str:
+            base = f"@dom:{element_id}"
+            candidate = base
+            suffix = 2
+            while candidate in nodes:
+                candidate = f"{base}:{suffix}"
+                suffix += 1
+            return candidate
+
+        for fallback_order, element in ordered:
+            element_id = str(element.get("element_id", f"live_dom_{fallback_order + 1:04d}"))
+            source_ref = str(element.get("selector", "")).strip()
+            document_order = int(element.get("document_order", fallback_order))
+            if not source_ref:
+                node_ref = generated_ref(element_id)
+                issues.append(
+                    {
+                        "code": "dom_ref_missing",
+                        "element_id": element_id,
+                        "generated_ref": node_ref,
+                        "document_order": document_order,
+                    }
+                )
+            elif source_ref in source_ref_index:
+                node_ref = generated_ref(element_id)
+                ambiguous_source_refs.add(source_ref)
+                issues.append(
+                    {
+                        "code": "dom_ref_duplicate",
+                        "ref": source_ref,
+                        "element_id": element_id,
+                        "generated_ref": node_ref,
+                        "document_order": document_order,
+                    }
+                )
+            else:
+                node_ref = source_ref
+                source_ref_index[source_ref] = node_ref
+            node_refs[element_id] = node_ref
+            nodes[node_ref] = {
+                "element_id": element_id,
+                "role": element.get("type", "element"),
+                "name": element.get("label", element_id),
+                "tag": element.get("attributes", {}).get("tag", ""),
+                "parent_ref": str(element.get("parent_ref", "")).strip(),
+                "depth": int(element.get("depth", 0)),
+                "document_order": document_order,
+                "children": [],
+            }
+
+        effective_parent: dict[str, str | None] = {}
+        for _, element in ordered:
+            element_id = str(element.get("element_id", ""))
+            node_ref = node_refs[element_id]
+            parent_ref = str(element.get("parent_ref", "")).strip()
+            if not parent_ref:
+                effective_parent[node_ref] = None
+                continue
+            if parent_ref in ambiguous_source_refs:
+                effective_parent[node_ref] = None
+                issues.append(
+                    {
+                        "code": "dom_parent_ambiguous",
+                        "ref": node_ref,
+                        "parent_ref": parent_ref,
+                        "element_id": element_id,
+                    }
+                )
+                continue
+            parent_node_ref = source_ref_index.get(parent_ref)
+            if parent_node_ref is None:
+                effective_parent[node_ref] = None
+                issues.append(
+                    {
+                        "code": "dom_parent_unknown",
+                        "ref": node_ref,
+                        "parent_ref": parent_ref,
+                        "element_id": element_id,
+                    }
+                )
+                continue
+            if parent_node_ref == node_ref:
+                effective_parent[node_ref] = None
+                issues.append(
+                    {
+                        "code": "dom_parent_cycle",
+                        "ref": node_ref,
+                        "parent_ref": parent_ref,
+                        "element_id": element_id,
+                    }
+                )
+                continue
+            effective_parent[node_ref] = parent_node_ref
+
+        processed: set[str] = set()
+        for start_ref in nodes:
+            if start_ref in processed:
+                continue
+            path: list[str] = []
+            positions: dict[str, int] = {}
+            current: str | None = start_ref
+            while current is not None and current not in processed:
+                if current in positions:
+                    cycle = path[positions[current] :]
+                    break_ref = min(
+                        cycle,
+                        key=lambda ref: (nodes[ref]["document_order"], ref),
+                    )
+                    effective_parent[break_ref] = None
+                    issues.append(
+                        {
+                            "code": "dom_parent_cycle",
+                            "ref": break_ref,
+                            "cycle_refs": cycle,
+                        }
+                    )
+                    break
+                positions[current] = len(path)
+                path.append(current)
+                current = effective_parent.get(current)
+            processed.update(path)
+
+        roots: list[str] = []
+        for node_ref in nodes:
+            parent_node_ref = effective_parent.get(node_ref)
+            if parent_node_ref is None:
+                roots.append(node_ref)
+            else:
+                nodes[parent_node_ref]["children"].append(node_ref)
+
+        order_key = lambda ref: (nodes[ref]["document_order"], ref)
+        roots.sort(key=order_key)
+        for node in nodes.values():
+            node["children"].sort(key=order_key)
+
+        visited: set[str] = set()
+        pending = list(reversed(roots))
+        while pending:
+            node_ref = pending.pop()
+            if node_ref in visited:
+                continue
+            visited.add(node_ref)
+            pending.extend(reversed(nodes[node_ref]["children"]))
+        missing_from_forest = sorted(set(nodes) - visited, key=order_key)
+        if missing_from_forest:
+            issues.append(
+                {
+                    "code": "dom_hierarchy_unreachable",
+                    "refs": missing_from_forest,
+                }
+            )
+
+        return {
+            "tree_type": "browser_dom_hierarchy",
+            "roots": roots,
+            "nodes": nodes,
+            "complete": len(nodes) == len(elements) and len(visited) == len(nodes) and not issues,
+            "issues": issues,
+        }
 
     def _stamp_provenance(
         self,
@@ -1124,6 +1314,9 @@ class PagePerceptionService:
             else [
                 {
                     "ref": item.get("ref"),
+                    "parent_ref": item.get("parent_ref"),
+                    "depth": item.get("depth"),
+                    "document_order": item.get("document_order"),
                     "tag": item.get("tag"),
                     "role": item.get("role"),
                     "business_id": item.get("business_id"),
