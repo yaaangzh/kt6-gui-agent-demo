@@ -116,9 +116,24 @@ flowchart LR
 
 当前 Canvas 截图由浏览器实时采集，但 Demo 中的节点语义主要来自 `window.__KT6_PAGE_ADAPTER__` 暴露的渲染器数据，其底层业务拓扑仍为 Mock。遇到只有像素、没有内部语义的 Canvas 时，后端会明确返回 `requires_vision_model=true`，不会伪造节点绑定；若 `toDataURL()` 失败，则保留采集错误并回退可用 DOM，也不会虚报已有视觉输入。
 
-结构化拓扑文本现在可以重建节点、关系、视觉组、证据和冲突信息，但其 provenance 会被强制标记为非像素、不可执行。文本坐标不能用于 GUI 点击；Runtime 会拒绝 `actionable_grounding=false` 的动作。当前企业拓扑黄金样例稳定识别 22 个设备和 19 条明确关系，详细规则见 [拓扑界面感知测试](TOPOLOGY_PERCEPTION_TEST.md)。
+结构化拓扑文本现在可以重建节点、关系、视觉组、证据和冲突信息，但其 provenance 会被强制标记为非像素、不可执行。文本坐标不能用于 GUI 点击；Runtime 会拒绝 `actionable_grounding=false` 的动作。当前企业拓扑黄金样例稳定识别 22 个设备和 19 条明确关系，该口径由测试夹具和专项回归固定。
 
-生产图片有三条可选路径：`LocalCVTopologyVisionAdapter` 在 KT6 进程内使用本地 RapidOCR ONNX 与 OpenCV，完全不启动 Agent，也不调用外部 API；`HTTPTopologyVisionAdapter` 把图片发送给外部 OCR、目标检测或多模态服务；`CodeAgentCanvasVisionAdapter` 启动本机 `codeagent` 并强制其使用 read 工具读取已验签的临时图片。本地 v1.2 已通过合成图覆盖亮/暗背景、任意角度多分支连线、43 边星型、非树关系、固定生产命名族，以及实线/虚线、颜色和小数权值的保守提取；新增节点图标锚定、连线方向一致性验证、接口标签遮挡桥接、超密集节点候选公平预算和低置信 OCR 门禁，用于降低密集区域误连与漏连。无箭头关系按无向边输出。该覆盖只验证算法路径，不代表真实生产截图的召回率或误报率。本地单图模式只需安装可选依赖并设置 `KT6_VISION_DRIVER=local_cv_ocr`，不得同时设置 endpoint、key、CodeAgent 或视觉 timeout 变量。三条路径共用严格的 `TopologyVisionContract`，并生成 `elements + relations + semantic_tree`。具体配置和 pixels-only 测试命令见 [生产拓扑图片识别接入](PRODUCTION_TOPOLOGY_VISION.md)。视觉业务 ID 未经资产库核验前固定为 analysis-only。
+生产图片有三条可选路径：`LocalCVTopologyVisionAdapter` 在 KT6 进程内使用本地 RapidOCR ONNX 与 OpenCV，完全不启动 Agent，也不调用外部 API；`HTTPTopologyVisionAdapter` 把图片发送给外部 OCR、目标检测或多模态服务；`CodeAgentCanvasVisionAdapter` 启动本机 `codeagent` 并强制其使用 read 工具读取已验签的临时图片。本地 v1.2 已通过合成图覆盖亮/暗背景、任意角度多分支连线、43 边星型、非树关系、固定生产命名族，以及实线/虚线、颜色和小数权值的保守提取；新增节点图标锚定、连线方向一致性验证、接口标签遮挡桥接、超密集节点候选公平预算和低置信 OCR 门禁，用于降低密集区域误连与漏连。无箭头关系按无向边输出。该覆盖只验证算法路径，不代表真实生产截图的召回率或误报率。本地单图模式只需安装可选依赖并设置 `KT6_VISION_DRIVER=local_cv_ocr`，不得同时设置 endpoint、key、CodeAgent 或视觉 timeout 变量。三条路径共用严格的 `TopologyVisionContract`，并生成 `elements + relations + semantic_tree`；视觉业务 ID 未经资产库核验前固定为 analysis-only。
+
+本地单图最小验证命令：
+
+```powershell
+python -m pip install -r requirements-local-vision.txt
+$env:KT6_VISION_DRIVER = 'local_cv_ocr'
+python -m kt6_backend.app
+
+# 另开终端
+python -m kt6_backend.topology_image_cli .\topology.png `
+  --api-base http://127.0.0.1:8787 `
+  --source-id single-image-v1 `
+  --out .\topology-result.json `
+  --timeout 120
+```
 
 Browser Use 后续可以作为浏览器会话、DOM 获取、截图和通用 GUI 操作底座，但其内置视觉不能单独替代拓扑感知：稳定的节点/链路重建、业务 ID 绑定、跨帧对象一致性和拓扑版本判断仍需要 Renderer Adapter 或专用 Canvas Vision Adapter。
 
@@ -168,12 +183,10 @@ Browser Use 后续可以作为浏览器会话、DOM 获取、截图和通用 GUI
 python -m kt6_backend.app
 ```
 
-也可以使用兼容入口：
+也可以使用根目录兼容入口：
 
 ```powershell
 python main.py
-# 或
-python run_gui.py
 ```
 
 浏览器访问：
@@ -294,13 +307,3 @@ python -m unittest discover -s tests
 ```
 
 当前覆盖 158 项测试，包括意图路由、缺参澄清、动作授权、Playbook 预检、步骤注册、资源锁、执行后置条件、运行记忆、页面采集失败回退、DOM/ARIA `ui_tree`、文本拓扑重建、本地 RapidOCR/OpenCV、密集星型、图标与偏移标签、分层主干、紧凑交叉线、容器外框、密集纹理、OCR 标签遮挡、500 节点候选预算、缩放虚线与黑底彩色加权图、HTTP/CodeAgent Vision、read 工具像素证据、共享契约、TLS/图片完整性、pixels-only CLI、DOM-like 语义树、不可执行 grounding 门禁、缓存命中、并行链路变化、重新绑定和重新规划。
-
-## 项目文档
-
-- [7.13 阶段简报](7.13.md)
-- [阶段成果报告](KT6_STAGE_PROGRESS_REPORT.md)
-- [总体设计](DESIGN.md)
-- [场景执行细化](KT6_SCENARIO_FLOW.md)
-- [拓扑界面感知测试](TOPOLOGY_PERCEPTION_TEST.md)
-- [生产拓扑图片识别接入](PRODUCTION_TOPOLOGY_VISION.md)
-- [Bug 与架构复核](bug.md)
