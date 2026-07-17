@@ -146,7 +146,7 @@ actionable_grounding：该定位能否用于 GUI 副作用。
 
 对于拓扑图中的叙述性说明，识别器遵循“显式图形/表格事实优先，说明只作注释”的原则。例如表中出现但图中无连线的汇聚设备必须保留为孤立节点，不能根据“三层架构”文字自动补边。
 
-生产像素路径提供三种驱动。`LocalCVTopologyVisionAdapter` 在 KT6 进程内使用 RapidOCR ONNX 与 OpenCV 做单图片识别，不依赖 Agent 或外部 API；`HTTPTopologyVisionAdapter` 调用外部 OCR、目标检测或多模态服务；`CodeAgentCanvasVisionAdapter` 通过本机 CodeAgent read 工具读图。三者只返回受约束的对象、像素框、置信度和关系，provenance 与执行资格由 PagePerception 强制生成。Scene Graph 另派生 `semantic_tree` 供 DOM-like 消费，但多父、环和并行边仍保留在 `relations/non_tree_relations` 中。
+生产像素路径提供三种驱动。`LocalCVTopologyVisionAdapter` 在 KT6 进程内使用 RapidOCR ONNX 与 OpenCV 做单图片识别，不依赖 Agent 或外部 API；其本地几何图路径使用背景自适应前景、独立节点图标锚定、任意角度线段、节点阻断、方向一致性和直线走廊验证恢复多分支关系。超过全量两两验证预算时，按每节点角度扇区保留近/远候选，再用全局近邻补足，避免远端密集区域挤掉长链路。紧凑接口/权值标签只有在两侧存在同方向线条证据时才作为遮挡桥接，也可恢复被标签覆盖的正交拐点；节点自身标签还必须有回到图标的真实像素路径，低置信 OCR 不参与断线或权值推断。容器外框、紧凑 X 交叉和密集垂直纹理有独立负例门禁。关系可保守附加线型、颜色和小数权值。没有箭头证据时关系标记为无向，`source/target` 只用于稳定表示，Scene 的树根也只是一种投影。`line_style` 限于 `solid/dashed`，颜色限于当前调色板，权值仅绑定邻近已确认直线的小数 OCR 标签；字段缺失表示证据不足。`HTTPTopologyVisionAdapter` 调用外部 OCR、目标检测或多模态服务；`CodeAgentCanvasVisionAdapter` 通过本机 CodeAgent read 工具读图。三者只返回受约束的对象、像素框、置信度和关系，provenance 与执行资格由 PagePerception 强制生成。Scene Graph 另派生 `semantic_tree` 供 DOM-like 消费，但多父、环和并行边仍保留在 `relations/non_tree_relations` 中。
 
 图片识别出的业务 ID 默认不等于资产库已绑定对象。本地 CV/OCR、HTTP Vision 与 CodeAgent read-tool Vision 因此固定为 analysis-only；只有后续完成生产资产库 exact binding、场景时效校验和独立授权，才允许进入可执行 grounding。
 

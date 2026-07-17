@@ -22,7 +22,7 @@
 | 拓扑变化检测 | 节点、位置、链路增删及链路语义属性变化检测；关键变化触发重规划 |
 | 运行记忆 | SQLite 持久化任务、事件、检查点、场景和业务处理结果 |
 | KT5 接入基础 | 感知拓扑与生成拓扑共用统一 Scene Graph 契约 |
-| 自动化测试 | 当前 136 项测试通过 |
+| 自动化测试 | 当前 158 项测试通过 |
 
 ## 业务场景
 
@@ -118,7 +118,7 @@ flowchart LR
 
 结构化拓扑文本现在可以重建节点、关系、视觉组、证据和冲突信息，但其 provenance 会被强制标记为非像素、不可执行。文本坐标不能用于 GUI 点击；Runtime 会拒绝 `actionable_grounding=false` 的动作。当前企业拓扑黄金样例稳定识别 22 个设备和 19 条明确关系，详细规则见 [拓扑界面感知测试](TOPOLOGY_PERCEPTION_TEST.md)。
 
-生产图片有三条可选路径：`LocalCVTopologyVisionAdapter` 在 KT6 进程内使用本地 RapidOCR ONNX 与 OpenCV，完全不启动 Agent，也不调用外部 API；`HTTPTopologyVisionAdapter` 把图片发送给外部 OCR、目标检测或多模态服务；`CodeAgentCanvasVisionAdapter` 启动本机 `codeagent` 并强制其使用 read 工具读取已验签的临时图片。本地单图模式只需安装可选依赖并设置 `KT6_VISION_DRIVER=local_cv_ocr`，不得同时设置 endpoint、key、CodeAgent 或视觉 timeout 变量。三条路径共用严格的 `TopologyVisionContract`，并生成 `elements + relations + semantic_tree`。具体配置和 pixels-only 测试命令见 [生产拓扑图片识别接入](PRODUCTION_TOPOLOGY_VISION.md)。视觉业务 ID 未经资产库核验前固定为 analysis-only。
+生产图片有三条可选路径：`LocalCVTopologyVisionAdapter` 在 KT6 进程内使用本地 RapidOCR ONNX 与 OpenCV，完全不启动 Agent，也不调用外部 API；`HTTPTopologyVisionAdapter` 把图片发送给外部 OCR、目标检测或多模态服务；`CodeAgentCanvasVisionAdapter` 启动本机 `codeagent` 并强制其使用 read 工具读取已验签的临时图片。本地 v1.2 已通过合成图覆盖亮/暗背景、任意角度多分支连线、43 边星型、非树关系、固定生产命名族，以及实线/虚线、颜色和小数权值的保守提取；新增节点图标锚定、连线方向一致性验证、接口标签遮挡桥接、超密集节点候选公平预算和低置信 OCR 门禁，用于降低密集区域误连与漏连。无箭头关系按无向边输出。该覆盖只验证算法路径，不代表真实生产截图的召回率或误报率。本地单图模式只需安装可选依赖并设置 `KT6_VISION_DRIVER=local_cv_ocr`，不得同时设置 endpoint、key、CodeAgent 或视觉 timeout 变量。三条路径共用严格的 `TopologyVisionContract`，并生成 `elements + relations + semantic_tree`。具体配置和 pixels-only 测试命令见 [生产拓扑图片识别接入](PRODUCTION_TOPOLOGY_VISION.md)。视觉业务 ID 未经资产库核验前固定为 analysis-only。
 
 Browser Use 后续可以作为浏览器会话、DOM 获取、截图和通用 GUI 操作底座，但其内置视觉不能单独替代拓扑感知：稳定的节点/链路重建、业务 ID 绑定、跨帧对象一致性和拓扑版本判断仍需要 Renderer Adapter 或专用 Canvas Vision Adapter。
 
@@ -293,7 +293,7 @@ tests/                         自动化测试
 python -m unittest discover -s tests
 ```
 
-当前覆盖 136 项测试，包括意图路由、缺参澄清、动作授权、Playbook 预检、步骤注册、资源锁、执行后置条件、运行记忆、页面采集失败回退、DOM/ARIA `ui_tree`、文本拓扑重建、本地 RapidOCR/OpenCV、HTTP/CodeAgent Vision、read 工具像素证据、共享契约、TLS/图片完整性、pixels-only CLI、DOM-like 语义树、不可执行 grounding 门禁、缓存命中、并行链路变化、重新绑定和重新规划。
+当前覆盖 158 项测试，包括意图路由、缺参澄清、动作授权、Playbook 预检、步骤注册、资源锁、执行后置条件、运行记忆、页面采集失败回退、DOM/ARIA `ui_tree`、文本拓扑重建、本地 RapidOCR/OpenCV、密集星型、图标与偏移标签、分层主干、紧凑交叉线、容器外框、密集纹理、OCR 标签遮挡、500 节点候选预算、缩放虚线与黑底彩色加权图、HTTP/CodeAgent Vision、read 工具像素证据、共享契约、TLS/图片完整性、pixels-only CLI、DOM-like 语义树、不可执行 grounding 门禁、缓存命中、并行链路变化、重新绑定和重新规划。
 
 ## 项目文档
 

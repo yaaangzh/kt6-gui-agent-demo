@@ -7,10 +7,12 @@
 > 四次补强：2026-07-14（72 测试通过，拓扑文本感知与不可执行 grounding 门禁）
 > 六次补强：2026-07-15（120 测试通过，生产 HTTP/CodeAgent Vision 与 pixels-only 验收链路）
 > 七次补强：2026-07-15（136 测试通过，本地 CV/OCR 单图识别与 DOM/ARIA ui_tree）
+> 八次补强：2026-07-16（151 测试通过，本地 CV v1.1 多分支、通用 ID 与加权关系）
+> 九次补强：2026-07-17（158 测试通过，本地 CV v1.2 密集节点锚定、方向过滤与遮挡桥接）
 
 ---
 
-## 最新验证矩阵（2026-07-15 七次补强）
+## 最新验证矩阵（2026-07-17 九次补强）
 
 | 项目 | 结论 | 验证方法 |
 |---|---|---|
@@ -37,6 +39,11 @@
 | 新问题-17 工具增强模型未读图却返回 JSON | ✅ 已修复，CodeAgent 专用只读 Agent + 逐帧成功 `read` 事件和精确临时路径校验 | `codeagent_canvas_vision.py` + 专项测试 |
 | 新问题-18 单图像素识别完全依赖 Agent | ✅ 已修复，新增本地 RapidOCR/ONNXRuntime + OpenCV 驱动，无 Agent、外部 API 或密钥 | `local_cv_canvas_vision.py` + 专项测试 |
 | 新问题-19 DOM 感知只有扁平数组 | ✅ 已修复，Demo 采集 parent/depth/order，后端生成独立 `ui_tree` 且不制造拓扑边 | `script.js` + `page_perception.py` + 专项测试 |
+| 新问题-20 本地 CV 只认传统 ID 和正交单父树 | ✅ 已修复，增加生产命名族、亮暗背景、任意角度多边、节点阻断、线型/颜色/权值与无向语义 | `local_cv_canvas_vision.py` + 43 边星型/13 边加权图测试 |
+| 新问题-21 像素边方向与视觉属性表达不准确 | ✅ 已修复，关系明确标记为无向，并保留有证据的实/虚线、颜色和邻近小数权值 | `local_cv_canvas_vision.py` + 彩色带权图测试 |
+| 新问题-22 密集节点文字框与真实图标错位导致误连/漏连 | ✅ 已补强，输出 OCR 坐标与内部连线锚点分离，使用厚前景图标绑定并拒绝粗 X 交叉假图标 | `local_cv_canvas_vision.py` + 24 节点偏移标签星型/紧凑 X 测试 |
+| 新问题-23 容器、密集纹理和 OCR 遮挡破坏关系识别 | ✅ 已补强，增加真实锚点接触、局部方向一致性、空白断线门禁和受约束标签桥接 | `local_cv_canvas_vision.py` + 外框/竖纹/接口标签/缩放虚线测试 |
+| 新问题-24 超过 100 节点后长链路被全局近邻预算挤掉，低置信 OCR 污染关系元数据 | ✅ 已补强，按节点角度扇区公平保留近/远候选，并统一过滤低置信断线和权值证据 | `local_cv_canvas_vision.py` + 500 节点长斜虚线/低置信权值测试 |
 
 ---
 
@@ -82,13 +89,13 @@
 
 ---
 
-## 测试覆盖（136/136 通过）
+## 测试覆盖（158/158 通过）
 
 ```
 test_app.py                      15 tests ─ 工厂/WAL + Local CV/HTTP/CodeAgent Vision env + 请求体上限
 test_codeagent_canvas_vision.py  11 tests ─ read 事件证据 + CLI/PagePerception 联测 + 严格拓扑输出
 test_http_canvas_vision.py       19 tests ─ 共享契约 + TLS/协议/图片完整性/响应与信任边界
-test_local_cv_canvas_vision.py   12 tests ─ RapidOCR 输出 + CV/表格关系 + PagePerception 联测 + 安全边界
+test_local_cv_canvas_vision.py   34 tests ─ RapidOCR/通用 ID + 密集锚点/主干/交叉/纹理/遮挡/500 节点预算/缩放虚线/黑底加权图 + PagePerception 联测
 test_memory.py                    1 test  ─ 全链路持久化
 test_page_perception.py          19 tests ─ DOM ui_tree + 实时采集 + semantic tree + provenance + fail-closed
 test_perception.py                4 tests ─ DOM/Canvas hybrid + 缓存命中 + 增量 revision + 链路阻断
