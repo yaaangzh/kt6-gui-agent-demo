@@ -212,11 +212,6 @@ class RapidOCROpenCVBackend:
             cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
             iterations=1,
         )
-        # Preserve the pre-bridge mask for the compatibility path.  The v1.2
-        # bridge helpers deliberately synthesize pixels across OCR gaps; using
-        # those pixels in the legacy path would make it more permissive than
-        # the version whose recall we are restoring.
-        legacy_line_mask = line_mask.copy()
         line_mask = self._bridge_edge_label_gaps(
             line_mask,
             source_mask=cleaned,
@@ -256,39 +251,6 @@ class RapidOCROpenCVBackend:
             relation_anchor_boxes,
             relation_nodes,
         )
-        relation_node_boxes = {
-            business_id: node_boxes[business_id]
-            for business_id in relation_nodes
-        }
-        independent_anchor_nodes = {
-            business_id
-            for business_id in relation_nodes
-            if any(
-                abs(
-                    relation_anchor_boxes[business_id][index]
-                    - relation_nodes[business_id].bbox[index]
-                )
-                > 1e-6
-                for index in range(4)
-            )
-        }
-        # Retain an independently observed glyph where one exists, and restore
-        # the pre-v1.2 OCR/node-box geometry only for nodes whose glyph detector
-        # fell back to raw OCR.  This recovers unsupported icon shapes without
-        # letting a label-only path override a visible but disconnected glyph.
-        fallback_geometry_boxes = {
-            business_id: (
-                relation_anchor_boxes[business_id]
-                if business_id in independent_anchor_nodes
-                else relation_node_boxes[business_id]
-            )
-            for business_id in relation_nodes
-        }
-        fallback_contact_boxes = self._node_contact_boxes(
-            fallback_geometry_boxes,
-            relation_nodes,
-            use_occurrence_centers=True,
-        )
         for first, second, multi_branch in self._component_connector_pairs(
             line_mask,
             contact_boxes=relation_anchor_boxes,
@@ -312,20 +274,6 @@ class RapidOCROpenCVBackend:
                     else "connected_pixel_path"
                 ),
             )
-
-        # Keep the pre-v1.2 OCR/node-box grounding as a recall path.  It is
-        # collected here and admitted only after all precise candidates are
-        # known, so a noisy fallback cannot freely generate a second topology.
-        fallback_path_like_pairs: set[frozenset[str]] = set()
-        fallback_component_pairs = self._component_connector_pairs(
-            legacy_line_mask,
-            contact_boxes=fallback_contact_boxes,
-            diagram_nodes=relation_nodes,
-            horizontal_mask=horizontal,
-            vertical_mask=vertical,
-            path_like_pairs=fallback_path_like_pairs,
-            path_like_nodes=independent_anchor_nodes,
-        )
 
         for first, second, style, color in self._segment_connector_pairs(
             segments,
@@ -351,17 +299,6 @@ class RapidOCROpenCVBackend:
                 line_style=style,
                 line_color=color,
             )
-
-        legacy_segment_pairs = self._segment_connector_pairs(
-            segments,
-            mask=cleaned,
-            image=image,
-            background=background_color,
-            geometry_boxes=fallback_geometry_boxes,
-            contact_boxes=fallback_contact_boxes,
-            blocking_boxes=fallback_geometry_boxes,
-            diagram_nodes=relation_nodes,
-        )
 
         corridor_occlusion_mask = self._edge_label_occlusion_mask(
             cleaned,
@@ -415,213 +352,6 @@ class RapidOCROpenCVBackend:
                 line_color=color,
             )
 
-        legacy_corridor_pairs = self._corridor_connector_pairs(
-            cleaned,
-            image=image,
-            background=background_color,
-            geometry_boxes=fallback_geometry_boxes,
-            contact_boxes=fallback_contact_boxes,
-            blocking_boxes=fallback_geometry_boxes,
-            diagram_nodes=relation_nodes,
-            occlusion_mask=None,
-            node_occlusion_boxes=None,
-        )
-
-        # The compatibility path is a rescue path, not a second unrestricted
-        # topology generator.  Fuse its independent signals first, then admit
-        # them by evidence strength: independent pixel consensus and validated
-        # layered branches retain all real fan-out edges, while a component-
-        # only proposal may connect separate subgraphs but cannot create a
-        # cycle by itself.
-        fallback_proposals: dict[frozenset[str], dict[str, Any]] = {}
-
-        def remember_fallback(
-            *,
-            first: str,
-            second: str,
-            confidence: float,
-            support: str,
-            multi_branch: bool = False,
-            line_style: str | None = None,
-            line_color: str | None = None,
-        ) -> None:
-            key = frozenset((first, second))
-            proposal = fallback_proposals.get(key)
-            if proposal is None:
-                fallback_proposals[key] = {
-                    "source": first,
-                    "target": second,
-                    "confidence": confidence,
-                    "supports": {support},
-                    "multi_branch": multi_branch,
-                    "line_style": line_style,
-                    "line_color": line_color,
-                }
-                return
-            proposal["supports"].add(support)
-            proposal["multi_branch"] = proposal["multi_branch"] or multi_branch
-            if confidence > proposal["confidence"]:
-                proposal["source"] = first
-                proposal["target"] = second
-                proposal["confidence"] = confidence
-            if line_style == "dashed" or proposal["line_style"] is None:
-                proposal["line_style"] = line_style
-            if proposal["line_color"] is None and line_color is not None:
-                proposal["line_color"] = line_color
-
-        for first, second, multi_branch in fallback_component_pairs:
-            remember_fallback(
-                first=first,
-                second=second,
-                confidence=min(
-                    0.80 if multi_branch else 0.84,
-                    diagram_nodes[first].confidence,
-                    diagram_nodes[second].confidence,
-                ),
-                support="component",
-                multi_branch=multi_branch,
-            )
-        for first, second, style, color in legacy_segment_pairs:
-            remember_fallback(
-                first=first,
-                second=second,
-                confidence=min(
-                    0.86,
-                    diagram_nodes[first].confidence,
-                    diagram_nodes[second].confidence,
-                ),
-                support="segment",
-                line_style=style,
-                line_color=color,
-            )
-        for first, second, style, color, path_confidence in legacy_corridor_pairs:
-            remember_fallback(
-                first=first,
-                second=second,
-                confidence=min(
-                    0.84,
-                    path_confidence,
-                    diagram_nodes[first].confidence,
-                    diagram_nodes[second].confidence,
-                ),
-                support="corridor",
-                line_style=style,
-                line_color=color,
-            )
-
-        def fallback_evidence(proposal: Mapping[str, Any]) -> str:
-            supports = proposal["supports"]
-            if len(supports) >= 2:
-                return "legacy_pixel_consensus"
-            if proposal["multi_branch"]:
-                return "legacy_multi_branch_pixel_component"
-            return "legacy_connected_pixel_path"
-
-        # Preserve precise evidence for an already-known pair while allowing a
-        # fallback path to contribute missing line style or colour metadata.
-        for key, proposal in fallback_proposals.items():
-            existing = candidates.get(key)
-            if existing is None:
-                continue
-            self._remember_connector_candidate(
-                candidates,
-                source=proposal["source"],
-                target=proposal["target"],
-                confidence=min(existing[2], proposal["confidence"]),
-                evidence=fallback_evidence(proposal),
-                line_style=proposal["line_style"],
-                line_color=proposal["line_color"],
-            )
-
-        strong_proposals: list[dict[str, Any]] = []
-        weak_component_proposals: list[dict[str, Any]] = []
-        for key, proposal in fallback_proposals.items():
-            if key in candidates:
-                continue
-            supports = proposal["supports"]
-            source = proposal["source"]
-            target = proposal["target"]
-            is_consensus = len(supports) >= 2 and "corridor" in supports
-            is_layered_branch = bool(proposal["multi_branch"])
-            is_plain_component_rescue = (
-                "component" in supports
-                and (
-                    frozenset((source, target)) in fallback_path_like_pairs
-                    or (
-                        len(relation_nodes) >= 3
-                        and source not in independent_anchor_nodes
-                        and target not in independent_anchor_nodes
-                    )
-                )
-            )
-            if is_consensus or is_layered_branch:
-                strong_proposals.append(proposal)
-            elif is_plain_component_rescue:
-                weak_component_proposals.append(proposal)
-
-        def fallback_rank(proposal: Mapping[str, Any]) -> tuple[Any, ...]:
-            source = proposal["source"]
-            target = proposal["target"]
-            distance = math.hypot(
-                relation_nodes[source].center[0] - relation_nodes[target].center[0],
-                relation_nodes[source].center[1] - relation_nodes[target].center[1],
-            )
-            return (
-                -int(bool(proposal["multi_branch"])),
-                -len(proposal["supports"]),
-                -float(proposal["confidence"]),
-                distance,
-                min(source, target),
-                max(source, target),
-            )
-
-        def accept_fallback(proposal: Mapping[str, Any]) -> None:
-            self._remember_connector_candidate(
-                candidates,
-                source=proposal["source"],
-                target=proposal["target"],
-                confidence=proposal["confidence"],
-                evidence=fallback_evidence(proposal),
-                line_style=proposal["line_style"],
-                line_color=proposal["line_color"],
-            )
-
-        # Consensus and a geometrically validated trunk/T are strong enough to
-        # preserve multiple incident edges and legitimate cycles.  The former
-        # degree gate admitted only the first rescue edge and caused the
-        # reported many-node recall regression.
-        for proposal in sorted(strong_proposals, key=fallback_rank):
-            accept_fallback(proposal)
-
-        parents = {business_id: business_id for business_id in relation_nodes}
-
-        def find(business_id: str) -> str:
-            root = business_id
-            while parents[root] != root:
-                root = parents[root]
-            while parents[business_id] != business_id:
-                parent = parents[business_id]
-                parents[business_id] = root
-                business_id = parent
-            return root
-
-        def union(first: str, second: str) -> None:
-            first_root = find(first)
-            second_root = find(second)
-            if first_root != second_root:
-                parents[second_root] = first_root
-
-        for source, target, *_rest in candidates.values():
-            union(source, target)
-
-        for proposal in sorted(weak_component_proposals, key=fallback_rank):
-            source = proposal["source"]
-            target = proposal["target"]
-            if find(source) == find(target):
-                continue
-            accept_fallback(proposal)
-            union(source, target)
-
         connectors: list[DetectedConnector] = []
         for candidate in candidates.values():
             preferred_source, preferred_target, confidence, evidence, style, color = candidate
@@ -673,8 +403,6 @@ class RapidOCROpenCVBackend:
         diagram_nodes: Mapping[str, DeviceOccurrence],
         horizontal_mask: Any,
         vertical_mask: Any,
-        path_like_pairs: set[frozenset[str]] | None = None,
-        path_like_nodes: set[str] | frozenset[str] = frozenset(),
     ) -> tuple[tuple[str, str, bool], ...]:
         """Split junctions at node regions and retain two-ended pixel paths.
 
@@ -722,44 +450,11 @@ class RapidOCROpenCVBackend:
                     continue
                 component_nodes.setdefault(label, set()).add(business_id)
 
-        enclosing_loops: tuple[Any, ...] = ()
-        if path_like_pairs is not None:
-            contour_result = cv2.findContours(
-                line_mask.copy(),
-                cv2.RETR_CCOMP,
-                cv2.CHAIN_APPROX_SIMPLE,
-            )
-            contours = contour_result[-2]
-            hierarchy = contour_result[-1]
-            if hierarchy is not None:
-                enclosing_loops = tuple(
-                    contour
-                    for index, contour in enumerate(contours)
-                    if hierarchy[0][index][2] >= 0
-                    and abs(float(cv2.contourArea(contour))) >= 64.0
-                )
-
         pairs: set[tuple[str, str, bool]] = set()
         for label, attached_nodes in component_nodes.items():
             if len(attached_nodes) == 2:
                 first, second = sorted(attached_nodes)
                 pairs.add((first, second, False))
-                if path_like_pairs is not None and (
-                    len(diagram_nodes) == 2
-                    or first in path_like_nodes
-                    or second in path_like_nodes
-                ):
-                    component_pixels = labels == label
-                    if self._component_is_simple_path(
-                        component_pixels,
-                        first_box=contact_boxes[first],
-                        second_box=contact_boxes[second],
-                        first_center=diagram_nodes[first].center,
-                        second_center=diagram_nodes[second].center,
-                        enclosing_loops=enclosing_loops,
-                        touch_margin=touch_margin,
-                    ):
-                        path_like_pairs.add(frozenset((first, second)))
                 continue
             if len(attached_nodes) < 3:
                 continue
@@ -806,157 +501,6 @@ class RapidOCROpenCVBackend:
             for leaf in sorted(attached_nodes - {root}):
                 pairs.add((root, leaf, True))
         return tuple(sorted(pairs))
-
-    def _component_is_simple_path(
-        self,
-        component_pixels: Any,
-        *,
-        first_box: Box,
-        second_box: Box,
-        first_center: tuple[float, float],
-        second_center: tuple[float, float],
-        enclosing_loops: Sequence[Any],
-        touch_margin: int,
-    ) -> bool:
-        """Reject frames and junctions before a two-ended legacy rescue.
-
-        Contact expansion can make an enclosing rectangle or a dense crossing
-        touch the same two labels as a real connector.  A genuine straight or
-        elbow connector becomes one acyclic skeleton with two endpoints, each
-        returning to a different node contact region.  The modest detour bound
-        also rejects a group frame that was opened only by contact erasure.
-        """
-
-        cv2 = self._cv2
-        np = self._np
-        if any(
-            cv2.pointPolygonTest(contour, first_center, False) >= 0
-            and cv2.pointPolygonTest(contour, second_center, False) >= 0
-            for contour in enclosing_loops
-        ):
-            # A closed contour containing both labels is a group/container,
-            # even if erasing padded contacts later opens one side into what
-            # looks like a valid two-ended path.
-            return False
-        first_x, first_y, first_width, first_height = first_box
-        second_x, second_y, second_width, second_height = second_box
-        if (
-            max(first_x, second_x) < min(first_x + first_width, second_x + second_width)
-            and max(first_y, second_y)
-            < min(first_y + first_height, second_y + second_height)
-        ):
-            # Overlapping padded contacts are typical when two OCR labels sit
-            # inside the same enclosing frame.  Once those contacts are erased,
-            # either side of the frame can masquerade as a perfect two-ended
-            # path, so it is not safe compatibility evidence.
-            return False
-        ys, xs = np.nonzero(component_pixels)
-        if not len(xs):
-            return False
-        left = int(xs.min())
-        right = int(xs.max()) + 1
-        top = int(ys.min())
-        bottom = int(ys.max()) + 1
-        cropped = component_pixels[top:bottom, left:right].astype(np.uint8)
-
-        skeleton = self._thin_binary_component(cropped)
-        if not bool(np.any(skeleton)):
-            return False
-        neighbour_kernel = np.ones((3, 3), dtype=np.uint8)
-        neighbour_kernel[1, 1] = 0
-        neighbour_count = cv2.filter2D(
-            skeleton,
-            cv2.CV_16S,
-            neighbour_kernel,
-            borderType=cv2.BORDER_CONSTANT,
-        )
-        endpoints = np.argwhere((skeleton > 0) & (neighbour_count == 1))
-        if len(endpoints) != 2:
-            return False
-
-        endpoint_points = (
-            (float(endpoints[0][1] + left), float(endpoints[0][0] + top)),
-            (float(endpoints[1][1] + left), float(endpoints[1][0] + top)),
-        )
-
-        def distance_to_box(point: tuple[float, float], box: Box) -> float:
-            x, y, width, height = box
-            delta_x = max(x - point[0], 0.0, point[0] - (x + width))
-            delta_y = max(y - point[1], 0.0, point[1] - (y + height))
-            return math.hypot(delta_x, delta_y)
-
-        endpoint_limit = float(touch_margin + 4)
-        returns_to_distinct_nodes = (
-            distance_to_box(endpoint_points[0], first_box) <= endpoint_limit
-            and distance_to_box(endpoint_points[1], second_box) <= endpoint_limit
-        ) or (
-            distance_to_box(endpoint_points[0], second_box) <= endpoint_limit
-            and distance_to_box(endpoint_points[1], first_box) <= endpoint_limit
-        )
-        if not returns_to_distinct_nodes:
-            return False
-
-        endpoint_distance = math.hypot(
-            endpoint_points[1][0] - endpoint_points[0][0],
-            endpoint_points[1][1] - endpoint_points[0][1],
-        )
-        skeleton_length = int(np.count_nonzero(skeleton))
-        return (
-            endpoint_distance >= 1.0
-            and skeleton_length <= endpoint_distance * 1.75 + 12.0
-        )
-
-    def _thin_binary_component(self, binary: Any) -> Any:
-        """Return a one-pixel Zhang-Suen skeleton without extra dependencies."""
-
-        np = self._np
-        image = np.pad(binary.astype(np.uint8), 1)
-        maximum_iterations = max(image.shape) * 2
-        for _iteration in range(maximum_iterations):
-            changed = False
-            for phase in (0, 1):
-                center = image[1:-1, 1:-1]
-                neighbours = (
-                    image[:-2, 1:-1],
-                    image[:-2, 2:],
-                    image[1:-1, 2:],
-                    image[2:, 2:],
-                    image[2:, 1:-1],
-                    image[2:, :-2],
-                    image[1:-1, :-2],
-                    image[:-2, :-2],
-                )
-                neighbour_count = sum(neighbours)
-                transitions = sum(
-                    ((neighbours[index] == 0) & (neighbours[(index + 1) % 8] == 1))
-                    .astype(np.uint8)
-                    for index in range(8)
-                )
-                if phase == 0:
-                    corner_condition = (
-                        neighbours[0] * neighbours[2] * neighbours[4] == 0
-                    ) & (
-                        neighbours[2] * neighbours[4] * neighbours[6] == 0
-                    )
-                else:
-                    corner_condition = (
-                        neighbours[0] * neighbours[2] * neighbours[6] == 0
-                    ) & (
-                        neighbours[0] * neighbours[4] * neighbours[6] == 0
-                    )
-                removable = (
-                    (center == 1)
-                    & (neighbour_count >= 2)
-                    & (neighbour_count <= 6)
-                    & (transitions == 1)
-                    & corner_condition
-                )
-                if bool(np.any(removable)):
-                    center[removable] = 0
-                    changed = True
-            if not changed:
-                break
-        return image[1:-1, 1:-1]
 
     @staticmethod
     def _multi_branch_root(
@@ -1164,16 +708,11 @@ class RapidOCROpenCVBackend:
         self,
         node_boxes: Mapping[str, Box],
         diagram_nodes: Mapping[str, DeviceOccurrence],
-        *,
-        use_occurrence_centers: bool = False,
     ) -> dict[str, Box]:
         centers = {}
         for business_id, occurrence in diagram_nodes.items():
-            if use_occurrence_centers:
-                centers[business_id] = occurrence.center
-            else:
-                x, y, width, height = node_boxes.get(business_id, occurrence.bbox)
-                centers[business_id] = (x + width / 2, y + height / 2)
+            x, y, width, height = node_boxes.get(business_id, occurrence.bbox)
+            centers[business_id] = (x + width / 2, y + height / 2)
         contacts: dict[str, Box] = {}
         for business_id, occurrence in diagram_nodes.items():
             base = node_boxes.get(business_id, occurrence.bbox)
@@ -2041,14 +1580,6 @@ class RapidOCROpenCVBackend:
         for business_id, occurrence in diagram_nodes.items():
             if occurrence.confidence > 0.75:
                 continue
-            # A normalized device identifier containing digits is stronger
-            # evidence than the low OCR confidence alone.  Treating such a
-            # label as text drawn over a connector removes the node and every
-            # incident edge, which caused a severe recall regression on real
-            # ACC/testNE-style topologies.  Keep pass-through collapsing for
-            # ambiguous annotation-like tokens only.
-            if any(character.isdigit() for character in business_id):
-                continue
             anchor = anchor_boxes.get(business_id)
             if anchor is None or any(
                 abs(anchor[index] - occurrence.bbox[index]) > 1e-6
@@ -2856,10 +2387,10 @@ class RapidOCROpenCVBackend:
             )
 
         # Distance-transform seeds intentionally target filled glyphs.  Thin
-        # outlined circles and switch-like rectangles have no thick interior,
-        # so supplement them with compact circular or rectangular contours.
-        # Long connector paths, X crossings and container borders fail the
-        # shape, size or multi-label checks below.
+        # outlined circles have no thick interior, so supplement them with
+        # compact, high-circularity contours.  Long connector paths, X
+        # crossings and container borders have low circularity or excessive
+        # dimensions and are excluded here.
         contour_result = cv2.findContours(
             binary,
             cv2.RETR_LIST,
@@ -2867,43 +2398,25 @@ class RapidOCROpenCVBackend:
         )
         contours = contour_result[-2]
         contour_minimum = max(10.0, typical_height * 0.65)
-        contour_maximum_width = max(
-            96.0,
-            typical_height * 8.0,
-            typical_width * 2.25,
-        )
-        contour_maximum_height = max(64.0, typical_height * 4.0)
+        contour_maximum = max(64.0, typical_height * 4.0, typical_width)
         for contour in contours:
             contour_area = abs(float(cv2.contourArea(contour)))
             perimeter = float(cv2.arcLength(contour, True))
             if contour_area <= 0 or perimeter <= 0:
                 continue
             circularity = 4.0 * math.pi * contour_area / (perimeter * perimeter)
+            if circularity < 0.55:
+                continue
             x, y, width, height = cv2.boundingRect(contour)
             if width <= 0 or height <= 0:
                 continue
             aspect = max(width / height, height / width)
-            rectangularity = contour_area / float(width * height)
-            circular_candidate = circularity >= 0.55 and aspect <= 1.8
-            compact_glyph_candidate = rectangularity >= 0.55 and aspect <= 4.5
-            if not circular_candidate and not compact_glyph_candidate:
+            if aspect > 1.8:
                 continue
             if (
                 min(width, height) < contour_minimum
-                or width > contour_maximum_width
-                or height > contour_maximum_height
+                or max(width, height) > contour_maximum
             ):
-                continue
-            contained_labels = sum(
-                1
-                for occurrence in diagram_nodes.values()
-                if x <= occurrence.center[0] <= x + width
-                and y <= occurrence.center[1] <= y + height
-            )
-            if contained_labels > 1:
-                # A group/container frame is not an endpoint glyph.  This also
-                # prevents one large rectangle from being greedily assigned to
-                # one of several labels in a dense view.
                 continue
             expand_contour = 2
             left = max(0, x - expand_contour)
