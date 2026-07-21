@@ -618,7 +618,7 @@ class LocalCVTopologyVisionAdapterTest(unittest.TestCase):
         self.assertTrue(scene["pixel_verified"])
         self.assertFalse(scene["actionable_grounding"])
         self.assertEqual(scene["provenance"]["adapter_id"], "local-cv-ocr")
-        self.assertEqual(scene["provenance"]["adapter_version"], "1.2")
+        self.assertEqual(scene["provenance"]["adapter_version"], "1.3")
         self.assertFalse(
             scene["provenance"]["adapter_supports_actionable_grounding"]
         )
@@ -863,8 +863,225 @@ class RapidOCROpenCVConnectorSyntheticTest(unittest.TestCase):
         self.assertEqual(
             {connector.evidence for connector in evidence.connectors},
             {
-                "legacy_layered_pixel_component",
+                "directional_probe_component",
                 "legacy_padded_hough_segment",
+            },
+        )
+
+    def test_directional_probe_recovers_large_node_to_fanout_gaps(self):
+        image = self.np.full((430, 700, 3), 255, dtype=self.np.uint8)
+        boxes = {
+            "ACC-001": (315.0, 30.0, 70.0, 24.0),
+            "AP-001": (100.0, 340.0, 70.0, 24.0),
+            "AP-002": (530.0, 340.0, 70.0, 24.0),
+        }
+        # Each visible connector stops roughly 60px before its OCR label.
+        # The old rectangular halo cannot associate either side, while a
+        # directionally verified vertical probe can reach the real component.
+        self.cv2.line(image, (350, 110), (350, 150), (20, 20, 20), 4)
+        self.cv2.line(image, (135, 150), (565, 150), (20, 20, 20), 4)
+        self.cv2.line(image, (135, 150), (135, 280), (20, 20, 20), 4)
+        self.cv2.line(image, (565, 150), (565, 280), (20, 20, 20), 4)
+
+        evidence = self._evidence(image, boxes)
+
+        self.assertEqual(
+            {
+                frozenset((connector.source, connector.target))
+                for connector in evidence.connectors
+            },
+            {
+                frozenset(("ACC-001", "AP-001")),
+                frozenset(("ACC-001", "AP-002")),
+            },
+        )
+        self.assertEqual(
+            {connector.evidence for connector in evidence.connectors},
+            {"directional_probe_component"},
+        )
+
+    def test_directional_probe_recovers_a_wide_production_fanout(self):
+        image = self.np.full((880, 2003, 3), 255, dtype=self.np.uint8)
+        boxes = {
+            "CORE-001": (684.0, 300.0, 84.0, 30.0),
+            "ACC-010": (178.0, 708.0, 72.0, 25.0),
+            "ACC-022": (652.0, 708.0, 72.0, 25.0),
+            "ACC-006": (890.0, 708.0, 73.0, 25.0),
+            "ACC-012": (1207.0, 708.0, 73.0, 25.0),
+            "ACC-015": (1603.0, 708.0, 72.0, 25.0),
+        }
+        centers = (214, 688, 926, 1243, 1639)
+        self.cv2.line(image, (726, 390), (726, 500), (20, 20, 20), 4)
+        self.cv2.line(image, (214, 500), (1639, 500), (20, 20, 20), 4)
+        for center_x in centers:
+            self.cv2.line(
+                image,
+                (center_x, 500),
+                (center_x, 640),
+                (20, 20, 20),
+                4,
+            )
+
+        evidence = self._evidence(image, boxes)
+
+        self.assertEqual(
+            {
+                (connector.source, connector.target)
+                for connector in evidence.connectors
+            },
+            {
+                ("CORE-001", "ACC-010"),
+                ("CORE-001", "ACC-022"),
+                ("CORE-001", "ACC-006"),
+                ("CORE-001", "ACC-012"),
+                ("CORE-001", "ACC-015"),
+            },
+        )
+
+    def test_directional_probe_recovers_three_layers_without_shortcuts(self):
+        image = self.np.full((810, 900, 3), 255, dtype=self.np.uint8)
+        boxes = {
+            "CORE-001": (415.0, 30.0, 70.0, 24.0),
+            "ACC-001": (225.0, 360.0, 70.0, 24.0),
+            "ACC-002": (605.0, 360.0, 70.0, 24.0),
+            "AP-001": (65.0, 740.0, 70.0, 24.0),
+            "AP-002": (285.0, 740.0, 70.0, 24.0),
+            "AP-003": (545.0, 740.0, 70.0, 24.0),
+            "AP-004": (765.0, 740.0, 70.0, 24.0),
+        }
+        self.cv2.line(image, (450, 110), (450, 200), (20, 20, 20), 4)
+        self.cv2.line(image, (260, 200), (640, 200), (20, 20, 20), 4)
+        self.cv2.line(image, (260, 200), (260, 300), (20, 20, 20), 4)
+        self.cv2.line(image, (640, 200), (640, 300), (20, 20, 20), 4)
+        for root_x, bus_left, bus_right, leaves in (
+            (260, 100, 320, (100, 320)),
+            (640, 580, 800, (580, 800)),
+        ):
+            self.cv2.line(image, (root_x, 440), (root_x, 520), (20, 20, 20), 4)
+            self.cv2.line(
+                image,
+                (bus_left, 520),
+                (bus_right, 520),
+                (20, 20, 20),
+                4,
+            )
+            for leaf_x in leaves:
+                self.cv2.line(
+                    image,
+                    (leaf_x, 520),
+                    (leaf_x, 680),
+                    (20, 20, 20),
+                    4,
+                )
+
+        evidence = self._evidence(image, boxes)
+
+        self.assertEqual(
+            {(connector.source, connector.target) for connector in evidence.connectors},
+            {
+                ("CORE-001", "ACC-001"),
+                ("CORE-001", "ACC-002"),
+                ("ACC-001", "AP-001"),
+                ("ACC-001", "AP-002"),
+                ("ACC-002", "AP-003"),
+                ("ACC-002", "AP-004"),
+            },
+        )
+        self.assertEqual(
+            {connector.evidence for connector in evidence.connectors},
+            {"directional_probe_component"},
+        )
+
+    def test_directional_probe_completes_already_connected_internal_nodes(self):
+        image = self.np.full((860, 1100, 3), 255, dtype=self.np.uint8)
+        boxes = {
+            "GW-001": (515.0, 20.0, 70.0, 24.0),
+            "CORE-001": (515.0, 180.0, 70.0, 24.0),
+            "ACC-001": (515.0, 500.0, 70.0, 24.0),
+            "AP-001": (515.0, 760.0, 70.0, 24.0),
+            **{
+                f"AP-{index:03d}": (x, 620.0, 70.0, 24.0)
+                for index, x in zip(
+                    range(2, 9),
+                    (20.0, 120.0, 220.0, 320.0, 700.0, 800.0, 900.0),
+                )
+            },
+        }
+        # These two exact paths make CORE and ACC members of the primary
+        # connected-node set before fallback runs.
+        self.cv2.line(image, (550, 44), (550, 180), (20, 20, 20), 4)
+        self.cv2.line(image, (550, 524), (550, 760), (20, 20, 20), 4)
+        # The missing middle edge has source pixels but leaves an OCR-sized
+        # blank interval at both endpoints.  Completing topology must not be
+        # limited to edges where one endpoint is otherwise an orphan.
+        self.cv2.line(image, (550, 260), (550, 440), (20, 20, 20), 4)
+
+        evidence = self._evidence(image, boxes)
+
+        self.assertEqual(
+            {
+                (connector.source, connector.target)
+                for connector in evidence.connectors
+            },
+            {
+                ("GW-001", "CORE-001"),
+                ("CORE-001", "ACC-001"),
+                ("ACC-001", "AP-001"),
+            },
+        )
+        self.assertEqual(
+            next(
+                connector.evidence
+                for connector in evidence.connectors
+                if connector.source == "CORE-001"
+                and connector.target == "ACC-001"
+            ),
+            "directional_probe_component",
+        )
+
+    def test_directional_probe_runs_at_five_edges_in_a_21_node_scene(self):
+        image = self.np.full((900, 1800, 3), 255, dtype=self.np.uint8)
+        boxes = {}
+        for index, center_x in enumerate((550.0, 100.0, 900.0, 1300.0), 1):
+            boxes[f"GW-{index:03d}"] = (center_x - 35.0, 20.0, 70.0, 24.0)
+            boxes[f"CORE-{index:03d}"] = (
+                center_x - 35.0,
+                180.0,
+                70.0,
+                24.0,
+            )
+        boxes["ACC-001"] = (515.0, 500.0, 70.0, 24.0)
+        boxes["AP-001"] = (515.0, 800.0, 70.0, 24.0)
+        for index, x in enumerate(
+            (20, 140, 260, 380, 700, 820, 940, 1060, 1180, 1450, 1600),
+            101,
+        ):
+            boxes[f"AP-{index:03d}"] = (float(x), 800.0, 70.0, 24.0)
+
+        for center_x in (550, 100, 900, 1300):
+            self.cv2.line(
+                image,
+                (center_x, 44),
+                (center_x, 180),
+                (20, 20, 20),
+                4,
+            )
+        self.cv2.line(image, (550, 524), (550, 800), (20, 20, 20), 4)
+        self.cv2.line(image, (550, 260), (550, 440), (20, 20, 20), 4)
+
+        with patch.object(
+            self.backend,
+            "_legacy_layered_component_pairs",
+            side_effect=AssertionError("wide legacy projection must stay disabled"),
+        ):
+            evidence = self._evidence(image, boxes)
+
+        self.assertEqual(len(evidence.connectors), 6)
+        self.assertIn(
+            ("CORE-001", "ACC-001", "directional_probe_component"),
+            {
+                (connector.source, connector.target, connector.evidence)
+                for connector in evidence.connectors
             },
         )
 
@@ -1197,6 +1414,42 @@ class RapidOCROpenCVConnectorSyntheticTest(unittest.TestCase):
             {connector.evidence for connector in evidence.connectors},
             {"legacy_padded_hough_segment"},
         )
+
+    def test_wide_gapped_crossing_still_keeps_only_straight_edges(self):
+        boxes = {
+            "CORE-001": (275.0, 30.0, 70.0, 24.0),
+            "AGG-001": (30.0, 298.0, 70.0, 24.0),
+            "AGG-002": (520.0, 298.0, 70.0, 24.0),
+            "ACC-001": (275.0, 566.0, 70.0, 24.0),
+        }
+        for gap in (36, 40, 44):
+            with self.subTest(gap=gap):
+                image = self.np.full((620, 620, 3), 255, dtype=self.np.uint8)
+                self.cv2.line(
+                    image,
+                    (310, 54 + gap),
+                    (310, 566 - gap),
+                    (20, 20, 20),
+                    4,
+                )
+                self.cv2.line(
+                    image,
+                    (100 + gap, 310),
+                    (520 - gap, 310),
+                    (20, 20, 20),
+                    4,
+                )
+
+                self.assertEqual(
+                    {
+                        frozenset((connector.source, connector.target))
+                        for connector in self._evidence(image, boxes).connectors
+                    },
+                    {
+                        frozenset(("CORE-001", "ACC-001")),
+                        frozenset(("AGG-001", "AGG-002")),
+                    },
+                )
 
     def test_legacy_fallback_recovers_generic_three_layer_tree(self):
         image = self.np.full((780, 760, 3), 255, dtype=self.np.uint8)
@@ -1646,6 +1899,172 @@ class RapidOCROpenCVConnectorSyntheticTest(unittest.TestCase):
                 ).connectors
             },
             {frozenset(("ACC-101", "ACC-102"))},
+        )
+
+    def test_same_layer_leaf_stubs_on_shared_bus_are_not_a_direct_edge(self):
+        image = self.np.full((420, 700, 3), 255, dtype=self.np.uint8)
+        boxes = {
+            "AP-026": (130.0, 340.0, 70.0, 24.0),
+            "AP-034": (500.0, 340.0, 70.0, 24.0),
+        }
+        # Both AP stubs reach the same upstream bus, but there is no direct
+        # horizontal AP-to-AP pixel path.  Reconstructed component continuity
+        # must not turn the two leaves into peers.
+        self.cv2.line(image, (165, 340), (165, 150), (20, 20, 20), 4)
+        self.cv2.line(image, (535, 340), (535, 150), (20, 20, 20), 4)
+        self.cv2.line(image, (165, 150), (535, 150), (20, 20, 20), 4)
+
+        self.assertEqual(self._evidence(image, boxes).connectors, ())
+
+    def test_different_roles_on_same_side_of_bus_are_not_a_direct_edge(self):
+        image = self.np.full((420, 700, 3), 255, dtype=self.np.uint8)
+        boxes = {
+            "CORE-001": (130.0, 340.0, 80.0, 24.0),
+            "AP-034": (500.0, 340.0, 70.0, 24.0),
+        }
+        self.cv2.line(image, (170, 340), (170, 150), (20, 20, 20), 4)
+        self.cv2.line(image, (535, 340), (535, 150), (20, 20, 20), 4)
+        self.cv2.line(image, (170, 150), (535, 150), (20, 20, 20), 4)
+
+        # Role hierarchy may orient an observed edge, but it must never create
+        # one when both endpoints leave toward the same upstream bus.
+        self.assertEqual(self._evidence(image, boxes).connectors, ())
+
+    def test_directional_fallback_does_not_infer_ap_to_ap_hierarchy(self):
+        image = self.np.full((660, 500, 3), 255, dtype=self.np.uint8)
+        boxes = {
+            "AP-001": (215.0, 100.0, 70.0, 24.0),
+            "AP-002": (215.0, 500.0, 70.0, 24.0),
+        }
+        self.cv2.line(image, (250, 204), (250, 420), (20, 20, 20), 4)
+
+        self.assertEqual(self._evidence(image, boxes).connectors, ())
+
+    def test_same_layer_leaf_direct_source_line_remains_a_valid_edge(self):
+        image = self.np.full((260, 700, 3), 255, dtype=self.np.uint8)
+        boxes = {
+            "AP-101": (80.0, 110.0, 70.0, 24.0),
+            "AP-102": (550.0, 110.0, 70.0, 24.0),
+        }
+        self.cv2.line(image, (150, 122), (550, 122), (20, 20, 20), 4)
+
+        evidence = self._evidence(image, boxes)
+
+        self.assertEqual(
+            {
+                frozenset((connector.source, connector.target))
+                for connector in evidence.connectors
+            },
+            {frozenset(("AP-101", "AP-102"))},
+        )
+
+    def test_short_endpoint_gaps_keep_a_real_direct_edge(self):
+        boxes = {
+            "ACC-101": (80.0, 110.0, 70.0, 24.0),
+            "ACC-102": (550.0, 110.0, 70.0, 24.0),
+        }
+        for gap in (4, 6, 9):
+            with self.subTest(gap=gap):
+                image = self.np.full((260, 700, 3), 255, dtype=self.np.uint8)
+                self.cv2.line(
+                    image,
+                    (150 + gap, 122),
+                    (550 - gap, 122),
+                    (20, 20, 20),
+                    4,
+                )
+                self.assertEqual(
+                    {
+                        frozenset((connector.source, connector.target))
+                        for connector in self._evidence(image, boxes).connectors
+                    },
+                    {frozenset(("ACC-101", "ACC-102"))},
+                )
+
+    def test_two_endpoint_stubs_do_not_validate_a_long_reconstructed_path(self):
+        boxes = {
+            "AP-101": (80.0, 110.0, 70.0, 24.0),
+            "AP-102": (550.0, 110.0, 70.0, 24.0),
+        }
+        _spans, nodes = self._nodes(boxes)
+        reconstructed = self.np.zeros((260, 700), dtype=self.np.uint8)
+        source = self.np.zeros_like(reconstructed)
+        self.cv2.line(reconstructed, (150, 122), (550, 122), 255, 3)
+        self.cv2.line(source, (150, 122), (190, 122), 255, 3)
+        self.cv2.line(source, (510, 122), (550, 122), 255, 3)
+
+        self.assertEqual(
+            self.backend._component_connector_pairs(
+                reconstructed,
+                source_mask=source,
+                contact_boxes=boxes,
+                diagram_nodes=nodes,
+                horizontal_mask=source,
+                vertical_mask=self.np.zeros_like(source),
+            ),
+            (),
+        )
+
+    def test_multi_branch_ignores_an_endpoint_without_source_pixels(self):
+        boxes = {
+            "CORE-001": (315.0, 30.0, 70.0, 24.0),
+            "AP-001": (80.0, 400.0, 70.0, 24.0),
+            "AP-002": (550.0, 400.0, 70.0, 24.0),
+            "AP-003": (315.0, 400.0, 70.0, 24.0),
+        }
+        _spans, nodes = self._nodes(boxes)
+        source = self.np.zeros((500, 700), dtype=self.np.uint8)
+        self.cv2.line(source, (350, 54), (350, 220), 255, 4)
+        self.cv2.line(source, (115, 220), (585, 220), 255, 4)
+        self.cv2.line(source, (115, 220), (115, 400), 255, 4)
+        self.cv2.line(source, (585, 220), (585, 400), 255, 4)
+        reconstructed = source.copy()
+        self.cv2.line(reconstructed, (350, 220), (350, 400), 255, 4)
+
+        pairs = self.backend._component_connector_pairs(
+            reconstructed,
+            source_mask=source,
+            contact_boxes=boxes,
+            diagram_nodes=nodes,
+            horizontal_mask=source,
+            vertical_mask=source,
+        )
+
+        self.assertEqual(
+            {
+                frozenset((first, second))
+                for first, second, _multi_branch in pairs
+            },
+            {
+                frozenset(("CORE-001", "AP-001")),
+                frozenset(("CORE-001", "AP-002")),
+            },
+        )
+
+    def test_false_third_endpoint_downgrades_to_a_real_two_node_path(self):
+        boxes = {
+            "ACC-001": (40.0, 188.0, 70.0, 24.0),
+            "ACC-002": (590.0, 188.0, 70.0, 24.0),
+            "AP-999": (315.0, 40.0, 70.0, 24.0),
+        }
+        _spans, nodes = self._nodes(boxes)
+        source = self.np.zeros((300, 700), dtype=self.np.uint8)
+        self.cv2.line(source, (110, 200), (590, 200), 255, 4)
+        reconstructed = source.copy()
+        self.cv2.line(reconstructed, (350, 64), (350, 200), 255, 4)
+
+        pairs = self.backend._component_connector_pairs(
+            reconstructed,
+            source_mask=source,
+            contact_boxes=boxes,
+            diagram_nodes=nodes,
+            horizontal_mask=source,
+            vertical_mask=source,
+        )
+
+        self.assertEqual(
+            pairs,
+            (("ACC-001", "ACC-002", False),),
         )
 
     def test_dense_perpendicular_strokes_do_not_form_a_phantom_edge(self):

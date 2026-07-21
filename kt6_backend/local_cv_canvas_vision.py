@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left
 import heapq
 import json
 import math
@@ -265,6 +266,7 @@ class RapidOCROpenCVBackend:
         )
         for first, second, multi_branch in self._component_connector_pairs(
             line_mask,
+            source_mask=cleaned,
             contact_boxes=relation_anchor_boxes,
             diagram_nodes=relation_nodes,
             horizontal_mask=horizontal,
@@ -377,10 +379,14 @@ class RapidOCROpenCVBackend:
             for business_id in (source, target)
         }
         fallback_node_limit = max(1, int(math.ceil(len(relation_nodes) * 0.4)))
-        if (
+        legacy_recovery_needed = (
             len(candidates) <= fallback_edge_limit
             and len(primary_connected_nodes) < fallback_node_limit
-        ):
+        )
+        directional_recovery_needed = len(primary_connected_nodes) < int(
+            math.ceil(len(relation_nodes) * 0.75)
+        )
+        if legacy_recovery_needed or directional_recovery_needed:
             (
                 legacy_component_labels,
                 legacy_component_stats,
@@ -409,14 +415,18 @@ class RapidOCROpenCVBackend:
                 if allow_layered_fallback
                 else ()
             )
-            legacy_pair_evidence = {
-                frozenset((first, second)): (
-                    first,
-                    second,
-                    "legacy_padded_hough_segment",
-                )
-                for first, second, _segment in padded_segment_pairs
-            }
+            legacy_pair_evidence = (
+                {
+                    frozenset((first, second)): (
+                        first,
+                        second,
+                        "legacy_padded_hough_segment",
+                    )
+                    for first, second, _segment in padded_segment_pairs
+                }
+                if legacy_recovery_needed
+                else {}
+            )
             layered_pairs = (
                 self._legacy_layered_component_pairs(
                     legacy_line_mask,
@@ -431,9 +441,32 @@ class RapidOCROpenCVBackend:
                     component_stats=legacy_component_stats,
                     blocked_component_labels=closed_component_labels,
                 )
-                if allow_layered_fallback
+                if legacy_recovery_needed and allow_layered_fallback
                 else ()
             )
+            directional_pairs: tuple[tuple[str, str], ...] = ()
+            directional_crossing_groups: tuple[frozenset[str], ...] = ()
+            if directional_recovery_needed and allow_layered_fallback:
+                (
+                    directional_pairs,
+                    directional_crossing_groups,
+                ) = self._directional_probe_component_pairs(
+                    legacy_line_mask,
+                    horizontal_mask=horizontal,
+                    vertical_mask=vertical,
+                    node_boxes=relation_anchor_boxes,
+                    diagram_nodes=relation_nodes,
+                    component_labels=legacy_component_labels,
+                    component_stats=legacy_component_stats,
+                    blocked_component_labels=closed_component_labels,
+                )
+                crossing_node_groups = tuple(crossing_node_groups) + tuple(
+                    directional_crossing_groups
+                )
+            directional_pair_keys = {
+                frozenset((first, second))
+                for first, second in directional_pairs
+            }
             for first, second in layered_pairs:
                 if any(
                     first in group and second in group
@@ -448,15 +481,66 @@ class RapidOCROpenCVBackend:
                     frozenset((first, second)),
                     (first, second, "legacy_layered_pixel_component"),
                 )
-            recoverable_legacy_edges = [
-                edge
-                for key, edge in legacy_pair_evidence.items()
-                if key not in candidates
-                and (
-                    edge[0] not in primary_connected_nodes
-                    or edge[1] not in primary_connected_nodes
-                )
-            ]
+            for first, second in directional_pairs:
+                pair_key = frozenset((first, second))
+                current_evidence = legacy_pair_evidence.get(pair_key)
+                if (
+                    current_evidence is None
+                    or current_evidence[2]
+                    == "legacy_layered_pixel_component"
+                ):
+                    # Evidence priority: direct padded Hough, traceable
+                    # directional component, then wide legacy projection.
+                    legacy_pair_evidence[pair_key] = (
+                        first,
+                        second,
+                        "directional_probe_component",
+                    )
+            forest_parent = {
+                business_id: business_id
+                for business_id in relation_nodes
+            }
+
+            def find_root(business_id: str) -> str:
+                parent = forest_parent[business_id]
+                while parent != forest_parent[parent]:
+                    parent = forest_parent[parent]
+                while business_id != parent:
+                    next_id = forest_parent[business_id]
+                    forest_parent[business_id] = parent
+                    business_id = next_id
+                return parent
+
+            def join(first: str, second: str) -> bool:
+                first_root = find_root(first)
+                second_root = find_root(second)
+                if first_root == second_root:
+                    return False
+                forest_parent[second_root] = first_root
+                return True
+
+            for existing_key in candidates:
+                if len(existing_key) == 2:
+                    first, second = tuple(existing_key)
+                    join(first, second)
+
+            recoverable_legacy_edges: list[tuple[str, str, str]] = []
+            for key, edge in legacy_pair_evidence.items():
+                if key in candidates:
+                    continue
+                first, second, fallback_evidence = edge
+                if key in directional_pair_keys:
+                    # A traceable probe may join two already non-orphaned
+                    # partial trees, but never closes a fallback-created cycle.
+                    if join(first, second):
+                        recoverable_legacy_edges.append(edge)
+                    continue
+                if (
+                    first not in primary_connected_nodes
+                    or second not in primary_connected_nodes
+                ):
+                    recoverable_legacy_edges.append(edge)
+                    join(first, second)
             if recoverable_legacy_edges:
                 for first, second, fallback_evidence in recoverable_legacy_edges:
                     self._remember_connector_candidate(
@@ -464,12 +548,11 @@ class RapidOCROpenCVBackend:
                         source=first,
                         target=second,
                         confidence=min(
-                            (
-                                0.80
-                                if fallback_evidence
-                                == "legacy_layered_pixel_component"
-                                else 0.78
-                            ),
+                            {
+                                "legacy_layered_pixel_component": 0.80,
+                                "legacy_padded_hough_segment": 0.78,
+                                "directional_probe_component": 0.76,
+                            }[fallback_evidence],
                             relation_nodes[first].confidence,
                             relation_nodes[second].confidence,
                         ),
@@ -487,6 +570,7 @@ class RapidOCROpenCVBackend:
                 in {
                     "orthogonal_pixel_connector",
                     "legacy_layered_pixel_component",
+                    "directional_probe_component",
                 },
             )
             connectors.append(
@@ -521,6 +605,439 @@ class RapidOCROpenCVBackend:
             node_boxes=node_boxes,
             connectors=tuple(connectors),
             pass_through_nodes=pass_through_nodes,
+        )
+
+    def _directional_probe_component_pairs(
+        self,
+        line_mask: Any,
+        *,
+        horizontal_mask: Any,
+        vertical_mask: Any,
+        node_boxes: Mapping[str, Box],
+        diagram_nodes: Mapping[str, DeviceOccurrence],
+        component_labels: Any,
+        component_stats: Any,
+        blocked_component_labels: frozenset[int] = frozenset(),
+    ) -> tuple[
+        tuple[tuple[str, str], ...],
+        tuple[frozenset[str], ...],
+    ]:
+        """Recover topology from traceable node-to-component endpoint probes.
+
+        The method never paints inferred pixels back into the global mask.
+        Instead, every endpoint records the original orthogonal component it
+        reached and the side of the node it left.  An edge requires both nodes
+        to reach that same component with mutually facing exits.  Hierarchical
+        edges are restricted to adjacent visual layers, which prevents a
+        shared bus from becoming leaf-to-leaf or root-to-grandchild shortcuts.
+        """
+
+        cv2 = self._cv2
+        np = self._np
+        height, width = line_mask.shape[:2]
+        typical_height = median(
+            occurrence.bbox[3]
+            for occurrence in diagram_nodes.values()
+            if occurrence.bbox[3] > 0
+        )
+        maximum_gap = max(32, min(96, int(round(typical_height * 3.6))))
+        continuation = max(12, min(36, int(round(typical_height * 0.9))))
+        gap_limit = max(4, min(14, int(round(typical_height * 0.55))))
+        directions = (
+            ("north", 0, -1, vertical_mask),
+            ("south", 0, 1, vertical_mask),
+            ("west", -1, 0, horizontal_mask),
+            ("east", 1, 0, horizontal_mask),
+        )
+        component_probes: dict[int, dict[str, set[str]]] = {}
+
+        for business_id, occurrence in diagram_nodes.items():
+            x, y, box_width, box_height = node_boxes.get(
+                business_id,
+                occurrence.bbox,
+            )
+            left = max(0, int(math.floor(x)))
+            top = max(0, int(math.floor(y)))
+            right = min(width - 1, int(math.ceil(x + box_width)))
+            bottom = min(height - 1, int(math.ceil(y + box_height)))
+            if left > right or top > bottom:
+                continue
+            center_x = (left + right) / 2
+            center_y = (top + bottom) / 2
+
+            for direction, delta_x, delta_y, direction_mask in directions:
+                if delta_y < 0:
+                    region_left, region_right = left, right
+                    region_top = max(0, top - maximum_gap)
+                    region_bottom = top - 1
+                elif delta_y > 0:
+                    region_left, region_right = left, right
+                    region_top = bottom + 1
+                    region_bottom = min(height - 1, bottom + maximum_gap)
+                elif delta_x < 0:
+                    region_left = max(0, left - maximum_gap)
+                    region_right = left - 1
+                    region_top, region_bottom = top, bottom
+                else:
+                    region_left = right + 1
+                    region_right = min(width - 1, right + maximum_gap)
+                    region_top, region_bottom = top, bottom
+                if (
+                    region_left > region_right
+                    or region_top > region_bottom
+                ):
+                    continue
+
+                direction_region = direction_mask[
+                    region_top : region_bottom + 1,
+                    region_left : region_right + 1,
+                ]
+                label_region = component_labels[
+                    region_top : region_bottom + 1,
+                    region_left : region_right + 1,
+                ]
+                active_y, active_x = np.nonzero(
+                    (direction_region > 0) & (label_region > 0)
+                )
+                if not len(active_x):
+                    continue
+                active_x = active_x + region_left
+                active_y = active_y + region_top
+                targets_by_component: dict[int, list[tuple[int, int]]] = {}
+                for target_x, target_y in zip(
+                    active_x.tolist(),
+                    active_y.tolist(),
+                ):
+                    label = int(component_labels[target_y, target_x])
+                    if label <= 0 or label in blocked_component_labels:
+                        continue
+                    if int(component_stats[label, cv2.CC_STAT_AREA]) < 4:
+                        continue
+                    targets_by_component.setdefault(label, []).append(
+                        (target_x, target_y)
+                    )
+
+                cross_span = box_width if delta_y else box_height
+                lateral_limit = max(
+                    6.0,
+                    min(float(cross_span) * 0.35, occurrence.bbox[3] * 0.75),
+                )
+                ranked_components: list[
+                    tuple[float, int, int, int, int]
+                ] = []
+                for label, component_targets in targets_by_component.items():
+                    ranked_targets: list[tuple[float, int, int, int]] = []
+                    for target_x, target_y in component_targets:
+                        if delta_y < 0:
+                            distance = top - target_y
+                            lateral = abs(target_x - center_x)
+                        elif delta_y > 0:
+                            distance = target_y - bottom
+                            lateral = abs(target_x - center_x)
+                        elif delta_x < 0:
+                            distance = left - target_x
+                            lateral = abs(target_y - center_y)
+                        else:
+                            distance = target_x - right
+                            lateral = abs(target_y - center_y)
+                        if lateral > lateral_limit:
+                            continue
+                        ranked_targets.append(
+                            (
+                                distance + lateral * 0.35,
+                                distance,
+                                target_x,
+                                target_y,
+                            )
+                        )
+                    if not ranked_targets:
+                        continue
+                    score, distance, target_x, target_y = min(ranked_targets)
+                    ranked_components.append(
+                        (score, distance, label, target_x, target_y)
+                    )
+
+                valid_components: list[tuple[float, int]] = []
+                for score, distance, label, target_x, target_y in sorted(
+                    ranked_components
+                ):
+                    far_x = int(
+                        max(0, min(width - 1, target_x + delta_x * continuation))
+                    )
+                    far_y = int(
+                        max(0, min(height - 1, target_y + delta_y * continuation))
+                    )
+                    coverage, runs, maximum_run_gap, leading_gap, _trailing_gap = (
+                        self._corridor_support(
+                            direction_mask,
+                            (float(target_x), float(target_y)),
+                            (float(far_x), float(far_y)),
+                        )
+                    )
+                    if leading_gap > 2:
+                        continue
+                    continuous = coverage >= 0.55 and maximum_run_gap <= gap_limit
+                    dashed = (
+                        runs >= 2
+                        and coverage >= 0.30
+                        and maximum_run_gap <= gap_limit
+                    )
+                    if not continuous and not dashed:
+                        continue
+                    if delta_y:
+                        boundary = (
+                            target_x,
+                            top if delta_y < 0 else bottom,
+                        )
+                    else:
+                        boundary = (
+                            left if delta_x < 0 else right,
+                            target_y,
+                        )
+                    target = (target_x, target_y)
+                    if self._segment_crosses_other_node(
+                        boundary,
+                        target,
+                        excluded={business_id},
+                        contact_boxes=node_boxes,
+                    ):
+                        continue
+                    valid_components.append((score, label))
+
+                if not valid_components:
+                    continue
+                ambiguity_margin = max(4.0, occurrence.bbox[3] * 0.2)
+                if (
+                    len(valid_components) >= 2
+                    and valid_components[1][0] - valid_components[0][0]
+                    < ambiguity_margin
+                ):
+                    continue
+                accepted_label = valid_components[0][1]
+                component_probes.setdefault(accepted_label, {}).setdefault(
+                    business_id,
+                    set(),
+                ).add(direction)
+
+        crossing_labels: set[int] = set()
+        crossing_groups: set[frozenset[str]] = set()
+        straight_crossing_pairs: set[tuple[str, str]] = set()
+        for label, node_probes in component_probes.items():
+            side_nodes = {
+                side: [
+                    business_id
+                    for business_id, sides in node_probes.items()
+                    if side in sides
+                ]
+                for side in ("north", "south", "west", "east")
+            }
+            if not all(side_nodes.values()):
+                continue
+            group = frozenset(
+                business_id
+                for business_ids in side_nodes.values()
+                for business_id in business_ids
+            )
+            if len(group) < 4:
+                continue
+            crossing_labels.add(label)
+            crossing_groups.add(group)
+
+            vertical_candidates: list[tuple[str, str]] = []
+            if (
+                len(side_nodes["south"]) * len(side_nodes["north"])
+                <= self.MAX_CORRIDOR_NODE_PAIRS
+            ):
+                vertical_candidates = [
+                    (top, bottom)
+                    for top in side_nodes["south"]
+                    for bottom in side_nodes["north"]
+                    if diagram_nodes[top].center[1]
+                    < diagram_nodes[bottom].center[1]
+                ]
+            if vertical_candidates:
+                straight_crossing_pairs.add(
+                    min(
+                        vertical_candidates,
+                        key=lambda pair: (
+                            abs(
+                                diagram_nodes[pair[0]].center[0]
+                                - diagram_nodes[pair[1]].center[0]
+                            ),
+                            math.hypot(
+                                diagram_nodes[pair[0]].center[0]
+                                - diagram_nodes[pair[1]].center[0],
+                                diagram_nodes[pair[0]].center[1]
+                                - diagram_nodes[pair[1]].center[1],
+                            ),
+                            pair,
+                        ),
+                    )
+                )
+
+            horizontal_candidates: list[tuple[str, str]] = []
+            if (
+                len(side_nodes["east"]) * len(side_nodes["west"])
+                <= self.MAX_CORRIDOR_NODE_PAIRS
+            ):
+                horizontal_candidates = [
+                    (left, right)
+                    for left in side_nodes["east"]
+                    for right in side_nodes["west"]
+                    if diagram_nodes[left].center[0]
+                    < diagram_nodes[right].center[0]
+                ]
+            if horizontal_candidates:
+                straight_crossing_pairs.add(
+                    min(
+                        horizontal_candidates,
+                        key=lambda pair: (
+                            abs(
+                                diagram_nodes[pair[0]].center[1]
+                                - diagram_nodes[pair[1]].center[1]
+                            ),
+                            math.hypot(
+                                diagram_nodes[pair[0]].center[0]
+                                - diagram_nodes[pair[1]].center[0],
+                                diagram_nodes[pair[0]].center[1]
+                                - diagram_nodes[pair[1]].center[1],
+                            ),
+                            pair,
+                        ),
+                    )
+                )
+
+        layers = self._legacy_visual_layers(diagram_nodes)
+        layer_indexes = {
+            business_id: layer_index
+            for layer_index, layer in enumerate(layers)
+            for business_id in layer
+        }
+        role_rank = {
+            "GW": 0,
+            "CORE": 1,
+            "RTR": 1,
+            "AGG": 2,
+            "FW": 2,
+            "AC": 2,
+            "ACC": 3,
+            "SW": 3,
+            "LSW": 3,
+            "AP": 4,
+            "ONU": 4,
+        }
+        parent_candidates: dict[
+            str,
+            list[tuple[float, float, str]],
+        ] = {}
+        for label, node_probes in component_probes.items():
+            if label in crossing_labels:
+                continue
+            nodes_by_layer: dict[int, list[str]] = {}
+            for business_id in node_probes:
+                nodes_by_layer.setdefault(
+                    layer_indexes[business_id],
+                    [],
+                ).append(business_id)
+
+            occupied_child_layers = sorted(
+                layer_index
+                for layer_index in nodes_by_layer
+                if layer_index > 0 and layer_index - 1 in nodes_by_layer
+            )
+            for child_layer_index in occupied_child_layers:
+                parents = [
+                    business_id
+                    for business_id in nodes_by_layer.get(
+                        child_layer_index - 1,
+                        (),
+                    )
+                    if "south" in node_probes[business_id]
+                ]
+                children = [
+                    business_id
+                    for business_id in nodes_by_layer.get(
+                        child_layer_index,
+                        (),
+                    )
+                    if "north" in node_probes[business_id]
+                ]
+                if not parents or not children:
+                    continue
+
+                eligible_parent_lists: dict[
+                    int | None,
+                    tuple[list[float], list[str]],
+                ] = {}
+                for child in children:
+                    child_rank = role_rank.get(diagram_nodes[child].prefix)
+                    eligible = eligible_parent_lists.get(child_rank)
+                    if eligible is None:
+                        sorted_parents = sorted(
+                            (
+                                diagram_nodes[parent].center[0],
+                                parent,
+                            )
+                            for parent in parents
+                            if (
+                                child_rank is None
+                                or role_rank.get(diagram_nodes[parent].prefix)
+                                is None
+                                or role_rank[diagram_nodes[parent].prefix]
+                                < child_rank
+                            )
+                        )
+                        eligible = (
+                            [item[0] for item in sorted_parents],
+                            [item[1] for item in sorted_parents],
+                        )
+                        eligible_parent_lists[child_rank] = eligible
+                    parent_xs, eligible_parents = eligible
+                    if not eligible_parents:
+                        continue
+
+                    child_center = diagram_nodes[child].center
+                    insertion_index = bisect_left(parent_xs, child_center[0])
+                    nearest_indexes = {
+                        max(0, insertion_index - 1),
+                        min(len(eligible_parents) - 1, insertion_index),
+                    }
+                    chosen_parent = min(
+                        (eligible_parents[index] for index in nearest_indexes),
+                        key=lambda parent: (
+                            abs(
+                                diagram_nodes[parent].center[0]
+                                - child_center[0]
+                            ),
+                            math.hypot(
+                                diagram_nodes[parent].center[0]
+                                - child_center[0],
+                                diagram_nodes[parent].center[1]
+                                - child_center[1],
+                            ),
+                            parent,
+                        ),
+                    )
+                    parent_center = diagram_nodes[chosen_parent].center
+                    parent_candidates.setdefault(child, []).append(
+                        (
+                            abs(parent_center[0] - child_center[0]),
+                            math.hypot(
+                                parent_center[0] - child_center[0],
+                                parent_center[1] - child_center[1],
+                            ),
+                            chosen_parent,
+                        )
+                    )
+
+        pairs = set(straight_crossing_pairs)
+        pairs.update(
+            (min(candidates)[2], child)
+            for child, candidates in parent_candidates.items()
+        )
+        return (
+            tuple(sorted(pairs)),
+            tuple(sorted(crossing_groups, key=lambda group: tuple(sorted(group)))),
         )
 
     def _legacy_layered_component_pairs(
@@ -1030,6 +1547,7 @@ class RapidOCROpenCVBackend:
         self,
         line_mask: Any,
         *,
+        source_mask: Any,
         contact_boxes: Mapping[str, Box],
         diagram_nodes: Mapping[str, DeviceOccurrence],
         horizontal_mask: Any,
@@ -1062,6 +1580,23 @@ class RapidOCROpenCVBackend:
         )
         if count <= 1:
             return ()
+        raw_near = cv2.dilate(
+            source_mask,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
+            iterations=1,
+        )
+        raw_overlap_by_label = np.bincount(
+            labels[raw_near > 0].ravel(),
+            minlength=count,
+        )
+        horizontal_support_by_label = np.bincount(
+            labels[horizontal_mask > 0].ravel(),
+            minlength=count,
+        )
+        vertical_support_by_label = np.bincount(
+            labels[vertical_mask > 0].ravel(),
+            minlength=count,
+        )
 
         component_nodes: dict[int, set[str]] = {}
         touch_margin = max(4, min(10, int(round(math.hypot(width, height) / 500))))
@@ -1083,23 +1618,71 @@ class RapidOCROpenCVBackend:
 
         pairs: set[tuple[str, str, bool]] = set()
         for label, attached_nodes in component_nodes.items():
+            component_area = int(stats[label, cv2.CC_STAT_AREA])
+            raw_overlap = int(raw_overlap_by_label[label])
+            if raw_overlap < max(4, int(round(component_area * 0.10))):
+                # line_mask also contains Hough reconstructions and explicit
+                # OCR-gap bridges.  Those pixels may restore continuity, but
+                # they cannot create a component with almost no source-pixel
+                # support of its own.
+                continue
             if len(attached_nodes) == 2:
                 first, second = sorted(attached_nodes)
+                if raw_overlap < max(4, int(round(component_area * 0.30))):
+                    # A two-node component must be substantially backed by
+                    # captured pixels.  Short endpoint stubs plus a long
+                    # Hough reconstruction are not proof of a direct edge.
+                    continue
+                if not self._component_pair_has_compatible_raw_endpoints(
+                    first,
+                    second,
+                    component_labels=labels,
+                    component_label=label,
+                    raw_near=raw_near,
+                    contact_boxes=contact_boxes,
+                    diagram_nodes=diagram_nodes,
+                ):
+                    continue
                 pairs.add((first, second, False))
                 continue
             if len(attached_nodes) < 3:
                 continue
-            component_pixels = labels == label
-            horizontal_support = int(
-                np.count_nonzero(component_pixels & (horizontal_mask > 0))
-            )
-            vertical_support = int(
-                np.count_nonzero(component_pixels & (vertical_mask > 0))
-            )
+            attached_nodes = {
+                business_id
+                for business_id in attached_nodes
+                if self._raw_component_endpoint_directions(
+                    contact_boxes[business_id],
+                    component_labels=labels,
+                    component_label=label,
+                    raw_near=raw_near,
+                    label_height=diagram_nodes[business_id].bbox[3],
+                )
+            }
+            if len(attached_nodes) == 2:
+                # A nearby Hough-only third branch must not erase an otherwise
+                # real two-ended path.  Downgrade to the stricter pair checks.
+                first, second = sorted(attached_nodes)
+                if (
+                    raw_overlap >= max(4, int(round(component_area * 0.30)))
+                    and self._component_pair_has_compatible_raw_endpoints(
+                        first,
+                        second,
+                        component_labels=labels,
+                        component_label=label,
+                        raw_near=raw_near,
+                        contact_boxes=contact_boxes,
+                        diagram_nodes=diagram_nodes,
+                    )
+                ):
+                    pairs.add((first, second, False))
+                continue
+            if len(attached_nodes) < 2:
+                continue
+            horizontal_support = int(horizontal_support_by_label[label])
+            vertical_support = int(vertical_support_by_label[label])
             # Multi-contact projection is limited to a visible orthogonal
             # trunk/T structure. Diagonal X crossings remain independent
             # straight edges and must never become a shared bus.
-            component_area = int(stats[label, cv2.CC_STAT_AREA])
             minimum_orthogonal_support = max(
                 8,
                 int(round(component_area * 0.05)),
@@ -1132,6 +1715,169 @@ class RapidOCROpenCVBackend:
             for leaf in sorted(attached_nodes - {root}):
                 pairs.add((root, leaf, True))
         return tuple(sorted(pairs))
+
+    def _component_pair_has_compatible_raw_endpoints(
+        self,
+        first: str,
+        second: str,
+        *,
+        component_labels: Any,
+        component_label: int,
+        raw_near: Any,
+        contact_boxes: Mapping[str, Box],
+        diagram_nodes: Mapping[str, DeviceOccurrence],
+    ) -> bool:
+        """Require real endpoint exits compatible with one two-node path.
+
+        A reconstructed component may contain Hough and OCR-gap pixels.  Real
+        source pixels must therefore leave both node anchors.  Two leaves
+        touching the same side of an upstream bus are not a direct connection,
+        regardless of their role names; both exits must face the other node.
+        """
+
+        first_node = diagram_nodes[first]
+        second_node = diagram_nodes[second]
+        first_directions = self._raw_component_endpoint_directions(
+            contact_boxes[first],
+            component_labels=component_labels,
+            component_label=component_label,
+            raw_near=raw_near,
+            label_height=first_node.bbox[3],
+        )
+        second_directions = self._raw_component_endpoint_directions(
+            contact_boxes[second],
+            component_labels=component_labels,
+            component_label=component_label,
+            raw_near=raw_near,
+            label_height=second_node.bbox[3],
+        )
+        if not first_directions or not second_directions:
+            return False
+
+        vectors = {
+            "north": (0.0, -1.0),
+            "south": (0.0, 1.0),
+            "west": (-1.0, 0.0),
+            "east": (1.0, 0.0),
+        }
+        delta_x = second_node.center[0] - first_node.center[0]
+        delta_y = second_node.center[1] - first_node.center[1]
+        distance = math.hypot(delta_x, delta_y)
+        if distance <= 1e-6:
+            return False
+        first_faces_second = any(
+            (
+                vectors[direction][0] * delta_x
+                + vectors[direction][1] * delta_y
+            )
+            / distance
+            >= 0.5
+            for direction in first_directions
+        )
+        second_faces_first = any(
+            (
+                vectors[direction][0] * -delta_x
+                + vectors[direction][1] * -delta_y
+            )
+            / distance
+            >= 0.5
+            for direction in second_directions
+        )
+        return first_faces_second and second_faces_first
+
+    def _raw_component_endpoint_directions(
+        self,
+        box: Box,
+        *,
+        component_labels: Any,
+        component_label: int,
+        raw_near: Any,
+        label_height: float,
+    ) -> frozenset[str]:
+        """Return node sides with a short, source-backed component exit."""
+
+        np = self._np
+        height, width = component_labels.shape[:2]
+        x, y, box_width, box_height = box
+        left = max(0, int(math.floor(x)))
+        top = max(0, int(math.floor(y)))
+        right = min(width - 1, int(math.ceil(x + box_width)))
+        bottom = min(height - 1, int(math.ceil(y + box_height)))
+        probe_length = max(6, min(18, int(round(label_height * 0.75))))
+        maximum_gap = max(3, int(round(label_height * 0.30)))
+        directions: set[str] = set()
+
+        def supported(
+            top_bound: int,
+            bottom_bound: int,
+            left_bound: int,
+            right_bound: int,
+        ) -> Any:
+            return (
+                component_labels[
+                    top_bound:bottom_bound,
+                    left_bound:right_bound,
+                ]
+                == component_label
+            ) & (
+                raw_near[
+                    top_bound:bottom_bound,
+                    left_bound:right_bound,
+                ]
+                > 0
+            )
+
+        strips = {
+            "north": supported(
+                max(0, top - probe_length),
+                top,
+                left,
+                right + 1,
+            )[::-1, :],
+            "south": supported(
+                bottom + 1,
+                min(height, bottom + 1 + probe_length),
+                left,
+                right + 1,
+            ),
+            "west": supported(
+                top,
+                bottom + 1,
+                max(0, left - probe_length),
+                left,
+            )[:, ::-1],
+            "east": supported(
+                top,
+                bottom + 1,
+                right + 1,
+                min(width, right + 1 + probe_length),
+            ),
+        }
+        for direction, strip in strips.items():
+            if strip.size == 0:
+                continue
+            occupancy = (
+                np.any(strip, axis=1)
+                if direction in {"north", "south"}
+                else np.any(strip, axis=0)
+            )
+            active_indexes = np.flatnonzero(occupancy)
+            if not len(active_indexes) or int(active_indexes[0]) > 2:
+                continue
+            active_span = occupancy[: int(active_indexes[-1]) + 1]
+            inactive = (~active_span).astype(np.int8)
+            transitions = np.diff(np.pad(inactive, (1, 1), constant_values=0))
+            starts = np.flatnonzero(transitions == 1)
+            ends = np.flatnonzero(transitions == -1)
+            gap_lengths = ends - starts
+            if len(gap_lengths) and int(np.max(gap_lengths)) > maximum_gap:
+                continue
+            if float(np.mean(active_span)) < 0.45:
+                continue
+            if len(active_span) < max(4, int(round(probe_length * 0.45))):
+                continue
+            directions.add(direction)
+        return frozenset(directions)
 
     @staticmethod
     def _multi_branch_root(
@@ -3174,7 +3920,7 @@ class LocalCVTopologyVisionAdapter:
     """Recognize a single topology image without an Agent or external service."""
 
     adapter_id = "local-cv-ocr"
-    adapter_version = "1.2"
+    adapter_version = "1.3"
     supports_actionable_grounding = False
 
     DEFAULT_MIN_OCR_CONFIDENCE = 0.65
