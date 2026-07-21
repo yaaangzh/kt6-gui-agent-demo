@@ -7,6 +7,7 @@ import struct
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 import zlib
 
 from kt6_backend.local_cv_canvas_vision import (
@@ -824,6 +825,416 @@ class RapidOCROpenCVConnectorSyntheticTest(unittest.TestCase):
             },
         )
 
+    def test_legacy_layered_fallback_recovers_gapped_production_trunk(self):
+        image = self.np.full((500, 700, 3), 255, dtype=self.np.uint8)
+        boxes = {
+            "CORE-001": (315.0, 30.0, 70.0, 24.0),
+            "ACC-001": (80.0, 400.0, 70.0, 24.0),
+            "ACC-002": (315.0, 400.0, 70.0, 24.0),
+            "ACC-003": (550.0, 400.0, 70.0, 24.0),
+        }
+        # The visible line ends are 24px away from the OCR boxes.  Precise
+        # anchor/corridor gates reject this rendering, while the pre-v1.2
+        # padded connected-component path recovered the full trunk.
+        self.cv2.line(image, (350, 78), (350, 220), (20, 20, 20), 4)
+        self.cv2.line(image, (115, 220), (585, 220), (20, 20, 20), 4)
+        for x_position in (115, 350, 585):
+            self.cv2.line(
+                image,
+                (x_position, 220),
+                (x_position, 376),
+                (20, 20, 20),
+                4,
+            )
+
+        evidence = self._evidence(image, boxes)
+
+        self.assertEqual(
+            {
+                frozenset((connector.source, connector.target))
+                for connector in evidence.connectors
+            },
+            {
+                frozenset(("CORE-001", "ACC-001")),
+                frozenset(("CORE-001", "ACC-002")),
+                frozenset(("CORE-001", "ACC-003")),
+            },
+        )
+        self.assertEqual(
+            {connector.evidence for connector in evidence.connectors},
+            {
+                "legacy_layered_pixel_component",
+                "legacy_padded_hough_segment",
+            },
+        )
+
+    def test_legacy_padded_hough_fallback_recovers_gapped_diagonal_star(self):
+        image = self.np.full((580, 820, 3), 255, dtype=self.np.uint8)
+        boxes = {
+            "CORE-001": (375.0, 278.0, 70.0, 24.0),
+            "ACC-001": (40.0, 40.0, 70.0, 24.0),
+            "ACC-002": (710.0, 40.0, 70.0, 24.0),
+            "ACC-003": (40.0, 510.0, 70.0, 24.0),
+            "ACC-004": (710.0, 510.0, 70.0, 24.0),
+        }
+        center_box = boxes["CORE-001"]
+        for business_id, target_box in boxes.items():
+            if business_id == "CORE-001":
+                continue
+            start, end = self._boundary_points(center_box, target_box)
+            delta_x = end[0] - start[0]
+            delta_y = end[1] - start[1]
+            length = math.hypot(delta_x, delta_y)
+            gap = 28.0
+            gapped_start = (
+                round(start[0] + delta_x * gap / length),
+                round(start[1] + delta_y * gap / length),
+            )
+            gapped_end = (
+                round(end[0] - delta_x * gap / length),
+                round(end[1] - delta_y * gap / length),
+            )
+            self.cv2.line(
+                image,
+                gapped_start,
+                gapped_end,
+                (20, 20, 20),
+                4,
+                self.cv2.LINE_AA,
+            )
+
+        evidence = self._evidence(image, boxes)
+
+        self.assertEqual(
+            {
+                frozenset((connector.source, connector.target))
+                for connector in evidence.connectors
+            },
+            {
+                frozenset(("CORE-001", "ACC-001")),
+                frozenset(("CORE-001", "ACC-002")),
+                frozenset(("CORE-001", "ACC-003")),
+                frozenset(("CORE-001", "ACC-004")),
+            },
+        )
+        self.assertEqual(
+            {connector.evidence for connector in evidence.connectors},
+            {"legacy_padded_hough_segment"},
+        )
+
+    def test_legacy_fallback_is_not_called_when_precise_coverage_is_sufficient(self):
+        image = self.np.full((500, 700, 3), 255, dtype=self.np.uint8)
+        boxes = {
+            "CORE-001": (315.0, 30.0, 70.0, 24.0),
+            "ACC-001": (80.0, 400.0, 70.0, 24.0),
+            "ACC-002": (315.0, 400.0, 70.0, 24.0),
+            "ACC-003": (550.0, 400.0, 70.0, 24.0),
+        }
+        self.cv2.line(image, (350, 54), (350, 220), (20, 20, 20), 4)
+        self.cv2.line(image, (115, 220), (585, 220), (20, 20, 20), 4)
+        self.cv2.line(image, (115, 220), (115, 400), (20, 20, 20), 4)
+        self.cv2.line(image, (350, 220), (350, 400), (20, 20, 20), 4)
+        self.cv2.line(image, (585, 220), (585, 400), (20, 20, 20), 4)
+
+        with patch.object(
+            self.backend,
+            "_legacy_layered_component_pairs",
+            side_effect=AssertionError("legacy fallback must stay disabled"),
+        ):
+            detected = self._detect(image, boxes)
+
+        self.assertEqual(
+            detected,
+            {
+                ("CORE-001", "ACC-001"),
+                ("CORE-001", "ACC-002"),
+                ("CORE-001", "ACC-003"),
+            },
+        )
+
+    def test_legacy_fallback_stays_off_for_a_small_partial_topology(self):
+        image = self.np.full((260, 760, 3), 255, dtype=self.np.uint8)
+        boxes = {
+            "ACC-001": (40.0, 100.0, 70.0, 24.0),
+            "ACC-002": (240.0, 100.0, 70.0, 24.0),
+            "ACC-003": (440.0, 100.0, 70.0, 24.0),
+            "ACC-004": (640.0, 100.0, 70.0, 24.0),
+        }
+        self._solid_edge(
+            image,
+            boxes["ACC-001"],
+            boxes["ACC-002"],
+            (20, 20, 20),
+            thickness=3,
+        )
+
+        with patch.object(
+            self.backend,
+            "_legacy_layered_component_pairs",
+            side_effect=AssertionError("legacy fallback must stay disabled"),
+        ):
+            evidence = self._evidence(image, boxes)
+
+        self.assertEqual(
+            {
+                frozenset((connector.source, connector.target))
+                for connector in evidence.connectors
+            },
+            {frozenset(("ACC-001", "ACC-002"))},
+        )
+
+    def test_legacy_fallback_adds_new_coverage_to_a_large_partial_topology(self):
+        image = self.np.full((320, 1120, 3), 255, dtype=self.np.uint8)
+        boxes = {
+            f"ACC-{index:03d}": (
+                40.0 + (index - 1) * 170.0,
+                130.0,
+                70.0,
+                24.0,
+            )
+            for index in range(1, 7)
+        }
+        self._solid_edge(
+            image,
+            boxes["ACC-001"],
+            boxes["ACC-002"],
+            (20, 20, 20),
+            thickness=3,
+        )
+
+        with patch.object(
+            self.backend,
+            "_legacy_padded_segment_pairs",
+            return_value=(("ACC-003", "ACC-004", (0, 0, 100, 0)),),
+        ), patch.object(
+            self.backend,
+            "_legacy_layered_component_pairs",
+            return_value=(),
+        ):
+            evidence = self._evidence(image, boxes)
+
+        self.assertEqual(
+            {
+                frozenset((connector.source, connector.target))
+                for connector in evidence.connectors
+            },
+            {
+                frozenset(("ACC-001", "ACC-002")),
+                frozenset(("ACC-003", "ACC-004")),
+            },
+        )
+
+    def test_legacy_fallback_recovers_a_three_layer_role_tree(self):
+        image = self.np.full((840, 900, 3), 255, dtype=self.np.uint8)
+        boxes = {
+            "CORE-001": (415.0, 30.0, 70.0, 24.0),
+            "AGG-001": (250.0, 350.0, 70.0, 24.0),
+            "AGG-002": (680.0, 350.0, 70.0, 24.0),
+            "ACC-001": (40.0, 750.0, 70.0, 24.0),
+            "ACC-002": (280.0, 750.0, 70.0, 24.0),
+            "ACC-003": (520.0, 750.0, 70.0, 24.0),
+            "ACC-004": (790.0, 750.0, 70.0, 24.0),
+        }
+        self.cv2.line(image, (450, 78), (450, 300), (20, 20, 20), 4)
+        self.cv2.line(image, (235, 300), (665, 300), (20, 20, 20), 4)
+        self.cv2.line(image, (235, 300), (235, 520), (20, 20, 20), 4)
+        self.cv2.line(image, (665, 300), (665, 520), (20, 20, 20), 4)
+        self.cv2.line(image, (75, 520), (315, 520), (20, 20, 20), 4)
+        self.cv2.line(image, (555, 520), (825, 520), (20, 20, 20), 4)
+        for x_position in (75, 315, 555, 825):
+            self.cv2.line(
+                image,
+                (x_position, 520),
+                (x_position, 726),
+                (20, 20, 20),
+                4,
+            )
+
+        evidence = self._evidence(image, boxes)
+
+        self.assertEqual(
+            {(item.source, item.target) for item in evidence.connectors},
+            {
+                ("CORE-001", "AGG-001"),
+                ("CORE-001", "AGG-002"),
+                ("AGG-001", "ACC-001"),
+                ("AGG-001", "ACC-002"),
+                ("AGG-002", "ACC-003"),
+                ("AGG-002", "ACC-004"),
+            },
+        )
+        self.assertEqual(
+            {item.evidence for item in evidence.connectors},
+            {"legacy_layered_pixel_component"},
+        )
+
+    def test_legacy_fallback_rejects_a_cross_layer_container_frame(self):
+        image = self.np.full((500, 400, 3), 255, dtype=self.np.uint8)
+        boxes = {
+            "CORE-001": (165.0, 80.0, 70.0, 24.0),
+            "ACC-001": (165.0, 340.0, 70.0, 24.0),
+        }
+        self.cv2.rectangle(image, (100, 50), (300, 390), (20, 20, 20), 4)
+
+        self.assertEqual(self._evidence(image, boxes).connectors, ())
+
+    def test_legacy_padded_hough_rejects_nodes_near_same_container_border(self):
+        image = self.np.full((420, 420, 3), 255, dtype=self.np.uint8)
+        boxes = {
+            "CORE-001": (105.0, 56.0, 70.0, 24.0),
+            "ACC-001": (245.0, 56.0, 70.0, 24.0),
+        }
+        self.cv2.rectangle(image, (100, 50), (320, 370), (20, 20, 20), 4)
+
+        _spans, nodes = self._nodes(boxes)
+        frame = self._frame(image)
+        decoded = self.backend._decode(frame.raw)
+        gray = self.cv2.cvtColor(decoded, self.cv2.COLOR_BGR2GRAY)
+        mask = self.cv2.threshold(
+            gray,
+            0,
+            255,
+            self.cv2.THRESH_BINARY_INV + self.cv2.THRESH_OTSU,
+        )[1]
+        component_labels, _stats, blocked_labels = (
+            self.backend._legacy_component_analysis(
+                mask,
+                diagram_nodes=nodes,
+            )
+        )
+        pairs = self.backend._legacy_padded_segment_pairs(
+            ((100, 50, 320, 50),),
+            mask=mask,
+            node_boxes=boxes,
+            anchor_boxes=boxes,
+            diagram_nodes=nodes,
+            component_labels=component_labels,
+            blocked_component_labels=blocked_labels,
+        )
+
+        self.assertTrue(blocked_labels)
+        self.assertEqual(pairs, ())
+
+    def test_legacy_padded_hough_keeps_real_edge_inside_container(self):
+        image = self.np.full((500, 500, 3), 255, dtype=self.np.uint8)
+        boxes = {
+            "CORE-001": (215.0, 100.0, 70.0, 24.0),
+            "ACC-001": (215.0, 350.0, 70.0, 24.0),
+        }
+        self.cv2.rectangle(image, (50, 50), (450, 450), (20, 20, 20), 4)
+        self.cv2.line(image, (250, 148), (250, 326), (20, 20, 20), 4)
+
+        _spans, nodes = self._nodes(boxes)
+        frame = self._frame(image)
+        decoded = self.backend._decode(frame.raw)
+        gray = self.cv2.cvtColor(decoded, self.cv2.COLOR_BGR2GRAY)
+        mask = self.cv2.threshold(
+            gray,
+            0,
+            255,
+            self.cv2.THRESH_BINARY_INV + self.cv2.THRESH_OTSU,
+        )[1]
+        component_labels, _stats, blocked_labels = (
+            self.backend._legacy_component_analysis(
+                mask,
+                diagram_nodes=nodes,
+            )
+        )
+
+        self.assertTrue(blocked_labels)
+        self.assertEqual(
+            self.backend._legacy_padded_segment_pairs(
+                ((250, 148, 250, 326),),
+                mask=mask,
+                node_boxes=boxes,
+                anchor_boxes=boxes,
+                diagram_nodes=nodes,
+                component_labels=component_labels,
+                blocked_component_labels=blocked_labels,
+            ),
+            (("CORE-001", "ACC-001", (250, 148, 250, 326)),),
+        )
+
+    def test_legacy_crossing_scan_is_bounded_for_dense_segment_sets(self):
+        segment_pairs = tuple(
+            (
+                f"LEFT-{index}",
+                f"RIGHT-{index}",
+                (0, index, 100, index),
+            )
+            for index in range(self.backend.MAX_LEGACY_CROSSING_PAIRS + 1)
+        )
+
+        self.assertEqual(
+            self.backend._legacy_straight_crossing_node_groups(segment_pairs),
+            (),
+        )
+
+    def test_legacy_fallback_keeps_only_straight_gapped_crossing_edges(self):
+        image = self.np.full((620, 620, 3), 255, dtype=self.np.uint8)
+        boxes = {
+            "CORE-001": (275.0, 30.0, 70.0, 24.0),
+            "AGG-001": (30.0, 298.0, 70.0, 24.0),
+            "AGG-002": (520.0, 298.0, 70.0, 24.0),
+            "ACC-001": (275.0, 566.0, 70.0, 24.0),
+        }
+        self.cv2.line(image, (310, 78), (310, 542), (20, 20, 20), 4)
+        self.cv2.line(image, (124, 310), (496, 310), (20, 20, 20), 4)
+
+        evidence = self._evidence(image, boxes)
+
+        self.assertEqual(
+            {
+                frozenset((connector.source, connector.target))
+                for connector in evidence.connectors
+            },
+            {
+                frozenset(("CORE-001", "ACC-001")),
+                frozenset(("AGG-001", "AGG-002")),
+            },
+        )
+        self.assertEqual(
+            {connector.evidence for connector in evidence.connectors},
+            {"legacy_padded_hough_segment"},
+        )
+
+    def test_legacy_fallback_recovers_generic_three_layer_tree(self):
+        image = self.np.full((780, 760, 3), 255, dtype=self.np.uint8)
+        boxes = {
+            "testNE100": (345.0, 30.0, 70.0, 24.0),
+            "testNE200": (180.0, 330.0, 70.0, 24.0),
+            "testNE201": (510.0, 330.0, 70.0, 24.0),
+            "testNE300": (50.0, 700.0, 70.0, 24.0),
+            "testNE301": (250.0, 700.0, 70.0, 24.0),
+            "testNE302": (440.0, 700.0, 70.0, 24.0),
+            "testNE303": (640.0, 700.0, 70.0, 24.0),
+        }
+        self.cv2.line(image, (380, 78), (380, 280), (20, 20, 20), 4)
+        self.cv2.line(image, (215, 280), (545, 280), (20, 20, 20), 4)
+        self.cv2.line(image, (215, 280), (215, 500), (20, 20, 20), 4)
+        self.cv2.line(image, (545, 280), (545, 500), (20, 20, 20), 4)
+        self.cv2.line(image, (85, 500), (285, 500), (20, 20, 20), 4)
+        self.cv2.line(image, (475, 500), (675, 500), (20, 20, 20), 4)
+        for x_position in (85, 285, 475, 675):
+            self.cv2.line(
+                image,
+                (x_position, 500),
+                (x_position, 676),
+                (20, 20, 20),
+                4,
+            )
+
+        self.assertTrue(
+            {
+                ("testNE100", "testNE200"),
+                ("testNE100", "testNE201"),
+                ("testNE200", "testNE300"),
+                ("testNE200", "testNE301"),
+                ("testNE201", "testNE302"),
+                ("testNE201", "testNE303"),
+            }.issubset(self._detect(image, boxes)),
+        )
+
     def test_layered_trunk_recovers_generic_testne_root_and_all_leaves(self):
         image = self.np.full((500, 700, 3), 255, dtype=self.np.uint8)
         boxes = {
@@ -1427,6 +1838,40 @@ class RapidOCROpenCVConnectorSyntheticTest(unittest.TestCase):
             {
                 frozenset((connector.source, connector.target))
                 for connector in corrected_chain.connectors
+            },
+            {
+                frozenset(("ACC-001", "ACC-002")),
+                frozenset(("ACC-002", "ACC-003")),
+            },
+        )
+
+        low_confidence_middle = chain_nodes["ACC-002"]
+        chain_nodes["ACC-002"] = DeviceOccurrence(
+            business_id=low_confidence_middle.business_id,
+            prefix=low_confidence_middle.prefix,
+            confidence=0.70,
+            bbox=low_confidence_middle.bbox,
+            raw_text=low_confidence_middle.raw_text,
+            span_index=low_confidence_middle.span_index,
+            corrected_ocr=True,
+        )
+        low_confidence_spans = tuple(
+            OCRSpan(span.text, 0.70, span.bbox)
+            if span.text == "ACC-002"
+            else span
+            for span in chain_spans
+        )
+        low_confidence_chain = self.backend.analyze_connectors(
+            self._frame(chain),
+            spans=low_confidence_spans,
+            diagram_nodes=chain_nodes,
+            diagram_bottom=float(chain.shape[0]),
+        )
+        self.assertEqual(low_confidence_chain.pass_through_nodes, frozenset())
+        self.assertEqual(
+            {
+                frozenset((connector.source, connector.target))
+                for connector in low_confidence_chain.connectors
             },
             {
                 frozenset(("ACC-001", "ACC-002")),

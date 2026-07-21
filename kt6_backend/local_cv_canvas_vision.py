@@ -93,6 +93,7 @@ class RapidOCROpenCVBackend:
     MAX_OCR_SPANS = 5000
     MAX_LINE_SEGMENTS = 5000
     MAX_CORRIDOR_NODE_PAIRS = 5000
+    MAX_LEGACY_CROSSING_PAIRS = 256
 
     def __init__(self) -> None:
         try:
@@ -186,6 +187,17 @@ class RapidOCROpenCVBackend:
         )
         horizontal = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, horizontal_kernel)
         vertical = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, vertical_kernel)
+        # Keep the pre-v1.2 orthogonal component mask.  The current detector
+        # uses precise glyph anchors, which is safer when they are accurate but
+        # can lose every edge when a production renderer leaves a visible gap
+        # between the connector and its label/icon.  The legacy mask is used
+        # only as a low-recall fallback below.
+        legacy_line_mask = cv2.bitwise_or(horizontal, vertical)
+        legacy_line_mask = cv2.dilate(
+            legacy_line_mask,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
+            iterations=1,
+        )
         segments = self._line_segments(
             cleaned,
             spans=spans,
@@ -352,6 +364,118 @@ class RapidOCROpenCVBackend:
                 line_color=color,
             )
 
+        # v1.0 associated long connected components with generously padded
+        # OCR/node regions and then selected one parent from the nearest visual
+        # layer.  Restore that behavior only when the precise v1.2 paths leave
+        # most of the recognized nodes disconnected.  This is intentionally a
+        # fallback rather than a second always-on topology generator: scenes
+        # already handled by the precise detector retain their exact edges.
+        fallback_edge_limit = max(1, len(relation_nodes) // 5)
+        primary_connected_nodes = {
+            business_id
+            for source, target, *_rest in candidates.values()
+            for business_id in (source, target)
+        }
+        fallback_node_limit = max(1, int(math.ceil(len(relation_nodes) * 0.4)))
+        if (
+            len(candidates) <= fallback_edge_limit
+            and len(primary_connected_nodes) < fallback_node_limit
+        ):
+            (
+                legacy_component_labels,
+                legacy_component_stats,
+                closed_component_labels,
+            ) = self._legacy_component_analysis(
+                legacy_line_mask,
+                diagram_nodes=relation_nodes,
+            )
+            padded_segment_pairs = self._legacy_padded_segment_pairs(
+                segments,
+                mask=cleaned,
+                node_boxes={
+                    business_id: node_boxes[business_id]
+                    for business_id in relation_nodes
+                },
+                anchor_boxes=relation_anchor_boxes,
+                diagram_nodes=relation_nodes,
+                component_labels=legacy_component_labels,
+                blocked_component_labels=closed_component_labels,
+            )
+            allow_layered_fallback = (
+                len(padded_segment_pairs) <= self.MAX_LEGACY_CROSSING_PAIRS
+            )
+            crossing_node_groups = (
+                self._legacy_straight_crossing_node_groups(padded_segment_pairs)
+                if allow_layered_fallback
+                else ()
+            )
+            legacy_pair_evidence = {
+                frozenset((first, second)): (
+                    first,
+                    second,
+                    "legacy_padded_hough_segment",
+                )
+                for first, second, _segment in padded_segment_pairs
+            }
+            layered_pairs = (
+                self._legacy_layered_component_pairs(
+                    legacy_line_mask,
+                    node_boxes={
+                        business_id: node_boxes[business_id]
+                        for business_id in relation_nodes
+                    },
+                    diagram_nodes=relation_nodes,
+                    horizontal_length=horizontal_length,
+                    vertical_length=vertical_length,
+                    component_labels=legacy_component_labels,
+                    component_stats=legacy_component_stats,
+                    blocked_component_labels=closed_component_labels,
+                )
+                if allow_layered_fallback
+                else ()
+            )
+            for first, second in layered_pairs:
+                if any(
+                    first in group and second in group
+                    for group in crossing_node_groups
+                ):
+                    # Two independent straight Hough paths that cross in their
+                    # interiors are stronger evidence than the old visual-layer
+                    # projection.  Without this guard, a plain "+" crossing is
+                    # expanded into a false hierarchy between all four nodes.
+                    continue
+                legacy_pair_evidence.setdefault(
+                    frozenset((first, second)),
+                    (first, second, "legacy_layered_pixel_component"),
+                )
+            recoverable_legacy_edges = [
+                edge
+                for key, edge in legacy_pair_evidence.items()
+                if key not in candidates
+                and (
+                    edge[0] not in primary_connected_nodes
+                    or edge[1] not in primary_connected_nodes
+                )
+            ]
+            if recoverable_legacy_edges:
+                for first, second, fallback_evidence in recoverable_legacy_edges:
+                    self._remember_connector_candidate(
+                        candidates,
+                        source=first,
+                        target=second,
+                        confidence=min(
+                            (
+                                0.80
+                                if fallback_evidence
+                                == "legacy_layered_pixel_component"
+                                else 0.78
+                            ),
+                            relation_nodes[first].confidence,
+                            relation_nodes[second].confidence,
+                        ),
+                        evidence=fallback_evidence,
+                    )
+
         connectors: list[DetectedConnector] = []
         for candidate in candidates.values():
             preferred_source, preferred_target, confidence, evidence, style, color = candidate
@@ -359,7 +483,11 @@ class RapidOCROpenCVBackend:
                 preferred_source,
                 preferred_target,
                 diagram_nodes,
-                keep_preferred=evidence == "orthogonal_pixel_connector",
+                keep_preferred=evidence
+                in {
+                    "orthogonal_pixel_connector",
+                    "legacy_layered_pixel_component",
+                },
             )
             connectors.append(
                 DetectedConnector(
@@ -394,6 +522,509 @@ class RapidOCROpenCVBackend:
             connectors=tuple(connectors),
             pass_through_nodes=pass_through_nodes,
         )
+
+    def _legacy_layered_component_pairs(
+        self,
+        line_mask: Any,
+        *,
+        node_boxes: Mapping[str, Box],
+        diagram_nodes: Mapping[str, DeviceOccurrence],
+        horizontal_length: int,
+        vertical_length: int,
+        component_labels: Any | None = None,
+        component_stats: Any | None = None,
+        blocked_component_labels: frozenset[int] = frozenset(),
+    ) -> tuple[tuple[str, str], ...]:
+        """Recover the high-recall v1.0 orthogonal relation path.
+
+        Unlike the precise component detector, this path does not cut node
+        regions out of the line mask.  Each visual child is attached to at
+        most one parent in the nearest preceding layer, so a shared trunk is
+        expanded into a tree instead of a clique.
+        """
+
+        cv2 = self._cv2
+        np = self._np
+        if component_labels is None or component_stats is None:
+            count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+                line_mask,
+                connectivity=8,
+            )
+        else:
+            labels = component_labels
+            stats = component_stats
+            count = len(stats)
+        if count <= 1:
+            return ()
+
+        image_height, image_width = line_mask.shape[:2]
+        minimum_component_area = max(
+            4,
+            min(horizontal_length, vertical_length) // 2,
+        )
+        component_sets: dict[str, set[int]] = {}
+        for business_id, occurrence in diagram_nodes.items():
+            x, y, width, height = node_boxes.get(
+                business_id,
+                occurrence.bbox,
+            )
+            margin = max(8, int(max(occurrence.bbox[3] * 1.5, 8)))
+            left = max(0, int(math.floor(x)) - margin)
+            top = max(0, int(math.floor(y)) - margin)
+            right = min(image_width, int(math.ceil(x + width)) + margin)
+            bottom = min(image_height, int(math.ceil(y + height)) + margin)
+            if left >= right or top >= bottom:
+                component_sets[business_id] = set()
+                continue
+
+            components: set[int] = set()
+            for raw_label in np.unique(labels[top:bottom, left:right]).tolist():
+                label = int(raw_label)
+                if label <= 0:
+                    continue
+                area = int(stats[label, cv2.CC_STAT_AREA])
+                component_width = int(stats[label, cv2.CC_STAT_WIDTH])
+                component_height = int(stats[label, cv2.CC_STAT_HEIGHT])
+                if area < minimum_component_area:
+                    continue
+                if (
+                    component_width < horizontal_length
+                    and component_height < vertical_length
+                ):
+                    continue
+                components.add(label)
+            component_sets[business_id] = components
+
+        layers = self._legacy_visual_layers(diagram_nodes)
+        layer_indexes = {
+            business_id: layer_index
+            for layer_index, layer in enumerate(layers)
+            for business_id in layer
+        }
+        component_nodes: dict[int, set[str]] = {}
+        for business_id, components in component_sets.items():
+            for label in components:
+                component_nodes.setdefault(label, set()).add(business_id)
+
+        unsafe_components: set[int] = set(blocked_component_labels)
+        for label, attached_nodes in component_nodes.items():
+            if len(attached_nodes) < 2:
+                continue
+            if label in unsafe_components:
+                continue
+
+        if unsafe_components:
+            for components in component_sets.values():
+                components.difference_update(unsafe_components)
+
+        pairs: set[tuple[str, str]] = set()
+        for layer_index in range(1, len(layers)):
+            for child_id in layers[layer_index]:
+                child_components = component_sets.get(child_id, set())
+                if not child_components:
+                    continue
+                chosen_parent: str | None = None
+                for parent_layer_index in range(layer_index - 1, -1, -1):
+                    possible_parents = [
+                        parent_id
+                        for parent_id in layers[parent_layer_index]
+                        if child_components & component_sets.get(parent_id, set())
+                    ]
+                    if not possible_parents:
+                        continue
+                    child_x = diagram_nodes[child_id].center[0]
+                    chosen_parent = min(
+                        possible_parents,
+                        key=lambda parent_id: (
+                            abs(diagram_nodes[parent_id].center[0] - child_x),
+                            parent_id,
+                        ),
+                    )
+                    break
+                if chosen_parent is not None and chosen_parent != child_id:
+                    pairs.add((chosen_parent, child_id))
+        return tuple(sorted(pairs))
+
+    def _legacy_padded_segment_pairs(
+        self,
+        segments: Sequence[tuple[int, int, int, int]],
+        *,
+        mask: Any,
+        node_boxes: Mapping[str, Box],
+        anchor_boxes: Mapping[str, Box],
+        diagram_nodes: Mapping[str, DeviceOccurrence],
+        component_labels: Any | None = None,
+        blocked_component_labels: frozenset[int] = frozenset(),
+    ) -> tuple[tuple[str, str, tuple[int, int, int, int]], ...]:
+        """Associate direct Hough segments with the wider v1.0 node halo."""
+
+        association_boxes: dict[str, Box] = {}
+        association_centers: dict[str, tuple[float, float]] = {}
+        for business_id, occurrence in diagram_nodes.items():
+            anchor = anchor_boxes.get(business_id, occurrence.bbox)
+            has_independent_anchor = any(
+                abs(anchor[index] - occurrence.bbox[index]) > 1e-6
+                for index in range(4)
+            )
+            box = (
+                anchor
+                if has_independent_anchor
+                else node_boxes.get(business_id, occurrence.bbox)
+            )
+            association_boxes[business_id] = box
+            if has_independent_anchor:
+                association_centers[business_id] = (
+                    box[0] + box[2] / 2,
+                    box[1] + box[3] / 2,
+                )
+            else:
+                association_centers[business_id] = occurrence.center
+
+        def endpoint_owner(point: tuple[int, int]) -> str | None:
+            ranked: list[tuple[float, float, str]] = []
+            for business_id, occurrence in diagram_nodes.items():
+                distance = self._point_box_distance(
+                    point,
+                    association_boxes[business_id],
+                )
+                maximum_distance = max(12.0, occurrence.bbox[3] * 1.4)
+                if distance <= maximum_distance:
+                    ranked.append((distance, maximum_distance, business_id))
+            ranked.sort(key=lambda item: (item[0], item[2]))
+            if not ranked:
+                return None
+            if len(ranked) >= 2:
+                ambiguity_margin = max(
+                    6.0,
+                    min(ranked[0][1], ranked[1][1]) * 0.2,
+                )
+                if ranked[1][0] - ranked[0][0] < ambiguity_margin:
+                    return None
+            return ranked[0][2]
+
+        pairs: dict[
+            frozenset[str],
+            tuple[str, str, tuple[int, int, int, int], float],
+        ] = {}
+        for x1, y1, x2, y2 in segments:
+            if self._directional_line_support(
+                mask,
+                (x1, y1),
+                (x2, y2),
+            ) < 0.60:
+                continue
+            first = endpoint_owner((x1, y1))
+            second = endpoint_owner((x2, y2))
+            if first is None or second is None or first == second:
+                continue
+            if (
+                component_labels is not None
+                and blocked_component_labels
+                and self._segment_uses_blocked_component(
+                    component_labels,
+                    (x1, y1),
+                    (x2, y2),
+                    blocked_component_labels,
+                )
+            ):
+                continue
+
+            first_node = diagram_nodes[first]
+            second_node = diagram_nodes[second]
+            first_center = association_centers[first]
+            second_center = association_centers[second]
+            segment_length = math.hypot(x2 - x1, y2 - y1)
+            node_distance = math.hypot(
+                second_center[0] - first_center[0],
+                second_center[1] - first_center[1],
+            )
+            if node_distance > 0 and segment_length < node_distance * 0.45:
+                continue
+
+            perpendicular_limit = max(
+                10.0,
+                first_node.bbox[3] * 0.9,
+                second_node.bbox[3] * 0.9,
+            )
+
+            def perpendicular_distance(point: tuple[float, float]) -> float:
+                return abs(
+                    (point[0] - x1) * (y2 - y1)
+                    - (point[1] - y1) * (x2 - x1)
+                ) / max(1.0, segment_length)
+
+            if (
+                perpendicular_distance(first_center) > perpendicular_limit
+                or perpendicular_distance(second_center) > perpendicular_limit
+            ):
+                continue
+
+            first_distance, first_projection = self._point_segment_distance(
+                first_center,
+                (x1, y1),
+                (x2, y2),
+            )
+            second_distance, second_projection = self._point_segment_distance(
+                second_center,
+                (x1, y1),
+                (x2, y2),
+            )
+            if first_projection > second_projection:
+                first_distance, second_distance = second_distance, first_distance
+                first_projection, second_projection = (
+                    second_projection,
+                    first_projection,
+                )
+            center_gap_limit = max(
+                48.0,
+                first_node.bbox[3] * 3.0,
+                second_node.bbox[3] * 3.0,
+            )
+            if first_distance > center_gap_limit or second_distance > center_gap_limit:
+                continue
+            if first_projection > 0.30 or second_projection < 0.70:
+                continue
+            if self._segment_crosses_other_node(
+                (x1, y1),
+                (x2, y2),
+                excluded={first, second},
+                contact_boxes=association_boxes,
+            ):
+                continue
+            pair = frozenset((first, second))
+            current = pairs.get(pair)
+            segment = (x1, y1, x2, y2)
+            if current is None or segment_length > current[3]:
+                pairs[pair] = (first, second, segment, segment_length)
+        return tuple(
+            (first, second, segment)
+            for first, second, segment, _length in sorted(
+                pairs.values(),
+                key=lambda item: tuple(sorted((item[0], item[1]))),
+            )
+        )
+
+    def _legacy_component_analysis(
+        self,
+        line_mask: Any,
+        *,
+        diagram_nodes: Mapping[str, DeviceOccurrence],
+    ) -> tuple[Any, Any, frozenset[int]]:
+        """Label line components and identify closed container components.
+
+        RETR_CCOMP exposes only enclosed holes, so this scan distinguishes a
+        closed panel/container border from an open trunk.  The returned labels
+        let both legacy paths reject the border pixels themselves without
+        rejecting a genuine connector merely because it is inside the panel.
+        """
+
+        cv2 = self._cv2
+        np = self._np
+        count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+            line_mask,
+            connectivity=8,
+        )
+        if count <= 1:
+            return labels, stats, frozenset()
+
+        contour_result = cv2.findContours(
+            line_mask,
+            cv2.RETR_CCOMP,
+            cv2.CHAIN_APPROX_SIMPLE,
+        )
+        contours = contour_result[-2]
+        hierarchy = contour_result[-1]
+        if hierarchy is None:
+            return labels, stats, frozenset()
+
+        bucket_size = 64
+        node_buckets: dict[
+            tuple[int, int],
+            list[tuple[float, float]],
+        ] = {}
+        for occurrence in diagram_nodes.values():
+            center = occurrence.center
+            node_buckets.setdefault(
+                (int(center[0]) // bucket_size, int(center[1]) // bucket_size),
+                [],
+            ).append(center)
+
+        closed_labels: set[int] = set()
+        for contour_index, contour in enumerate(contours):
+            parent_index = int(hierarchy[0][contour_index][3])
+            if parent_index < 0:
+                continue
+            if abs(float(cv2.contourArea(contour))) < 64.0:
+                continue
+            x, y, width, height = cv2.boundingRect(contour)
+            first_bucket_x = x // bucket_size
+            last_bucket_x = (x + width) // bucket_size
+            first_bucket_y = y // bucket_size
+            last_bucket_y = (y + height) // bucket_size
+            bucket_cell_count = (
+                last_bucket_x - first_bucket_x + 1
+            ) * (last_bucket_y - first_bucket_y + 1)
+            if bucket_cell_count <= max(1, len(node_buckets) * 2):
+                candidate_centers = (
+                    center
+                    for bucket_y in range(first_bucket_y, last_bucket_y + 1)
+                    for bucket_x in range(first_bucket_x, last_bucket_x + 1)
+                    for center in node_buckets.get((bucket_x, bucket_y), ())
+                )
+            else:
+                candidate_centers = (
+                    center
+                    for (bucket_x, bucket_y), centers in node_buckets.items()
+                    if first_bucket_x <= bucket_x <= last_bucket_x
+                    and first_bucket_y <= bucket_y <= last_bucket_y
+                    for center in centers
+                )
+            contained_count = 0
+            for center in candidate_centers:
+                if not (
+                    x <= center[0] <= x + width
+                    and y <= center[1] <= y + height
+                ):
+                    continue
+                if cv2.pointPolygonTest(contour, center, False) >= 0:
+                    contained_count += 1
+                    if contained_count >= 2:
+                        break
+            if contained_count < 2:
+                continue
+
+            parent_points = contours[parent_index].reshape(-1, 2)
+            if parent_points.size == 0:
+                continue
+            xs = np.clip(parent_points[:, 0], 0, labels.shape[1] - 1)
+            ys = np.clip(parent_points[:, 1], 0, labels.shape[0] - 1)
+            observed = labels[ys, xs]
+            observed = observed[observed > 0]
+            if observed.size == 0:
+                continue
+            closed_labels.add(int(np.bincount(observed).argmax()))
+        return labels, stats, frozenset(closed_labels)
+
+    def _segment_uses_blocked_component(
+        self,
+        component_labels: Any,
+        first: tuple[int, int],
+        second: tuple[int, int],
+        blocked_component_labels: frozenset[int],
+    ) -> bool:
+        """Return whether a segment follows a blocked frame component."""
+
+        np = self._np
+        length = math.hypot(second[0] - first[0], second[1] - first[1])
+        sample_count = max(2, min(600, int(round(length)) + 1))
+        xs = np.rint(np.linspace(first[0], second[0], sample_count)).astype(int)
+        ys = np.rint(np.linspace(first[1], second[1], sample_count)).astype(int)
+        xs = np.clip(xs, 0, component_labels.shape[1] - 1)
+        ys = np.clip(ys, 0, component_labels.shape[0] - 1)
+        observed = component_labels[ys, xs]
+        foreground = observed > 0
+        foreground_count = int(np.count_nonzero(foreground))
+        if foreground_count < max(4, int(round(sample_count * 0.30))):
+            return False
+        blocked = np.isin(observed, tuple(blocked_component_labels))
+        blocked_count = int(np.count_nonzero(blocked))
+        return (
+            blocked_count >= int(round(sample_count * 0.55))
+            and blocked_count >= int(round(foreground_count * 0.70))
+        )
+
+    @classmethod
+    def _legacy_straight_crossing_node_groups(
+        cls,
+        segment_pairs: Sequence[
+            tuple[str, str, tuple[int, int, int, int]]
+        ],
+    ) -> tuple[frozenset[str], ...]:
+        """Find two disjoint, near-perpendicular edges crossing internally."""
+
+        if len(segment_pairs) > cls.MAX_LEGACY_CROSSING_PAIRS:
+            return ()
+        groups: set[frozenset[str]] = set()
+        for first_index, first_entry in enumerate(segment_pairs):
+            first_source, first_target, first_segment = first_entry
+            first_nodes = frozenset((first_source, first_target))
+            first_x1, first_y1, first_x2, first_y2 = first_segment
+            first_dx = first_x2 - first_x1
+            first_dy = first_y2 - first_y1
+            first_length = math.hypot(first_dx, first_dy)
+            if first_length <= 1e-6:
+                continue
+            for second_source, second_target, second_segment in segment_pairs[
+                first_index + 1 :
+            ]:
+                second_nodes = frozenset((second_source, second_target))
+                if not first_nodes.isdisjoint(second_nodes):
+                    continue
+                second_x1, second_y1, second_x2, second_y2 = second_segment
+                second_dx = second_x2 - second_x1
+                second_dy = second_y2 - second_y1
+                second_length = math.hypot(second_dx, second_dy)
+                if second_length <= 1e-6:
+                    continue
+                normalized_dot = abs(
+                    first_dx * second_dx + first_dy * second_dy
+                ) / (first_length * second_length)
+                if normalized_dot > 0.30:
+                    continue
+
+                denominator = first_dx * second_dy - first_dy * second_dx
+                if abs(denominator) <= 1e-6:
+                    continue
+                offset_x = second_x1 - first_x1
+                offset_y = second_y1 - first_y1
+                first_projection = (
+                    offset_x * second_dy - offset_y * second_dx
+                ) / denominator
+                second_projection = (
+                    offset_x * first_dy - offset_y * first_dx
+                ) / denominator
+                if not (
+                    0.15 <= first_projection <= 0.85
+                    and 0.15 <= second_projection <= 0.85
+                ):
+                    continue
+                groups.add(first_nodes | second_nodes)
+        return tuple(sorted(groups, key=lambda group: tuple(sorted(group))))
+
+    @staticmethod
+    def _legacy_visual_layers(
+        nodes: Mapping[str, DeviceOccurrence],
+    ) -> list[list[str]]:
+        ordered = sorted(
+            nodes,
+            key=lambda item: (
+                nodes[item].center[1],
+                nodes[item].center[0],
+                item,
+            ),
+        )
+        if not ordered:
+            return []
+        tolerance = max(
+            12.0,
+            median(nodes[item].bbox[3] for item in ordered) * 1.5,
+        )
+        layers: list[list[str]] = []
+        layer_centers: list[float] = []
+        for business_id in ordered:
+            center_y = nodes[business_id].center[1]
+            if not layers or abs(center_y - layer_centers[-1]) > tolerance:
+                layers.append([business_id])
+                layer_centers.append(center_y)
+                continue
+            layers[-1].append(business_id)
+            layer_centers[-1] = sum(
+                nodes[item].center[1]
+                for item in layers[-1]
+            ) / len(layers[-1])
+        for layer in layers:
+            layer.sort(key=lambda item: (nodes[item].center[0], item))
+        return layers
 
     def _component_connector_pairs(
         self,
@@ -1579,6 +2210,12 @@ class RapidOCROpenCVBackend:
 
         for business_id, occurrence in diagram_nodes.items():
             if occurrence.confidence > 0.75:
+                continue
+            # Device identifiers such as ACC-002 and testNE49932 remain real
+            # topology endpoints even when OCR confidence is modest.  The old
+            # recognizer never collapsed these nodes into a line, and doing so
+            # removes every incident edge before the recall fallback can run.
+            if any(character.isdigit() for character in business_id):
                 continue
             anchor = anchor_boxes.get(business_id)
             if anchor is None or any(
