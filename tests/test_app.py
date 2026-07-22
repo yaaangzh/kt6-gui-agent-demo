@@ -170,6 +170,97 @@ class AppFactoryTest(unittest.TestCase):
         self.assertIs(services.page_perception.canvas_vision, adapter)
         constructor.assert_called_once_with()
 
+    def test_create_services_builds_hybrid_codeagent_vision(self):
+        local_adapter = object()
+        model_adapter = object()
+        hybrid_adapter = object()
+        environment = {
+            "KT6_VISION_DRIVER": "hybrid",
+            "KT6_HYBRID_MODEL_DRIVER": "codeagent_cli",
+            "KT6_CODEAGENT_EXECUTABLE": "codeagent-test",
+            "KT6_CODEAGENT_AGENT": "site-topology-reader",
+            "KT6_VISION_TIMEOUT_SECONDS": "75",
+        }
+        with (
+            patch.dict(os.environ, environment, clear=True),
+            patch.object(
+                app, "LocalCVTopologyVisionAdapter", return_value=local_adapter
+            ) as local_constructor,
+            patch.object(
+                app, "CodeAgentCanvasVisionAdapter", return_value=model_adapter
+            ) as model_constructor,
+            patch.object(
+                app, "HybridCanvasVisionAdapter", return_value=hybrid_adapter
+            ) as hybrid_constructor,
+            tempfile.TemporaryDirectory() as temp_dir,
+        ):
+            root = Path(temp_dir).resolve()
+            services = app.create_services(root)
+
+        self.assertIs(services.page_perception.canvas_vision, hybrid_adapter)
+        local_constructor.assert_called_once_with()
+        model_constructor.assert_called_once_with(
+            workdir=root,
+            executable="codeagent-test",
+            agent="site-topology-reader",
+            timeout_seconds=75.0,
+        )
+        hybrid_constructor.assert_called_once_with(
+            local_adapter=local_adapter,
+            model_adapter=model_adapter,
+        )
+
+    def test_create_services_builds_hybrid_http_vision(self):
+        local_adapter = object()
+        model_adapter = object()
+        hybrid_adapter = object()
+        environment = {
+            "KT6_VISION_DRIVER": "hybrid",
+            "KT6_HYBRID_MODEL_DRIVER": "http",
+            "KT6_VISION_ENDPOINT": "https://vision.internal/v1/topology",
+            "KT6_VISION_API_KEY": "secret",
+            "KT6_VISION_TIMEOUT_SECONDS": "20",
+        }
+        with (
+            patch.dict(os.environ, environment, clear=True),
+            patch.object(
+                app, "LocalCVTopologyVisionAdapter", return_value=local_adapter
+            ),
+            patch.object(
+                app, "HTTPTopologyVisionAdapter", return_value=model_adapter
+            ) as model_constructor,
+            patch.object(
+                app, "HybridCanvasVisionAdapter", return_value=hybrid_adapter
+            ) as hybrid_constructor,
+            tempfile.TemporaryDirectory() as temp_dir,
+        ):
+            services = app.create_services(Path(temp_dir))
+
+        self.assertIs(services.page_perception.canvas_vision, hybrid_adapter)
+        model_constructor.assert_called_once_with(
+            endpoint="https://vision.internal/v1/topology",
+            api_key="secret",
+            timeout_seconds=20.0,
+        )
+        hybrid_constructor.assert_called_once_with(
+            local_adapter=local_adapter,
+            model_adapter=model_adapter,
+        )
+
+    def test_hybrid_vision_requires_an_explicit_supported_model_driver(self):
+        for environment in (
+            {"KT6_VISION_DRIVER": "hybrid"},
+            {
+                "KT6_VISION_DRIVER": "hybrid",
+                "KT6_HYBRID_MODEL_DRIVER": "unknown",
+            },
+            {"KT6_HYBRID_MODEL_DRIVER": "codeagent_cli"},
+        ):
+            with self.subTest(environment=environment), patch.dict(
+                os.environ, environment, clear=True
+            ), tempfile.TemporaryDirectory() as temp_dir, self.assertRaises(ValueError):
+                app.create_services(Path(temp_dir))
+
     def test_local_cv_ocr_rejects_remote_and_codeagent_configuration(self):
         for conflicting in (
             {"KT6_VISION_ENDPOINT": "https://vision.internal/v1/topology"},

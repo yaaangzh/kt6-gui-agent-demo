@@ -1000,6 +1000,9 @@ class PagePerceptionService:
                 "视觉模型给出的业务 ID 默认只用于分析；需经生产资产库核验后才能执行",
             ],
         }
+        fusion_summary = recognized.get("fusion_summary")
+        if isinstance(fusion_summary, dict):
+            scene["fusion_summary"] = copy.deepcopy(fusion_summary)
         return self._stamp_provenance(
             scene,
             semantic_source="canvas_pixels",

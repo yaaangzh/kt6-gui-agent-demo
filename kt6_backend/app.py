@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .codeagent_canvas_vision import CodeAgentCanvasVisionAdapter
 from .http_canvas_vision import HTTPTopologyVisionAdapter
+from .hybrid_canvas_vision import HybridCanvasVisionAdapter
 from .local_cv_canvas_vision import LocalCVTopologyVisionAdapter
 from .memory import SQLiteMemoryStore
 from .page_perception import PagePerceptionService, SQLitePageCaptureStore
@@ -32,6 +33,7 @@ VISION_API_KEY_ENV = "KT6_VISION_API_KEY"
 VISION_TIMEOUT_ENV = "KT6_VISION_TIMEOUT_SECONDS"
 CODEAGENT_EXECUTABLE_ENV = "KT6_CODEAGENT_EXECUTABLE"
 CODEAGENT_AGENT_ENV = "KT6_CODEAGENT_AGENT"
+HYBRID_MODEL_DRIVER_ENV = "KT6_HYBRID_MODEL_DRIVER"
 DEFAULT_VISION_TIMEOUT_SECONDS = 30.0
 DEFAULT_CODEAGENT_TIMEOUT_SECONDS = 120.0
 DEFAULT_CODEAGENT_EXECUTABLE = "codeagent"
@@ -61,11 +63,17 @@ def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | N
     timeout_text = _optional_env(VISION_TIMEOUT_ENV)
     codeagent_executable = _optional_env(CODEAGENT_EXECUTABLE_ENV)
     codeagent_agent = _optional_env(CODEAGENT_AGENT_ENV)
+    hybrid_model_driver = _optional_env(HYBRID_MODEL_DRIVER_ENV)
 
     if driver is None and (codeagent_executable is not None or codeagent_agent is not None):
         raise ValueError(
             f"{VISION_DRIVER_ENV}=codeagent_cli is required when "
             f"{CODEAGENT_EXECUTABLE_ENV} or {CODEAGENT_AGENT_ENV} is configured"
+        )
+    if driver is None and hybrid_model_driver is not None:
+        raise ValueError(
+            f"{VISION_DRIVER_ENV}=hybrid is required when "
+            f"{HYBRID_MODEL_DRIVER_ENV} is configured"
         )
 
     if driver is None and endpoint is None:
@@ -85,9 +93,9 @@ def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | N
         return None
 
     selected_driver = (driver or "http").strip().lower()
-    if selected_driver not in {"http", "codeagent_cli", "local_cv_ocr"}:
+    if selected_driver not in {"http", "codeagent_cli", "local_cv_ocr", "hybrid"}:
         raise ValueError(
-            f"{VISION_DRIVER_ENV} must be http, codeagent_cli or local_cv_ocr"
+            f"{VISION_DRIVER_ENV} must be http, codeagent_cli, local_cv_ocr or hybrid"
         )
 
     if selected_driver == "local_cv_ocr":
@@ -99,6 +107,7 @@ def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | N
                 (VISION_TIMEOUT_ENV, timeout_text),
                 (CODEAGENT_EXECUTABLE_ENV, codeagent_executable),
                 (CODEAGENT_AGENT_ENV, codeagent_agent),
+                (HYBRID_MODEL_DRIVER_ENV, hybrid_model_driver),
             )
             if value is not None
         ]
@@ -108,9 +117,26 @@ def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | N
             )
         return LocalCVTopologyVisionAdapter()
 
+    if selected_driver == "hybrid":
+        if hybrid_model_driver is None:
+            raise ValueError(
+                f"{HYBRID_MODEL_DRIVER_ENV} is required for the hybrid vision driver"
+            )
+        effective_driver = hybrid_model_driver.strip().lower()
+        if effective_driver not in {"http", "codeagent_cli"}:
+            raise ValueError(
+                f"{HYBRID_MODEL_DRIVER_ENV} must be http or codeagent_cli"
+            )
+    else:
+        if hybrid_model_driver is not None:
+            raise ValueError(
+                f"{HYBRID_MODEL_DRIVER_ENV} requires {VISION_DRIVER_ENV}=hybrid"
+            )
+        effective_driver = selected_driver
+
     default_timeout = (
         DEFAULT_CODEAGENT_TIMEOUT_SECONDS
-        if selected_driver == "codeagent_cli"
+        if effective_driver == "codeagent_cli"
         else DEFAULT_VISION_TIMEOUT_SECONDS
     )
     timeout_seconds = default_timeout
@@ -130,7 +156,7 @@ def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | N
                 f"{MAX_VISION_TIMEOUT_SECONDS:g}]"
             )
 
-    if selected_driver == "codeagent_cli":
+    if effective_driver == "codeagent_cli":
         conflicting = [
             name
             for name, value in (
@@ -143,12 +169,18 @@ def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | N
             raise ValueError(
                 f"{', '.join(conflicting)} must not be configured for codeagent_cli"
             )
-        return CodeAgentCanvasVisionAdapter(
+        model_adapter = CodeAgentCanvasVisionAdapter(
             workdir=Path(root).resolve(),
             executable=codeagent_executable or DEFAULT_CODEAGENT_EXECUTABLE,
             agent=codeagent_agent or DEFAULT_CODEAGENT_AGENT,
             timeout_seconds=timeout_seconds,
         )
+        if selected_driver == "hybrid":
+            return HybridCanvasVisionAdapter(
+                local_adapter=LocalCVTopologyVisionAdapter(),
+                model_adapter=model_adapter,
+            )
+        return model_adapter
 
     if codeagent_executable is not None or codeagent_agent is not None:
         raise ValueError(
@@ -157,11 +189,17 @@ def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | N
         )
     if endpoint is None:
         raise ValueError(f"{VISION_ENDPOINT_ENV} is required for the http vision driver")
-    return HTTPTopologyVisionAdapter(
+    model_adapter = HTTPTopologyVisionAdapter(
         endpoint=endpoint,
         api_key=api_key,
         timeout_seconds=timeout_seconds,
     )
+    if selected_driver == "hybrid":
+        return HybridCanvasVisionAdapter(
+            local_adapter=LocalCVTopologyVisionAdapter(),
+            model_adapter=model_adapter,
+        )
+    return model_adapter
 
 
 @dataclass(frozen=True)

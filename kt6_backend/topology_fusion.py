@@ -301,12 +301,23 @@ def _normalize_model_payload(
         key = _compact_identifier_key(node_id)
         canonical_model_id = node_ids_by_key.get(key, node_id)
         node_ids_by_key.setdefault(key, canonical_model_id)
-        attributes = {
-            str(name): _safe_json(value)
-            for name, value in raw_node.items()
-            if name not in {"id", "business_id", "connections"}
-            and str(name).strip().lower() not in _RESERVED_ATTRIBUTE_KEYS
-        }
+        attributes = _safe_attributes(raw_node.get("attributes", {}))
+        attributes.update(
+            {
+                str(name): _safe_json(value)
+                for name, value in raw_node.items()
+                if name
+                not in {
+                    "id",
+                    "business_id",
+                    "connections",
+                    "attributes",
+                    "bbox",
+                    "canvas_id",
+                }
+                and str(name).strip().lower() not in _RESERVED_ATTRIBUTE_KEYS
+            }
+        )
         if layer:
             attributes["layer"] = layer
         nodes.setdefault(canonical_model_id, {}).update(attributes)
@@ -424,12 +435,15 @@ def _normalize_model_payload(
                 node_ids_by_key[key] = endpoint
                 nodes[endpoint] = {"implicit": True}
         raw_type = _text(raw_edge.get("type"), "topology_link", 100)
-        attributes = {
-            str(name): _safe_json(value)
-            for name, value in raw_edge.items()
-            if name not in {"source", "target", "confidence"}
-            and str(name).strip().lower() not in _RESERVED_ATTRIBUTE_KEYS
-        }
+        attributes = _safe_attributes(raw_edge.get("attributes", {}))
+        attributes.update(
+            {
+                str(name): _safe_json(value)
+                for name, value in raw_edge.items()
+                if name not in {"source", "target", "type", "confidence", "attributes"}
+                and str(name).strip().lower() not in _RESERVED_ATTRIBUTE_KEYS
+            }
+        )
         relation_type = raw_type
         if raw_type.lower() in _LINE_STYLES:
             relation_type = "topology_link"

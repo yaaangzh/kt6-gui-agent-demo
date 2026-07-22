@@ -94,6 +94,19 @@ class AnalysisOnlyCanvasVisionAdapter(RecordingCanvasVisionAdapter):
     supports_actionable_grounding = False
 
 
+class FusionMetadataCanvasVisionAdapter(RecordingCanvasVisionAdapter):
+    adapter_id = "fusion-metadata-vision"
+    supports_actionable_grounding = False
+
+    def recognize(self, *, page, frames):
+        result = super().recognize(page=page, frames=frames)
+        result["fusion_summary"] = {
+            "confirmed_object_count": 2,
+            "confirmed_link_count": 1,
+        }
+        return result
+
+
 class DanglingCanvasVisionAdapter(RecordingCanvasVisionAdapter):
     adapter_id = "dangling-vision"
 
@@ -528,6 +541,19 @@ class PagePerceptionTest(unittest.TestCase):
         self.assertIn("RuntimeError: vision backend unavailable", capture["scene"]["vision_error"])
         self.assertFalse(capture["scene"]["pixel_inference_performed"])
         self.assertFalse(capture["scene"]["pixel_verified"])
+
+    def test_canvas_vision_preserves_hybrid_fusion_summary(self):
+        payload = live_capture_payload()
+        payload["adapter_scene"] = None
+        payload["dom"] = {"elements": []}
+        service = self.service_with(canvas_vision=FusionMetadataCanvasVisionAdapter())
+
+        capture = service.ingest(payload)
+
+        self.assertEqual(
+            capture["scene"]["fusion_summary"],
+            {"confirmed_object_count": 2, "confirmed_link_count": 1},
+        )
 
     def test_canvas_vision_dangling_relation_fails_closed(self):
         payload = live_capture_payload()
