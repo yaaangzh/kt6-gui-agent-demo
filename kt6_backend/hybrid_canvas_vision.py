@@ -38,8 +38,11 @@ class HybridCanvasVisionAdapter:
         local_result, local_failed = self._recognize_branch(
             self.local_adapter, page=page, frames=frames
         )
-        model_result, model_failed = self._recognize_branch(
-            self.model_adapter, page=page, frames=frames
+        model_result, model_failed = self._recognize_model_branch(
+            self.model_adapter,
+            page=page,
+            frames=frames,
+            cv_observations=local_result,
         )
 
         if local_result is not None and model_result is not None:
@@ -50,6 +53,7 @@ class HybridCanvasVisionAdapter:
                 return self._local_only_result(local_result)
             result = copy.deepcopy(fused["result"])
             result["fusion_summary"] = copy.deepcopy(fused["summary"])
+            result["fusion_analysis"] = self._fusion_analysis(fused)
             return result
 
         if local_result is not None:
@@ -80,6 +84,44 @@ class HybridCanvasVisionAdapter:
         return result, False
 
     @staticmethod
+    def _recognize_model_branch(
+        adapter: CanvasVisionAdapter,
+        *,
+        page: dict[str, Any],
+        frames: tuple[CanvasFrame, ...],
+        cv_observations: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any] | None, bool]:
+        try:
+            contextual_recognize = getattr(adapter, "recognize_with_context", None)
+            if cv_observations is not None and callable(contextual_recognize):
+                result = contextual_recognize(
+                    page=page,
+                    frames=frames,
+                    cv_observations=cv_observations,
+                )
+            else:
+                result = adapter.recognize(page=page, frames=frames)
+        except Exception:
+            return None, True
+        if result is None:
+            return None, False
+        if not isinstance(result, dict):
+            return None, True
+        return result, False
+
+    @staticmethod
+    def _fusion_analysis(fused: dict[str, Any]) -> dict[str, Any]:
+        return {
+            name: copy.deepcopy(fused.get(name, []))
+            for name in (
+                "structure_templates",
+                "rejected_links",
+                "unlocated_objects",
+                "unresolved_links",
+            )
+        }
+
+    @staticmethod
     def _local_only_result(local_result: dict[str, Any]) -> dict[str, Any]:
         try:
             fused = fuse_topology_payloads(
@@ -90,6 +132,7 @@ class HybridCanvasVisionAdapter:
             return copy.deepcopy(local_result)
         result = copy.deepcopy(fused["result"])
         result["fusion_summary"] = copy.deepcopy(fused["summary"])
+        result["fusion_analysis"] = HybridCanvasVisionAdapter._fusion_analysis(fused)
         result["fusion_summary"]["degraded_to"] = "local_cv"
         return result
 

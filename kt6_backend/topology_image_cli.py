@@ -180,6 +180,7 @@ def acceptance_result(response: dict[str, Any], local_sha256: str) -> tuple[bool
         "elements": scene.get("elements", []) if isinstance(scene, dict) else [],
         "relations": scene.get("relations", []) if isinstance(scene, dict) else [],
         "semantic_tree": scene.get("semantic_tree", {}) if isinstance(scene, dict) else {},
+        "fusion_summary": scene.get("fusion_summary", {}) if isinstance(scene, dict) else {},
         "issues": scene.get("issues", []) if isinstance(scene, dict) else [],
         "vision_error": scene.get("vision_error") if isinstance(scene, dict) else None,
     }

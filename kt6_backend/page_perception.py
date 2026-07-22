@@ -1003,6 +1003,9 @@ class PagePerceptionService:
         fusion_summary = recognized.get("fusion_summary")
         if isinstance(fusion_summary, dict):
             scene["fusion_summary"] = copy.deepcopy(fusion_summary)
+        fusion_analysis = recognized.get("fusion_analysis")
+        if isinstance(fusion_analysis, dict):
+            scene["fusion_analysis"] = copy.deepcopy(fusion_analysis)
         return self._stamp_provenance(
             scene,
             semantic_source="canvas_pixels",

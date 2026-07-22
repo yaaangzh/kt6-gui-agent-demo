@@ -123,7 +123,7 @@ class AppFactoryTest(unittest.TestCase):
         constructor.assert_called_once_with(
             workdir=root,
             executable="codeagent",
-            agent="kt6-topology-vision",
+            agent=None,
             timeout_seconds=120.0,
         )
 

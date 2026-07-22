@@ -104,6 +104,18 @@ class FusionMetadataCanvasVisionAdapter(RecordingCanvasVisionAdapter):
             "confirmed_object_count": 2,
             "confirmed_link_count": 1,
         }
+        result["fusion_analysis"] = {
+            "structure_templates": [
+                {
+                    "template_id": "layers-1",
+                    "type": "layered",
+                    "layers": [{"name": "核心层", "members": ["gw_001"]}],
+                }
+            ],
+            "rejected_links": [],
+            "unlocated_objects": [],
+            "unresolved_links": [],
+        }
         return result
 
 
@@ -553,6 +565,10 @@ class PagePerceptionTest(unittest.TestCase):
         self.assertEqual(
             capture["scene"]["fusion_summary"],
             {"confirmed_object_count": 2, "confirmed_link_count": 1},
+        )
+        self.assertEqual(
+            capture["scene"]["fusion_analysis"]["structure_templates"][0]["type"],
+            "layered",
         )
 
     def test_canvas_vision_dangling_relation_fails_closed(self):

@@ -23,6 +23,19 @@ class StaticAdapter:
         return self.result
 
 
+class ContextAwareAdapter(StaticAdapter):
+    def __init__(self, result=None, error=None):
+        super().__init__(result=result, error=error)
+        self.cv_observations = None
+
+    def recognize_with_context(self, *, page, frames, cv_observations):
+        self.calls += 1
+        self.cv_observations = cv_observations
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
 def local_result():
     return {
         "objects": [
@@ -112,6 +125,21 @@ class HybridCanvasVisionAdapterTest(unittest.TestCase):
         self.assertEqual(gw["attributes"]["model_semantics"]["vendor"], "ZTE")
         self.assertEqual(
             result["links"][0]["attributes"]["fusion_status"], "confirmed"
+        )
+        self.assertIn("structure_templates", result["fusion_analysis"])
+
+    def test_passes_local_cv_candidates_to_context_aware_model(self):
+        local = StaticAdapter(local_result())
+        model = ContextAwareAdapter(model_result())
+        adapter = HybridCanvasVisionAdapter(local_adapter=local, model_adapter=model)
+
+        result = adapter.recognize(page={"url": "test"}, frames=())
+
+        self.assertIsNotNone(result)
+        self.assertEqual(model.calls, 1)
+        self.assertIs(model.cv_observations, local.result)
+        self.assertEqual(
+            model.cv_observations["objects"][0]["business_id"], "GW-001"
         )
 
     def test_model_failure_degrades_to_local_cv(self):

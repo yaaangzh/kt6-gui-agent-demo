@@ -223,6 +223,49 @@ class HTTPTopologyVisionAdapterTest(unittest.TestCase):
         self.assertEqual(result["links"][0]["source"], "GW-001")
         self.assertNotIn("schema_version", result)
 
+    def test_contract_validates_structure_templates_and_explicit_negative_edges(self):
+        contract = TopologyVisionContract()
+        payload = valid_response()
+        payload["negative_edges"] = [
+            {
+                "source": "GW-001",
+                "target": "CORE-001",
+                "reason": "visible connector gap",
+                "confidence": 0.89,
+            }
+        ]
+        payload["structure_templates"] = [
+            {
+                "template_id": "star-1",
+                "type": "star",
+                "center": "GW-001",
+                "leaves": ["CORE-001"],
+            }
+        ]
+        payload["no_connections"] = False
+
+        result = contract.parse_response_bytes(
+            json.dumps(payload).encode("utf-8"), {"topology-canvas": (1, 1)}
+        )
+
+        self.assertEqual(result["negative_edges"][0]["reason"], "visible connector gap")
+        self.assertEqual(result["structure_templates"][0]["center"], "GW-001")
+        self.assertFalse(result["no_connections"])
+
+        invalid = copy.deepcopy(payload)
+        invalid["structure_templates"][0]["leaves"] = ["MISSING"]
+        with self.assertRaisesRegex(CanvasVisionResponseError, "invalid member"):
+            contract.parse_response_bytes(
+                json.dumps(invalid).encode("utf-8"), {"topology-canvas": (1, 1)}
+            )
+
+        invalid = copy.deepcopy(payload)
+        invalid["no_connections"] = "false"
+        with self.assertRaisesRegex(CanvasVisionResponseError, "must be boolean"):
+            contract.parse_response_bytes(
+                json.dumps(invalid).encode("utf-8"), {"topology-canvas": (1, 1)}
+            )
+
     def test_http_and_contract_reject_the_same_unsafe_provider_bytes(self):
         payloads = []
         spoofed = valid_response()

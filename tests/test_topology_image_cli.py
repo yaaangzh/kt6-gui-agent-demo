@@ -111,6 +111,7 @@ class TopologyImageCLITest(unittest.TestCase):
         self.assertTrue(accepted)
         self.assertTrue(report["screenshot_sha256_matches"])
         self.assertFalse(report["actionable_grounding"])
+        self.assertEqual(report["fusion_summary"], {})
 
         response["summary"]["selected_mode"] = "canvas_renderer_adapter"
         accepted, _ = acceptance_result(response, digest)

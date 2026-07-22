@@ -4,13 +4,15 @@ import copy
 import math
 import re
 import unicodedata
-from collections.abc import Mapping
+from collections import deque
+from collections.abc import Callable, Mapping
+from statistics import median
 from typing import Any
 
 from .topology_vision_contract import RESPONSE_SCHEMA_VERSION, TopologyVisionContract
 
 
-FUSION_SCHEMA_VERSION = "kt6.topology-fusion.v1"
+FUSION_SCHEMA_VERSION = "kt6.topology-fusion.v2"
 DEFAULT_MODEL_CONFIDENCE = 0.5
 
 _RESERVED_ATTRIBUTE_KEYS = frozenset(
@@ -38,21 +40,28 @@ def fuse_topology_payloads(
 ) -> dict[str, Any]:
     """Fuse grounded CV geometry with model-proposed topology semantics.
 
-    Only CV-grounded objects are placed in ``result.objects``. Model-only objects
-    and links with ungrounded endpoints are retained separately so they cannot be
-    mistaken for actionable pixel coordinates.
+    CV-grounded objects and model objects carrying contract-validated pixel boxes
+    are placed in ``result.objects``. Model-only objects without observed geometry
+    and links with ungrounded endpoints are retained separately so inferred layout
+    cannot be mistaken for actionable pixel coordinates.
     """
 
     cv_objects, cv_links, canvas_id = _normalize_cv_payload(cv_payload)
-    model_nodes, model_links, model_metadata = _normalize_model_payload(model_payload)
+    (
+        model_nodes,
+        model_links,
+        model_metadata,
+        structure_templates,
+        negative_evidence,
+    ) = _normalize_model_payload(model_payload)
     cv_index = _CVIdentifierIndex(cv_objects)
 
     model_matches: dict[str, tuple[str, dict[str, Any]]] = {}
-    unlocated_objects: list[dict[str, Any]] = []
+    model_only_objects: list[dict[str, Any]] = []
     for model_id, model_node in model_nodes.items():
         cv_id = cv_index.resolve(model_id)
         if cv_id is None:
-            unlocated_objects.append(_unlocated_object(model_id, model_node))
+            model_only_objects.append(_unlocated_object(model_id, model_node))
             continue
         existing = model_matches.get(cv_id)
         if existing is None:
@@ -64,12 +73,36 @@ def fuse_topology_payloads(
         _fuse_object(cv_object, model_matches.get(str(cv_object["business_id"])), canvas_id)
         for cv_object in cv_objects
     ]
+    model_grounded_objects = [
+        item
+        for item in model_only_objects
+        if item.get("attributes", {}).get("geometry_status") == "model_pixel_grounded"
+    ]
+    unlocated_objects = [
+        item
+        for item in model_only_objects
+        if item.get("attributes", {}).get("geometry_status") != "model_pixel_grounded"
+    ]
+    model_grounded_ids = {
+        str(item["business_id"]) for item in model_grounded_objects
+    }
+
+    def resolve_endpoint(value: str) -> str | None:
+        resolved = cv_index.resolve(value)
+        if resolved is not None:
+            return resolved
+        return value if value in model_grounded_ids else None
 
     normalized_model_links: list[dict[str, Any]] = []
+    semantic_model_links: list[dict[str, Any]] = []
     unresolved_links: list[dict[str, Any]] = []
     for model_link in model_links:
-        source = cv_index.resolve(str(model_link["source"]))
-        target = cv_index.resolve(str(model_link["target"]))
+        source = resolve_endpoint(str(model_link["source"]))
+        target = resolve_endpoint(str(model_link["target"]))
+        semantic_link = copy.deepcopy(model_link)
+        semantic_link["source"] = source or str(model_link["source"])
+        semantic_link["target"] = target or str(model_link["target"])
+        semantic_model_links.append(semantic_link)
         if source is None or target is None:
             confidence = (
                 float(model_link["confidence"])
@@ -77,9 +110,14 @@ def fuse_topology_payloads(
                 else DEFAULT_MODEL_CONFIDENCE
             )
             attributes = _safe_attributes(model_link.get("attributes", {}))
+            unresolved_status = (
+                "structurally_derived"
+                if attributes.get("derivation_status") == "structurally_derived"
+                else "model_only"
+            )
             attributes.update(
                 {
-                    "fusion_status": "model_only",
+                    "fusion_status": unresolved_status,
                     "evidence_sources": ["multimodal_model"],
                     "geometry_status": "unresolved_endpoint",
                     "resolution_reason": "model_endpoint_has_no_cv_geometry",
@@ -96,8 +134,8 @@ def fuse_topology_payloads(
                         f"fusion-unresolved:{source or model_link['source']}:"
                         f"{target or model_link['target']}"
                     ),
-                    "source": source or str(model_link["source"]),
-                    "target": target or str(model_link["target"]),
+                    "source": semantic_link["source"],
+                    "target": semantic_link["target"],
                     "type": str(model_link.get("type", "topology_link")),
                     "confidence": round(confidence, 4),
                     "attributes": attributes,
@@ -111,17 +149,41 @@ def fuse_topology_payloads(
         item["target"] = target
         normalized_model_links.append(item)
 
-    model_layers_by_cv_id = {
-        cv_id: str(model_node.get("layer", "")).strip()
-        for cv_id, (_model_id, model_node) in model_matches.items()
-        if str(model_node.get("layer", "")).strip()
+    resolved_structure_templates = _resolve_structure_templates(
+        structure_templates, resolve_endpoint=resolve_endpoint
+    )
+    resolved_negative_evidence = _resolve_negative_evidence(
+        negative_evidence, resolve_endpoint=resolve_endpoint
+    )
+    model_nodes_by_semantic_id = {
+        resolve_endpoint(model_id) or model_id: attributes
+        for model_id, attributes in model_nodes.items()
     }
-    fused_links = _fuse_links(
+
+    model_layers_by_cv_id = {
+        resolved_id: str(model_node.get("layer", "")).strip()
+        for model_id, model_node in model_nodes.items()
+        if (resolved_id := resolve_endpoint(model_id)) is not None
+        and str(model_node.get("layer", "")).strip()
+    }
+    result_objects = fused_objects + model_grounded_objects
+    fused_links, rejected_links = _fuse_links(
         cv_links,
         normalized_model_links,
+        semantic_model_links=semantic_model_links,
+        model_nodes_by_semantic_id=model_nodes_by_semantic_id,
+        negative_evidence=resolved_negative_evidence,
+        matched_cv_ids={str(item["business_id"]) for item in result_objects},
         model_layers_by_cv_id=model_layers_by_cv_id,
     )
-    confidence_values = [float(item["confidence"]) for item in fused_objects]
+    unlocated_objects = _infer_unlocated_geometry(
+        unlocated_objects,
+        fused_objects=result_objects,
+        structure_templates=resolved_structure_templates,
+        semantic_model_links=semantic_model_links,
+        canvas_id=canvas_id,
+    )
+    confidence_values = [float(item["confidence"]) for item in result_objects]
     confidence_values.extend(float(item["confidence"]) for item in fused_links)
     global_confidence = (
         round(sum(confidence_values) / len(confidence_values), 4)
@@ -129,25 +191,28 @@ def fuse_topology_payloads(
         else 0.0
     )
 
-    object_statuses = _status_counts(fused_objects)
+    object_statuses = _status_counts(result_objects)
     link_statuses = _status_counts(fused_links)
+    unresolved_statuses = _status_counts(unresolved_links)
+    geometry_statuses = _geometry_status_counts(unlocated_objects)
     result = {
         "schema_version": RESPONSE_SCHEMA_VERSION,
         "confidence": global_confidence,
-        "objects": fused_objects,
+        "objects": result_objects,
         "links": fused_links,
         "co_channel_relations": [],
     }
-    semantic_nodes = copy.deepcopy(fused_objects) + copy.deepcopy(unlocated_objects)
+    semantic_nodes = copy.deepcopy(result_objects) + copy.deepcopy(unlocated_objects)
     semantic_links = copy.deepcopy(fused_links) + copy.deepcopy(unresolved_links)
     return {
         "schema_version": FUSION_SCHEMA_VERSION,
         "summary": {
             "cv_object_count": len(cv_objects),
             "model_object_count": len(model_nodes),
-            "fused_object_count": len(fused_objects),
+            "fused_object_count": len(result_objects),
             "confirmed_object_count": object_statuses.get("confirmed", 0),
             "cv_only_object_count": object_statuses.get("cv_only", 0),
+            "model_grounded_object_count": len(model_grounded_objects),
             "unlocated_model_object_count": len(unlocated_objects),
             "cv_link_count": len(cv_links),
             "model_link_count": len(model_links),
@@ -155,20 +220,39 @@ def fuse_topology_payloads(
             "confirmed_link_count": link_statuses.get("confirmed", 0),
             "cv_only_link_count": link_statuses.get("cv_only", 0),
             "model_only_link_count": link_statuses.get("model_only", 0),
+            "path_equivalent_link_count": link_statuses.get("path_equivalent", 0),
+            "structurally_derived_link_count": link_statuses.get(
+                "structurally_derived", 0
+            )
+            + unresolved_statuses.get("structurally_derived", 0),
             "conflict_link_count": link_statuses.get("conflict", 0),
+            "llm_rejected_link_count": len(rejected_links),
             "unresolved_model_link_count": len(unresolved_links),
+            "spatially_inferred_object_count": geometry_statuses.get(
+                "spatially_inferred", 0
+            ),
+            "remaining_unlocated_object_count": geometry_statuses.get("unlocated", 0),
         },
         "model_metadata": model_metadata,
+        "structure_templates": resolved_structure_templates,
         "result": result,
         "semantic_graph": {
             "nodes": semantic_nodes,
             "links": semantic_links,
+            "structure_templates": copy.deepcopy(resolved_structure_templates),
         },
         "unlocated_objects": sorted(
             unlocated_objects, key=lambda item: _identifier_sort_key(item["business_id"])
         ),
         "unresolved_links": sorted(
             unresolved_links,
+            key=lambda item: (
+                _identifier_sort_key(item["source"]),
+                _identifier_sort_key(item["target"]),
+            ),
+        ),
+        "rejected_links": sorted(
+            rejected_links,
             key=lambda item: (
                 _identifier_sort_key(item["source"]),
                 _identifier_sort_key(item["target"]),
@@ -199,6 +283,68 @@ class _CVIdentifierIndex:
         if exact is not None:
             return exact
         return self._compact.get(_compact_identifier_key(value))
+
+
+def _resolve_structure_templates(
+    templates: list[dict[str, Any]],
+    *,
+    resolve_endpoint: Callable[[str], str | None],
+) -> list[dict[str, Any]]:
+    resolved: list[dict[str, Any]] = []
+    for template in templates:
+        item = copy.deepcopy(template)
+        if item.get("type") == "star":
+            center = str(item.get("center", ""))
+            item["center"] = resolve_endpoint(center) or center
+            leaves = item.get("leaves", [])
+            if isinstance(leaves, list):
+                item["leaves"] = [
+                    resolve_endpoint(str(leaf)) or str(leaf) for leaf in leaves
+                ]
+        layers = item.get("layers")
+        if isinstance(layers, list):
+            for layer in layers:
+                if not isinstance(layer, dict):
+                    continue
+                members = layer.get("members", [])
+                if isinstance(members, list):
+                    layer["members"] = [
+                        resolve_endpoint(str(member)) or str(member)
+                        for member in members
+                    ]
+        resolved.append(item)
+    return resolved
+
+
+def _resolve_negative_evidence(
+    evidence: Mapping[str, Any],
+    *,
+    resolve_endpoint: Callable[[str], str | None],
+) -> dict[str, Any]:
+    pairs: list[dict[str, Any]] = []
+    for raw_pair in evidence.get("pairs", []):
+        if not isinstance(raw_pair, Mapping):
+            continue
+        source_text = str(raw_pair.get("source", ""))
+        target_text = str(raw_pair.get("target", ""))
+        pairs.append(
+            {
+                "source": resolve_endpoint(source_text) or source_text,
+                "target": resolve_endpoint(target_text) or target_text,
+                "reason": _text(
+                    raw_pair.get("reason"), "explicit_model_rejection", 500
+                ),
+            }
+        )
+    isolated_nodes = [
+        resolve_endpoint(str(node_id)) or str(node_id)
+        for node_id in evidence.get("isolated_nodes", [])
+    ]
+    return {
+        "reject_all": evidence.get("reject_all") is True,
+        "pairs": pairs,
+        "isolated_nodes": isolated_nodes,
+    }
 
 
 def _normalize_cv_payload(
@@ -283,7 +429,13 @@ def _normalize_cv_payload(
 
 def _normalize_model_payload(
     payload: Mapping[str, Any],
-) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+) -> tuple[
+    dict[str, dict[str, Any]],
+    list[dict[str, Any]],
+    dict[str, Any],
+    list[dict[str, Any]],
+    dict[str, Any],
+]:
     if not isinstance(payload, Mapping):
         raise TopologyFusionError("model JSON root must be an object")
     topology = payload.get("topology", payload)
@@ -293,6 +445,7 @@ def _normalize_model_payload(
     nodes: dict[str, dict[str, Any]] = {}
     node_ids_by_key: dict[str, str] = {}
     links: list[dict[str, Any]] = []
+    structure_templates: list[dict[str, Any]] = []
 
     def add_node(raw_node: Mapping[str, Any], *, layer: str | None = None) -> str:
         node_id = _required_identifier(
@@ -318,6 +471,21 @@ def _normalize_model_payload(
                 and str(name).strip().lower() not in _RESERVED_ATTRIBUTE_KEYS
             }
         )
+        raw_bbox = raw_node.get("bbox")
+        raw_canvas_id = raw_node.get("canvas_id")
+        if isinstance(raw_bbox, list) and len(raw_bbox) == 4 and raw_canvas_id is not None:
+            try:
+                model_bbox = _bbox(raw_bbox, f"model node {node_id}")
+            except TopologyFusionError:
+                model_bbox = None
+            if model_bbox is not None:
+                attributes["model_geometry"] = {
+                    "bbox": model_bbox,
+                    "canvas_id": _text(raw_canvas_id, "uploaded_topology", 200),
+                    "confidence": _confidence(
+                        raw_node.get("confidence"), DEFAULT_MODEL_CONFIDENCE
+                    ),
+                }
         if layer:
             attributes["layer"] = layer
         nodes.setdefault(canonical_model_id, {}).update(attributes)
@@ -335,6 +503,7 @@ def _normalize_model_payload(
     raw_layers = topology.get("layers", [])
     if raw_layers is not None and not isinstance(raw_layers, list):
         raise TopologyFusionError("model topology.layers must be a list")
+    normalized_layers: list[dict[str, Any]] = []
     for layer in raw_layers or []:
         if not isinstance(layer, Mapping):
             raise TopologyFusionError("model topology.layers entries must be objects")
@@ -342,11 +511,111 @@ def _normalize_model_payload(
         devices = layer.get("devices", [])
         if not isinstance(devices, list):
             raise TopologyFusionError("model layer devices must be a list")
+        layer_members: list[str] = []
         for device in devices:
             if not isinstance(device, Mapping):
                 raise TopologyFusionError("model layer devices entries must be objects")
             model_id = add_node(device, layer=layer_name or None)
             connected_nodes.append((model_id, device))
+            layer_members.append(model_id)
+        normalized_layers.append(
+            {
+                "name": layer_name or f"layer-{len(normalized_layers) + 1}",
+                "members": layer_members,
+            }
+        )
+    if normalized_layers:
+        structure_templates.append(
+            {
+                "template_id": "model:layers:1",
+                "type": "layered",
+                "layers": normalized_layers,
+                "source": "multimodal_model",
+            }
+        )
+
+    raw_structure_templates = topology.get("structure_templates", [])
+    if raw_structure_templates is not None and not isinstance(
+        raw_structure_templates, list
+    ):
+        raise TopologyFusionError("model topology.structure_templates must be a list")
+    for index, raw_template in enumerate(raw_structure_templates or []):
+        if not isinstance(raw_template, Mapping):
+            raise TopologyFusionError(
+                f"model structure_templates[{index}] must be an object"
+            )
+        template_type = _text(raw_template.get("type"), "", 30).casefold()
+        template_id = _text(
+            raw_template.get("template_id"), f"model:structure:{index + 1}", 200
+        )
+        template: dict[str, Any] = {
+            "template_id": template_id,
+            "type": template_type,
+            "source": "multimodal_model",
+        }
+        if raw_template.get("confidence") is not None:
+            template["confidence"] = _confidence(
+                raw_template.get("confidence"), DEFAULT_MODEL_CONFIDENCE
+            )
+        if isinstance(raw_template.get("attributes"), Mapping):
+            template["attributes"] = _safe_attributes(raw_template.get("attributes"))
+        if template_type == "star":
+            center = _required_identifier(
+                raw_template.get("center"), f"model structure {template_id}.center"
+            )
+            center = node_ids_by_key.get(_compact_identifier_key(center), center)
+            raw_leaves = raw_template.get("leaves", [])
+            if not isinstance(raw_leaves, list) or not raw_leaves:
+                raise TopologyFusionError(
+                    f"model structure {template_id}.leaves must be a non-empty list"
+                )
+            leaves = []
+            for raw_leaf in raw_leaves:
+                leaf = _required_identifier(
+                    raw_leaf, f"model structure {template_id}.leaf"
+                )
+                leaves.append(
+                    node_ids_by_key.get(_compact_identifier_key(leaf), leaf)
+                )
+            template.update({"center": center, "leaves": list(dict.fromkeys(leaves))})
+        elif template_type == "layered":
+            raw_template_layers = raw_template.get("layers", [])
+            if not isinstance(raw_template_layers, list) or not raw_template_layers:
+                raise TopologyFusionError(
+                    f"model structure {template_id}.layers must be a non-empty list"
+                )
+            template_layers: list[dict[str, Any]] = []
+            for layer_index, raw_layer in enumerate(raw_template_layers):
+                if not isinstance(raw_layer, Mapping):
+                    raise TopologyFusionError(
+                        f"model structure {template_id} layer {layer_index} is invalid"
+                    )
+                raw_members = raw_layer.get("members", [])
+                if not isinstance(raw_members, list) or not raw_members:
+                    raise TopologyFusionError(
+                        f"model structure {template_id} layer members are invalid"
+                    )
+                layer_name = _text(
+                    raw_layer.get("name"), f"layer-{layer_index + 1}", 200
+                )
+                members: list[str] = []
+                for raw_member in raw_members:
+                    member = _required_identifier(
+                        raw_member, f"model structure {template_id} member"
+                    )
+                    member = node_ids_by_key.get(_compact_identifier_key(member), member)
+                    members.append(member)
+                    if member in nodes:
+                        nodes[member]["layer"] = layer_name
+                template_layers.append(
+                    {"name": layer_name, "members": list(dict.fromkeys(members))}
+                )
+            template["layers"] = template_layers
+        else:
+            raise TopologyFusionError(
+                f"model structure {template_id} type must be star or layered"
+            )
+        structure_templates.append(template)
 
     for model_id, device in connected_nodes:
         connections = device.get("connections", {})
@@ -481,6 +750,71 @@ def _normalize_model_payload(
         }
         nodes[canonical_alarm_node].setdefault("alarms", []).append(alarm_attributes)
 
+    layout = str(topology.get("layout", "")).strip().casefold()
+    raw_center = topology.get("centerNode", topology.get("center_node"))
+    if layout == "star" and raw_center is not None:
+        center_id = _required_identifier(raw_center, "model topology centerNode")
+        center_id = node_ids_by_key.get(_compact_identifier_key(center_id), center_id)
+        if center_id in nodes:
+            leaves = [node_id for node_id in nodes if node_id != center_id]
+            already_declared = any(
+                template.get("type") == "star"
+                and template.get("center") == center_id
+                for template in structure_templates
+            )
+            if not already_declared:
+                structure_templates.append(
+                    {
+                        "template_id": "model:star:1",
+                        "type": "star",
+                        "center": center_id,
+                        "leaves": leaves,
+                        "source": "multimodal_model",
+                    }
+                )
+
+    existing_by_pair = {
+        _undirected_pair(str(link["source"]), str(link["target"])): link
+        for link in links
+    }
+    for template in structure_templates:
+        if template.get("type") != "star":
+            continue
+        template_id = str(template.get("template_id", "model:star"))
+        center_id = str(template.get("center", ""))
+        if center_id not in nodes:
+            continue
+        for leaf_id in (str(item) for item in template.get("leaves", [])):
+            if leaf_id not in nodes or leaf_id == center_id:
+                continue
+            pair = _undirected_pair(center_id, leaf_id)
+            existing_link = existing_by_pair.get(pair)
+            if existing_link is not None:
+                existing_link.setdefault("attributes", {})[
+                    "structure_template_id"
+                ] = template_id
+                continue
+            derived_link = {
+                "source": center_id,
+                "target": leaf_id,
+                "type": "topology_link",
+                "confidence": template.get("confidence"),
+                "attributes": {
+                    "derivation_status": "structurally_derived",
+                    "structure_template_id": template_id,
+                    "structure_type": "star",
+                },
+            }
+            links.append(derived_link)
+            existing_by_pair[pair] = derived_link
+
+    negative_evidence = _normalize_negative_evidence(
+        topology,
+        node_ids_by_key=node_ids_by_key,
+        nodes=nodes,
+        connected_nodes=connected_nodes,
+    )
+
     if len(nodes) > TopologyVisionContract.MAX_OBJECTS:
         raise TopologyFusionError("model JSON contains too many nodes")
     if len(links) > TopologyVisionContract.MAX_RELATIONS:
@@ -489,10 +823,91 @@ def _normalize_model_payload(
     metadata = {
         str(name): _safe_json(value)
         for name, value in topology.items()
-        if name not in {"nodes", "objects", "edges", "links", "layers"}
+        if name
+        not in {
+            "nodes",
+            "objects",
+            "edges",
+            "links",
+            "layers",
+            "structure_templates",
+            "negative_edges",
+            "rejected_edges",
+            "disconnected_pairs",
+        }
         and str(name).strip().lower() not in _RESERVED_ATTRIBUTE_KEYS
     }
-    return nodes, _deduplicate_model_links(links), metadata
+    return (
+        nodes,
+        _deduplicate_model_links(links),
+        metadata,
+        structure_templates,
+        negative_evidence,
+    )
+
+
+def _normalize_negative_evidence(
+    topology: Mapping[str, Any],
+    *,
+    node_ids_by_key: Mapping[str, str],
+    nodes: Mapping[str, dict[str, Any]],
+    connected_nodes: list[tuple[str, Mapping[str, Any]]],
+) -> dict[str, Any]:
+    pairs: list[dict[str, Any]] = []
+    seen_pairs: set[tuple[str, str]] = set()
+    for field_name in ("negative_edges", "rejected_edges", "disconnected_pairs"):
+        raw_items = topology.get(field_name, [])
+        if raw_items is None:
+            continue
+        if not isinstance(raw_items, list):
+            raise TopologyFusionError(f"model topology.{field_name} must be a list")
+        for index, raw_item in enumerate(raw_items):
+            reason = "explicit_model_rejection"
+            if isinstance(raw_item, Mapping):
+                raw_source = raw_item.get("source")
+                raw_target = raw_item.get("target")
+                if raw_item.get("reason") is not None:
+                    reason = _text(raw_item.get("reason"), reason, 500)
+            elif isinstance(raw_item, (list, tuple)) and len(raw_item) == 2:
+                raw_source, raw_target = raw_item
+            else:
+                raise TopologyFusionError(
+                    f"model topology.{field_name}[{index}] is invalid"
+                )
+            source = _required_identifier(
+                raw_source, f"model topology.{field_name}[{index}].source"
+            )
+            target = _required_identifier(
+                raw_target, f"model topology.{field_name}[{index}].target"
+            )
+            source = node_ids_by_key.get(_compact_identifier_key(source), source)
+            target = node_ids_by_key.get(_compact_identifier_key(target), target)
+            if source == target:
+                continue
+            pair = _undirected_pair(source, target)
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            pairs.append({"source": source, "target": target, "reason": reason})
+
+    isolated_nodes: set[str] = set()
+    for node_id, raw_node in connected_nodes:
+        if raw_node.get("connections_complete") is not True:
+            continue
+        connections = raw_node.get("connections")
+        if connections == [] or connections == {}:
+            isolated_nodes.add(node_id)
+    for node_id, attributes in nodes.items():
+        if attributes.get("connections_complete") is True and attributes.get(
+            "no_connections"
+        ) is True:
+            isolated_nodes.add(node_id)
+
+    return {
+        "reject_all": topology.get("no_connections") is True,
+        "pairs": pairs,
+        "isolated_nodes": sorted(isolated_nodes, key=_identifier_sort_key),
+    }
 
 
 def _fuse_object(
@@ -529,8 +944,12 @@ def _fuse_links(
     cv_links: list[dict[str, Any]],
     model_links: list[dict[str, Any]],
     *,
+    semantic_model_links: list[dict[str, Any]],
+    model_nodes_by_semantic_id: Mapping[str, Mapping[str, Any]],
+    negative_evidence: Mapping[str, Any],
+    matched_cv_ids: set[str],
     model_layers_by_cv_id: Mapping[str, str],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     cv_by_pair: dict[tuple[str, str], dict[str, Any]] = {}
     for link in cv_links:
         key = _undirected_pair(link["source"], link["target"])
@@ -543,10 +962,65 @@ def _fuse_links(
         key = _undirected_pair(link["source"], link["target"])
         model_by_pair.setdefault(key, link)
 
+    negative_reasons = {
+        _undirected_pair(str(item["source"]), str(item["target"])): str(
+            item.get("reason", "explicit_model_rejection")
+        )
+        for item in negative_evidence.get("pairs", [])
+        if isinstance(item, Mapping) and item.get("source") and item.get("target")
+    }
+    isolated_nodes = {
+        str(node_id) for node_id in negative_evidence.get("isolated_nodes", [])
+    }
+    reject_all = negative_evidence.get("reject_all") is True
+
+    def rejection_reason(pair: tuple[str, str]) -> str | None:
+        explicit_reason = negative_reasons.get(pair)
+        if explicit_reason is not None:
+            return explicit_reason
+        if pair[0] in isolated_nodes or pair[1] in isolated_nodes:
+            return "model_declares_endpoint_has_no_connections"
+        if reject_all and pair[0] in matched_cv_ids and pair[1] in matched_cv_ids:
+            return "model_explicitly_declares_no_connections"
+        return None
+
+    active_cv_links = [
+        link
+        for pair, link in cv_by_pair.items()
+        if rejection_reason(pair) is None
+    ]
+    cv_adjacency = _graph_adjacency(active_cv_links)
+    model_adjacency = _graph_adjacency(semantic_model_links)
+
     fused: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
     for key in sorted(set(cv_by_pair) | set(model_by_pair)):
         cv_link = cv_by_pair.get(key)
         model_link = model_by_pair.get(key)
+        rejected_reason = rejection_reason(key) if cv_link is not None else None
+        if cv_link is not None and rejected_reason is not None and model_link is None:
+            confidence = float(cv_link["confidence"])
+            attributes = _safe_attributes(cv_link.get("attributes", {}))
+            attributes.update(
+                {
+                    "fusion_status": "llm_rejected",
+                    "evidence_sources": ["local_cv", "multimodal_model"],
+                    "cv_confidence": confidence,
+                    "rejection_reason": rejected_reason,
+                    "relation_state": "rejected",
+                }
+            )
+            rejected.append(
+                {
+                    "relation_id": f"fusion-rejected:{cv_link['source']}:{cv_link['target']}",
+                    "source": str(cv_link["source"]),
+                    "target": str(cv_link["target"]),
+                    "type": str(cv_link["type"]),
+                    "confidence": round(confidence, 4),
+                    "attributes": attributes,
+                }
+            )
+            continue
         if cv_link is not None and model_link is not None:
             source = str(model_link["source"])
             target = str(model_link["target"])
@@ -555,14 +1029,26 @@ def _fuse_links(
             attributes = _safe_attributes(cv_link.get("attributes", {}))
             attributes.update(
                 {
-                    "fusion_status": "confirmed",
+                    "fusion_status": "conflict" if rejected_reason else "confirmed",
                     "evidence_sources": ["local_cv", "multimodal_model"],
                     "cv_confidence": confidence,
                     "model_attributes": _safe_attributes(
                         model_link.get("attributes", {})
                     ),
+                    "derivation_status": str(
+                        model_link.get("attributes", {}).get(
+                            "derivation_status", "model_reported"
+                        )
+                    ),
                 }
             )
+            if rejected_reason:
+                attributes.update(
+                    {
+                        "conflict_reason": "model_contains_positive_and_negative_edge_evidence",
+                        "negative_evidence_reason": rejected_reason,
+                    }
+                )
             if model_link.get("confidence") is not None:
                 attributes["model_confidence"] = model_link["confidence"]
         elif cv_link is not None:
@@ -571,29 +1057,39 @@ def _fuse_links(
             relation_type = str(cv_link["type"])
             confidence = float(cv_link["confidence"])
             attributes = _safe_attributes(cv_link.get("attributes", {}))
+            model_path = _find_graph_path(
+                model_adjacency,
+                source,
+                target,
+                max_hops=4,
+                allow_internal=lambda node_id: _model_path_internal_allowed(
+                    node_id, model_nodes_by_semantic_id
+                ),
+            )
             source_layer = model_layers_by_cv_id.get(source)
             target_layer = model_layers_by_cv_id.get(target)
             same_model_layer = bool(source_layer and source_layer == target_layer)
+            fusion_status = "path_equivalent" if model_path is not None else "cv_only"
             attributes.update(
                 {
-                    "fusion_status": "conflict" if same_model_layer else "cv_only",
+                    "fusion_status": fusion_status,
                     "evidence_sources": (
                         ["local_cv", "multimodal_model"]
-                        if same_model_layer
+                        if model_path is not None
                         else ["local_cv"]
                     ),
                     "cv_confidence": confidence,
                 }
             )
-            if same_model_layer:
+            if model_path is not None:
                 attributes.update(
                     {
-                        "conflict_reason": (
-                            "model_places_both_endpoints_in_same_layer_without_peer_link"
-                        ),
-                        "model_layer": source_layer,
+                        "equivalence_kind": "cv_direct_model_logical_path",
+                        "equivalent_model_path": model_path,
                     }
                 )
+            elif same_model_layer:
+                attributes["model_layer_context"] = source_layer
         else:
             assert model_link is not None
             source = str(model_link["source"])
@@ -605,10 +1101,30 @@ def _fuse_links(
                 else DEFAULT_MODEL_CONFIDENCE
             )
             attributes = _safe_attributes(model_link.get("attributes", {}))
+            cv_path = _find_graph_path(
+                cv_adjacency,
+                source,
+                target,
+                max_hops=4,
+            )
+            structurally_derived = (
+                attributes.get("derivation_status") == "structurally_derived"
+            )
+            fusion_status = (
+                "path_equivalent"
+                if cv_path is not None
+                else "structurally_derived"
+                if structurally_derived
+                else "model_only"
+            )
             attributes.update(
                 {
-                    "fusion_status": "model_only",
-                    "evidence_sources": ["multimodal_model"],
+                    "fusion_status": fusion_status,
+                    "evidence_sources": (
+                        ["local_cv", "multimodal_model"]
+                        if cv_path is not None
+                        else ["multimodal_model"]
+                    ),
                     "visual_evidence_status": "not_confirmed_by_local_cv",
                     "confidence_basis": (
                         "model_reported"
@@ -617,6 +1133,13 @@ def _fuse_links(
                     ),
                 }
             )
+            if cv_path is not None:
+                attributes.update(
+                    {
+                        "equivalence_kind": "model_direct_cv_pixel_path",
+                        "equivalent_cv_path": cv_path,
+                    }
+                )
         fused.append(
             {
                 "relation_id": f"fusion:{source}:{target}",
@@ -627,7 +1150,65 @@ def _fuse_links(
                 "attributes": attributes,
             }
         )
-    return fused
+    return fused, rejected
+
+
+def _graph_adjacency(links: list[dict[str, Any]]) -> dict[str, set[str]]:
+    adjacency: dict[str, set[str]] = {}
+    for link in links:
+        source = str(link.get("source", "")).strip()
+        target = str(link.get("target", "")).strip()
+        if not source or not target or source == target:
+            continue
+        adjacency.setdefault(source, set()).add(target)
+        adjacency.setdefault(target, set()).add(source)
+    return adjacency
+
+
+def _find_graph_path(
+    adjacency: Mapping[str, set[str]],
+    source: str,
+    target: str,
+    *,
+    max_hops: int,
+    allow_internal: Callable[[str], bool] | None = None,
+) -> list[str] | None:
+    if source == target or source not in adjacency or target not in adjacency:
+        return None
+    queue: deque[list[str]] = deque([[source]])
+    seen = {source}
+    while queue:
+        path = queue.popleft()
+        if len(path) - 1 >= max_hops:
+            continue
+        current = path[-1]
+        for neighbor in sorted(adjacency.get(current, ()), key=_identifier_sort_key):
+            if neighbor in seen:
+                continue
+            candidate = path + [neighbor]
+            if neighbor == target:
+                return candidate if len(candidate) > 2 else None
+            if allow_internal is not None and not allow_internal(neighbor):
+                continue
+            seen.add(neighbor)
+            queue.append(candidate)
+    return None
+
+
+def _model_path_internal_allowed(
+    node_id: str,
+    nodes: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    attributes = nodes.get(node_id, {})
+    if attributes.get("virtual") is True or attributes.get("implicit") is True:
+        return True
+    semantic_type = " ".join(
+        str(attributes.get(name, "")) for name in ("type", "role", "kind")
+    ).casefold()
+    return any(
+        marker in semantic_type
+        for marker in ("bus", "virtual", "logical", "junction", "connector")
+    )
 
 
 def _deduplicate_model_links(links: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -649,23 +1230,219 @@ def _deduplicate_model_links(links: list[dict[str, Any]]) -> list[dict[str, Any]
 
 def _unlocated_object(model_id: str, model_node: Mapping[str, Any]) -> dict[str, Any]:
     attributes = _safe_attributes(model_node)
+    model_geometry = attributes.pop("model_geometry", None)
     node_type = _text(model_node.get("type"), "network_device", 100)
     is_virtual = bool(model_node.get("virtual")) or "bus" in node_type.casefold()
-    attributes.update(
-        {
-            "fusion_status": "model_only",
-            "evidence_sources": ["multimodal_model"],
-            "geometry_status": "unlocated",
-            "virtual": is_virtual,
-        }
-    )
-    return {
+    geometry_status = "unlocated"
+    result: dict[str, Any] = {
         "business_id": model_id,
         "type": node_type,
         "label": _text(model_node.get("label"), model_id, 500),
         "confidence": _confidence(model_node.get("confidence"), DEFAULT_MODEL_CONFIDENCE),
-        "attributes": attributes,
     }
+    if isinstance(model_geometry, Mapping):
+        raw_bbox = model_geometry.get("bbox")
+        raw_canvas_id = model_geometry.get("canvas_id")
+        if isinstance(raw_bbox, list) and len(raw_bbox) == 4 and raw_canvas_id:
+            bbox = _bbox(raw_bbox, f"model node {model_id}")
+            result.update(
+                {
+                    "canvas_id": _text(raw_canvas_id, "uploaded_topology", 200),
+                    "bbox": bbox,
+                    "confidence": _confidence(
+                        model_geometry.get("confidence"), result["confidence"]
+                    ),
+                }
+            )
+            geometry_status = "model_pixel_grounded"
+    attributes.update(
+        {
+            "fusion_status": "model_only",
+            "evidence_sources": ["multimodal_model"],
+            "geometry_status": geometry_status,
+            "virtual": is_virtual,
+            "interaction_eligible": False,
+        }
+    )
+    result["attributes"] = attributes
+    return result
+
+
+def _infer_unlocated_geometry(
+    unlocated_objects: list[dict[str, Any]],
+    *,
+    fused_objects: list[dict[str, Any]],
+    structure_templates: list[dict[str, Any]],
+    semantic_model_links: list[dict[str, Any]],
+    canvas_id: str,
+) -> list[dict[str, Any]]:
+    inferred_objects = copy.deepcopy(unlocated_objects)
+    if not inferred_objects or not fused_objects:
+        return inferred_objects
+
+    geometry: dict[str, list[float]] = {
+        str(item["business_id"]): [float(value) for value in item["bbox"]]
+        for item in fused_objects
+        if isinstance(item.get("bbox"), list) and len(item["bbox"]) == 4
+    }
+    widths = [bbox[2] for bbox in geometry.values()]
+    heights = [bbox[3] for bbox in geometry.values()]
+    default_width = float(median(widths)) if widths else 60.0
+    default_height = float(median(heights)) if heights else 24.0
+    all_centers_x = sorted(_box_center(bbox)[0] for bbox in geometry.values())
+    positive_gaps = [
+        right - left
+        for left, right in zip(all_centers_x, all_centers_x[1:])
+        if right - left > default_width * 0.5
+    ]
+    default_gap = (
+        max(default_width * 2.0, float(median(positive_gaps)))
+        if positive_gaps
+        else default_width * 2.5
+    )
+    objects_by_id = {
+        str(item["business_id"]): item for item in inferred_objects
+    }
+
+    def assign(node_id: str, center: tuple[float, float], method: str) -> None:
+        item = objects_by_id.get(node_id)
+        if item is None or node_id in geometry:
+            return
+        width = default_width
+        height = default_height
+        x = max(0.0, center[0] - width / 2.0)
+        y = max(0.0, center[1] - height / 2.0)
+        bbox = [round(x, 3), round(y, 3), round(width, 3), round(height, 3)]
+        item["canvas_id"] = canvas_id
+        item["bbox"] = bbox
+        rendered_center = _box_center(bbox)
+        item["center"] = [
+            round(rendered_center[0], 3),
+            round(rendered_center[1], 3),
+        ]
+        attributes = item.setdefault("attributes", {})
+        attributes.update(
+            {
+                "geometry_status": "spatially_inferred",
+                "geometry_method": method,
+                "rendering_only": True,
+                "interaction_eligible": False,
+            }
+        )
+        geometry[node_id] = bbox
+
+    for template in structure_templates:
+        if template.get("type") != "layered":
+            continue
+        layers = template.get("layers", [])
+        if not isinstance(layers, list):
+            continue
+        for layer in layers:
+            if not isinstance(layer, Mapping):
+                continue
+            members = [str(member) for member in layer.get("members", [])]
+            located = [
+                (index, _box_center(geometry[node_id]))
+                for index, node_id in enumerate(members)
+                if node_id in geometry
+            ]
+            if not located:
+                continue
+            layer_y = float(median(center[1] for _index, center in located))
+            for index, node_id in enumerate(members):
+                if node_id in geometry or node_id not in objects_by_id:
+                    continue
+                left = [item for item in located if item[0] < index]
+                right = [item for item in located if item[0] > index]
+                if left and right:
+                    left_index, left_center = left[-1]
+                    right_index, right_center = right[0]
+                    ratio = (index - left_index) / (right_index - left_index)
+                    center_x = left_center[0] + ratio * (
+                        right_center[0] - left_center[0]
+                    )
+                elif left:
+                    left_index, left_center = left[-1]
+                    center_x = left_center[0] + default_gap * (index - left_index)
+                else:
+                    right_index, right_center = right[0]
+                    center_x = right_center[0] - default_gap * (right_index - index)
+                assign(node_id, (center_x, layer_y), "same_layer_interpolation")
+
+    for template in structure_templates:
+        if template.get("type") != "star":
+            continue
+        center_id = str(template.get("center", ""))
+        leaves = [str(leaf) for leaf in template.get("leaves", [])]
+        if center_id not in geometry or not leaves:
+            continue
+        center = _box_center(geometry[center_id])
+        located_radii = [
+            math.dist(center, _box_center(geometry[leaf]))
+            for leaf in leaves
+            if leaf in geometry
+        ]
+        radius = (
+            float(median(located_radii))
+            if located_radii
+            else max(default_gap * 2.0, 120.0)
+        )
+        radius = max(radius, default_gap * 1.5)
+        for index, leaf_id in enumerate(leaves):
+            if leaf_id in geometry or leaf_id not in objects_by_id:
+                continue
+            angle = -math.pi / 2.0 + 2.0 * math.pi * index / len(leaves)
+            assign(
+                leaf_id,
+                (
+                    center[0] + radius * math.cos(angle),
+                    center[1] + radius * math.sin(angle),
+                ),
+                "star_template_projection",
+            )
+
+    adjacency = _graph_adjacency(semantic_model_links)
+    for _iteration in range(3):
+        progress = False
+        for node_id, item in objects_by_id.items():
+            if node_id in geometry:
+                continue
+            neighbor_centers = [
+                _box_center(geometry[neighbor])
+                for neighbor in adjacency.get(node_id, ())
+                if neighbor in geometry
+            ]
+            if len(neighbor_centers) < 2:
+                continue
+            assign(
+                node_id,
+                (
+                    sum(center[0] for center in neighbor_centers)
+                    / len(neighbor_centers),
+                    sum(center[1] for center in neighbor_centers)
+                    / len(neighbor_centers),
+                ),
+                "connected_neighbor_centroid",
+            )
+            progress = progress or item.get("attributes", {}).get(
+                "geometry_status"
+            ) == "spatially_inferred"
+        if not progress:
+            break
+    return inferred_objects
+
+
+def _box_center(bbox: list[float]) -> tuple[float, float]:
+    return bbox[0] + bbox[2] / 2.0, bbox[1] + bbox[3] / 2.0
+
+
+def _geometry_status_counts(items: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        attributes = item.get("attributes", {})
+        status = str(attributes.get("geometry_status", "unlocated"))
+        counts[status] = counts.get(status, 0) + 1
+    return counts
 
 
 def _infer_canvas_id(source: Mapping[str, Any]) -> str:

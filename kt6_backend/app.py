@@ -37,7 +37,6 @@ HYBRID_MODEL_DRIVER_ENV = "KT6_HYBRID_MODEL_DRIVER"
 DEFAULT_VISION_TIMEOUT_SECONDS = 30.0
 DEFAULT_CODEAGENT_TIMEOUT_SECONDS = 120.0
 DEFAULT_CODEAGENT_EXECUTABLE = "codeagent"
-DEFAULT_CODEAGENT_AGENT = "kt6-topology-vision"
 MAX_VISION_TIMEOUT_SECONDS = 300.0
 MAX_JSON_REQUEST_BYTES = 32 * 1024 * 1024
 
@@ -172,7 +171,7 @@ def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | N
         model_adapter = CodeAgentCanvasVisionAdapter(
             workdir=Path(root).resolve(),
             executable=codeagent_executable or DEFAULT_CODEAGENT_EXECUTABLE,
-            agent=codeagent_agent or DEFAULT_CODEAGENT_AGENT,
+            agent=codeagent_agent,
             timeout_seconds=timeout_seconds,
         )
         if selected_driver == "hybrid":

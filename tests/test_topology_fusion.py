@@ -221,7 +221,7 @@ class TopologyFusionTest(unittest.TestCase):
         hub = fused["result"]["objects"][0]
         self.assertEqual(hub["attributes"]["model_semantics"]["role"], "hub")
 
-    def test_cv_peer_link_conflicting_with_model_layers_is_flagged(self):
+    def test_model_omission_alone_does_not_reject_a_cv_link(self):
         cv = cv_capture()
         cv["scene"]["relations"] = [
             {
@@ -263,17 +263,294 @@ class TopologyFusionTest(unittest.TestCase):
         # GW and AP are not the same layer; keep it CV-only as well.
         self.assertEqual(same_layer_link["attributes"]["fusion_status"], "cv_only")
 
-        # A same-layer CORE <-> GW edge absent from the model is an explicit conflict.
+        # Even a same-layer omission is not explicit negative evidence.
         cv["scene"]["relations"][0]["target"] = "CORE-001"
         fused = fuse_topology_payloads(cv, model)
-        conflict = next(
+        same_layer = next(
             item
             for item in fused["result"]["links"]
             if frozenset((item["source"], item["target"]))
             == frozenset(("GW-001", "CORE-001"))
         )
-        self.assertEqual(conflict["attributes"]["fusion_status"], "conflict")
-        self.assertEqual(fused["summary"]["conflict_link_count"], 1)
+        self.assertEqual(same_layer["attributes"]["fusion_status"], "cv_only")
+        self.assertEqual(fused["summary"]["llm_rejected_link_count"], 0)
+
+    def test_cv_direct_link_matches_model_path_through_virtual_bus(self):
+        cv = {
+            "objects": [
+                {
+                    "business_id": "A",
+                    "type": "device",
+                    "label": "A",
+                    "canvas_id": "c1",
+                    "bbox": [10, 10, 20, 20],
+                    "confidence": 0.9,
+                },
+                {
+                    "business_id": "C",
+                    "type": "device",
+                    "label": "C",
+                    "canvas_id": "c1",
+                    "bbox": [210, 10, 20, 20],
+                    "confidence": 0.9,
+                },
+            ],
+            "links": [
+                {
+                    "source": "A",
+                    "target": "C",
+                    "type": "topology_link",
+                    "confidence": 0.8,
+                }
+            ],
+        }
+        model = {
+            "topology": {
+                "nodes": [
+                    {"id": "A"},
+                    {"id": "BUS", "type": "aggregation_bus", "virtual": True},
+                    {"id": "C"},
+                ],
+                "edges": [
+                    {"source": "A", "target": "BUS"},
+                    {"source": "BUS", "target": "C"},
+                ],
+            }
+        }
+
+        fused = fuse_topology_payloads(cv, model)
+
+        direct = fused["result"]["links"][0]
+        self.assertEqual(direct["attributes"]["fusion_status"], "path_equivalent")
+        self.assertEqual(
+            direct["attributes"]["equivalent_model_path"], ["A", "BUS", "C"]
+        )
+        self.assertEqual(fused["summary"]["path_equivalent_link_count"], 1)
+
+        model["topology"]["nodes"][1] = {"id": "BUS", "type": "physical_switch"}
+        fused = fuse_topology_payloads(cv, model)
+        self.assertEqual(
+            fused["result"]["links"][0]["attributes"]["fusion_status"],
+            "cv_only",
+        )
+
+    def test_explicit_negative_edge_rejects_cv_but_empty_connections_do_not(self):
+        cv = {
+            "objects": [
+                {
+                    "business_id": "A",
+                    "type": "device",
+                    "label": "A",
+                    "canvas_id": "c1",
+                    "bbox": [10, 10, 20, 20],
+                    "confidence": 0.9,
+                },
+                {
+                    "business_id": "B",
+                    "type": "device",
+                    "label": "B",
+                    "canvas_id": "c1",
+                    "bbox": [80, 10, 20, 20],
+                    "confidence": 0.9,
+                },
+            ],
+            "links": [
+                {
+                    "source": "A",
+                    "target": "B",
+                    "type": "topology_link",
+                    "confidence": 0.75,
+                }
+            ],
+        }
+        model = {
+            "topology": {
+                "nodes": [
+                    {"id": "A", "connections": []},
+                    {"id": "B", "connections": []},
+                ]
+            }
+        }
+        fused = fuse_topology_payloads(cv, model)
+        self.assertEqual(len(fused["result"]["links"]), 1)
+        self.assertEqual(fused["rejected_links"], [])
+
+        model["topology"]["negative_edges"] = [
+            {"source": "A", "target": "B", "reason": "visible gap"}
+        ]
+        fused = fuse_topology_payloads(cv, model)
+        self.assertEqual(fused["result"]["links"], [])
+        self.assertEqual(fused["summary"]["llm_rejected_link_count"], 1)
+        self.assertEqual(
+            fused["rejected_links"][0]["attributes"]["fusion_status"],
+            "llm_rejected",
+        )
+
+    def test_layer_template_infers_rendering_only_geometry(self):
+        cv = {
+            "objects": [
+                {
+                    "business_id": "A",
+                    "type": "device",
+                    "label": "A",
+                    "canvas_id": "c1",
+                    "bbox": [10, 40, 20, 20],
+                    "confidence": 0.9,
+                },
+                {
+                    "business_id": "C",
+                    "type": "device",
+                    "label": "C",
+                    "canvas_id": "c1",
+                    "bbox": [210, 40, 20, 20],
+                    "confidence": 0.9,
+                },
+            ],
+            "links": [],
+        }
+        model = {
+            "topology": {
+                "layers": [
+                    {
+                        "name": "接入层",
+                        "devices": [{"id": "A"}, {"id": "B"}, {"id": "C"}],
+                    }
+                ]
+            }
+        }
+
+        fused = fuse_topology_payloads(cv, model)
+
+        inferred = fused["unlocated_objects"][0]
+        self.assertEqual(inferred["business_id"], "B")
+        self.assertEqual(
+            inferred["attributes"]["geometry_status"], "spatially_inferred"
+        )
+        self.assertTrue(inferred["attributes"]["rendering_only"])
+        self.assertAlmostEqual(inferred["center"][0], 120.0)
+        self.assertEqual(fused["summary"]["spatially_inferred_object_count"], 1)
+        self.assertEqual(len(fused["result"]["objects"]), 2)
+
+    def test_star_template_is_preserved_and_derives_missing_edges(self):
+        cv = {
+            "objects": [
+                {
+                    "business_id": "HUB",
+                    "type": "device",
+                    "label": "HUB",
+                    "canvas_id": "c1",
+                    "bbox": [100, 100, 30, 20],
+                    "confidence": 0.9,
+                },
+                {
+                    "business_id": "L1",
+                    "type": "device",
+                    "label": "L1",
+                    "canvas_id": "c1",
+                    "bbox": [20, 20, 30, 20],
+                    "confidence": 0.9,
+                },
+            ],
+            "links": [],
+        }
+        model = {
+            "topology": {
+                "layout": "star",
+                "centerNode": "HUB",
+                "nodes": [{"id": "HUB"}, {"id": "L1"}, {"id": "L2"}],
+                "edges": [{"source": "HUB", "target": "L1"}],
+            }
+        }
+
+        fused = fuse_topology_payloads(cv, model)
+
+        template = fused["structure_templates"][0]
+        self.assertEqual(template["type"], "star")
+        self.assertEqual(template["center"], "HUB")
+        self.assertEqual(template["leaves"], ["L1", "L2"])
+        derived = next(
+            link for link in fused["unresolved_links"] if link["target"] == "L2"
+        )
+        self.assertEqual(
+            derived["attributes"]["fusion_status"], "structurally_derived"
+        )
+        self.assertEqual(fused["summary"]["structurally_derived_link_count"], 1)
+        l2 = next(
+            item for item in fused["unlocated_objects"] if item["business_id"] == "L2"
+        )
+        self.assertEqual(l2["attributes"]["geometry_status"], "spatially_inferred")
+
+    def test_model_pixel_geometry_and_explicit_star_enter_analysis_result(self):
+        cv = {
+            "objects": [
+                {
+                    "business_id": "HUB",
+                    "type": "device",
+                    "label": "HUB",
+                    "canvas_id": "c1",
+                    "bbox": [80, 80, 30, 20],
+                    "confidence": 0.92,
+                }
+            ],
+            "links": [],
+        }
+        model = {
+            "objects": [
+                {
+                    "business_id": "HUB",
+                    "type": "switch",
+                    "label": "HUB",
+                    "canvas_id": "c1",
+                    "bbox": [80, 80, 30, 20],
+                    "confidence": 0.95,
+                    "attributes": {},
+                },
+                {
+                    "business_id": "LEAF",
+                    "type": "ap",
+                    "label": "LEAF",
+                    "canvas_id": "c1",
+                    "bbox": [180, 80, 30, 20],
+                    "confidence": 0.9,
+                    "attributes": {"vendor": "ZTE"},
+                },
+            ],
+            "links": [],
+            "structure_templates": [
+                {
+                    "template_id": "visible-star",
+                    "type": "star",
+                    "center": "HUB",
+                    "leaves": ["LEAF"],
+                    "confidence": 0.88,
+                }
+            ],
+        }
+
+        fused = fuse_topology_payloads(cv, model)
+
+        self.assertEqual(fused["summary"]["model_grounded_object_count"], 1)
+        self.assertEqual(fused["summary"]["remaining_unlocated_object_count"], 0)
+        leaf = next(
+            item for item in fused["result"]["objects"] if item["business_id"] == "LEAF"
+        )
+        self.assertEqual(
+            leaf["attributes"]["geometry_status"], "model_pixel_grounded"
+        )
+        self.assertFalse(leaf["attributes"]["interaction_eligible"])
+        self.assertEqual(leaf["bbox"], [180.0, 80.0, 30.0, 20.0])
+        link = fused["result"]["links"][0]
+        self.assertEqual(link["attributes"]["fusion_status"], "structurally_derived")
+        self.assertEqual(
+            link["attributes"]["structure_template_id"], "visible-star"
+        )
+        self.assertEqual(fused["unresolved_links"], [])
+
+        parsed = TopologyVisionContract().parse_response_bytes(
+            json.dumps(fused["result"]).encode("utf-8"), {"c1": (300, 200)}
+        )
+        self.assertEqual(len(parsed["objects"]), 2)
+        self.assertEqual(len(parsed["links"]), 1)
 
     def test_missing_cv_bbox_is_rejected(self):
         cv = {"objects": [{"business_id": "A"}], "links": []}

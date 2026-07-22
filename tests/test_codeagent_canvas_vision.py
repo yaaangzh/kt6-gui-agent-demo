@@ -103,6 +103,63 @@ def successful_events(call: dict, *, payload: dict | None = None) -> bytes:
     )
 
 
+def successful_stream_events(call: dict, *, payload: dict | None = None) -> bytes:
+    request = request_from_call(call)
+    frame_path = request["frames"][0]["local_path"]
+    response_text = json.dumps(
+        payload or response_payload(),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return json_events(
+        {
+            "type": "system",
+            "subtype": "init",
+            "tools": ["Read"],
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tool-read-1",
+                        "name": "Read",
+                        "input": {"file_path": frame_path},
+                    }
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tool-read-1",
+                        "content": "image read successfully",
+                    }
+                ],
+            },
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": response_text}],
+            },
+        },
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": response_text,
+        },
+    )
+
+
 class CodeAgentCanvasVisionAdapterTest(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -171,21 +228,197 @@ class CodeAgentCanvasVisionAdapterTest(unittest.TestCase):
         self.assertEqual(staged["bytes"], ONE_PIXEL_PNG)
         self.assertFalse(Path(staged["path"]).exists())
         call = runner.calls[0]
+        staged_dir = str(Path(request_from_call(call)["frames"][0]["local_path"]).parent)
         self.assertEqual(
             call["args"],
             (
-                "run",
-                "--format",
-                "json",
-                "--dir",
-                str(self.root),
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--input-format",
+                "text",
+                "--verbose",
                 "--agent",
                 "kt6-topology-vision",
+                "--tools",
+                "Read",
+                "--allowedTools",
+                "Read",
+                "--permission-mode",
+                "dontAsk",
+                "--no-session-persistence",
+                "--disable-slash-commands",
+                "--add-dir",
+                staged_dir,
             ),
         )
         self.assertEqual(call["cwd"], self.root)
         self.assertNotIn(str(self.image_path), call["stdin"].decode("utf-8"))
         self.assertNotIn("Authorization", call["stdin"].decode("utf-8"))
+
+    def test_accepts_codeagent_cli_stream_json_events(self):
+        runner = StubRunner(
+            lambda call: CodeAgentProcessResult(0, successful_stream_events(call), b"")
+        )
+
+        result = self.adapter(runner).recognize(
+            page=self.page(), frames=(self.frame(),)
+        )
+
+        self.assertEqual(result["objects"][0]["business_id"], "GW-001")
+
+    def test_hybrid_context_is_bounded_and_sent_as_untrusted_cv_evidence(self):
+        captured = {}
+
+        def factory(call: dict) -> CodeAgentProcessResult:
+            captured["request"] = request_from_call(call)
+            return CodeAgentProcessResult(0, successful_stream_events(call), b"")
+
+        cv_observations = {
+            "objects": [
+                {
+                    "business_id": "GW-001",
+                    "type": "gateway",
+                    "label": "GW-001",
+                    "canvas_id": "topology-canvas",
+                    "bbox": [0, 0, 1, 1],
+                    "confidence": 0.98,
+                    "attributes": {
+                        "ocr_text": "GW-001",
+                        "pixel_verified": True,
+                    },
+                }
+            ],
+            "links": [],
+        }
+
+        result = self.adapter(StubRunner(factory)).recognize_with_context(
+            page=self.page(),
+            frames=(self.frame(),),
+            cv_observations=cv_observations,
+        )
+
+        self.assertEqual(result["objects"][0]["business_id"], "GW-001")
+        request = captured["request"]
+        self.assertEqual(
+            request["cv_observations"]["objects"][0]["business_id"], "GW-001"
+        )
+        self.assertNotIn(
+            "pixel_verified",
+            request["cv_observations"]["objects"][0]["attributes"],
+        )
+        self.assertIn("not ground truth", request["requirements"]["cv_observations"])
+
+    def test_accepts_extended_topology_structure_and_negative_evidence(self):
+        payload = response_payload()
+        payload["objects"].append(
+            {
+                "business_id": "CORE-001",
+                "type": "core_switch",
+                "label": "CORE-001",
+                "canvas_id": "topology-canvas",
+                "bbox": [0, 0, 1, 1],
+                "confidence": 0.91,
+                "attributes": {},
+            }
+        )
+        payload["negative_edges"] = [
+            {
+                "source": "GW-001",
+                "target": "CORE-001",
+                "reason": "visible gap",
+                "confidence": 0.9,
+            }
+        ]
+        payload["structure_templates"] = [
+            {
+                "template_id": "core-layer",
+                "type": "layered",
+                "layers": [
+                    {"name": "核心层", "members": ["GW-001", "CORE-001"]}
+                ],
+            }
+        ]
+        payload["no_connections"] = False
+        runner = StubRunner(
+            lambda call: CodeAgentProcessResult(
+                0, successful_stream_events(call, payload=payload), b""
+            )
+        )
+
+        result = self.adapter(runner).recognize(
+            page=self.page(), frames=(self.frame(),)
+        )
+
+        self.assertEqual(result["negative_edges"][0]["reason"], "visible gap")
+        self.assertEqual(result["structure_templates"][0]["type"], "layered")
+        self.assertFalse(result["no_connections"])
+
+    def test_uses_configured_default_agent_when_no_override_is_supplied(self):
+        runner = StubRunner(
+            lambda call: CodeAgentProcessResult(0, successful_stream_events(call), b"")
+        )
+        adapter = CodeAgentCanvasVisionAdapter(
+            workdir=self.root,
+            executable=sys.executable,
+            agent=None,
+            timeout_seconds=2,
+            runner=runner,
+        )
+
+        adapter.recognize(page=self.page(), frames=(self.frame(),))
+
+        self.assertNotIn("--agent", runner.calls[0]["args"])
+
+    def test_stream_json_rejects_non_read_tool_and_failed_read(self):
+        def events(call: dict, *, tool_name: str, failed: bool) -> bytes:
+            path = request_from_call(call)["frames"][0]["local_path"]
+            return json_events(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "tool-1",
+                                "name": tool_name,
+                                "input": {"file_path": path},
+                            }
+                        ]
+                    },
+                },
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "tool-1",
+                                "is_error": failed,
+                            }
+                        ]
+                    },
+                },
+                {"type": "result", "subtype": "success", "is_error": False},
+            )
+
+        with self.assertRaisesRegex(CodeAgentVisionResponseError, "other than read"):
+            self.adapter(
+                StubRunner(
+                    lambda call: CodeAgentProcessResult(
+                        0, events(call, tool_name="Bash", failed=False), b""
+                    )
+                )
+            ).recognize(page=self.page(), frames=(self.frame(),))
+
+        with self.assertRaisesRegex(CodeAgentVisionResponseError, "did not complete"):
+            self.adapter(
+                StubRunner(
+                    lambda call: CodeAgentProcessResult(
+                        0, events(call, tool_name="Read", failed=True), b""
+                    )
+                )
+            ).recognize(page=self.page(), frames=(self.frame(),))
 
     def test_page_perception_accepts_only_proven_codeagent_pixel_result(self):
         runner = StubRunner(
