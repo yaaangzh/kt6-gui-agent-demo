@@ -135,6 +135,48 @@ python -m kt6_backend.topology_image_cli .\topology.png `
   --timeout 120
 ```
 
+若要避免 CodeAgent 推理时间占用 HTTP 请求，可使用分阶段单图流程。它会先生成
+本地 CV 文件，再独立调用 CodeAgent 生成模型文件，最后离线融合；模型阶段失败时，
+已完成的 CV 文件仍会保留：
+
+```powershell
+python -m kt6_backend.topology_hybrid_cli .\topology.png `
+  --source-id hybrid-file-v1 `
+  --out-dir .\runtime_data\hybrid-file-v1 `
+  --timeout 600
+```
+
+成功后目录包含：
+
+```text
+cv-result.json             本地 RapidOCR/OpenCV 原始结果
+model-result.json          CodeAgent 严格协议模型结果
+codeagent-events.jsonl     CodeAgent 原始 stream-json 事件
+fused-result.json          两份结果的离线融合结果
+```
+
+也可以逐步执行，以便单独重试模型或调整融合算法而不重复运行 CV：
+
+```powershell
+python -m kt6_backend.topology_cv_cli .\topology.png `
+  --source-id hybrid-file-v1 `
+  --out .\cv-result.json
+
+python -m kt6_backend.topology_model_cli .\topology.png `
+  --source-id hybrid-file-v1 `
+  --cv .\cv-result.json `
+  --out .\model-result.json `
+  --events .\codeagent-events.jsonl `
+  --timeout 600
+
+python -m kt6_backend.topology_fusion_cli `
+  .\cv-result.json `
+  .\model-result.json `
+  --out .\fused-result.json
+```
+
+独立 CodeAgent CLI 最长允许 900 秒；HTTP 感知接口仍维持 300 秒上限。
+
 Browser Use 后续可以作为浏览器会话、DOM 获取、截图和通用 GUI 操作底座，但其内置视觉不能单独替代拓扑感知：稳定的节点/链路重建、业务 ID 绑定、跨帧对象一致性和拓扑版本判断仍需要 Renderer Adapter 或专用 Canvas Vision Adapter。
 
 ## Scene 缓存与拓扑变化
@@ -285,6 +327,10 @@ kt6_backend/
   http_canvas_vision.py        生产 HTTP 视觉 Adapter 与严格输入输出协议
   topology_vision_contract.py  三种视觉驱动共用的图片与拓扑严格契约
   topology_image_cli.py        pixels-only 图片验收命令行工具
+  topology_cv_cli.py           单图本地 CV 原始结果生成工具
+  topology_model_cli.py        CodeAgent 模型结果与原始事件生成工具
+  topology_hybrid_cli.py       CV、CodeAgent 与离线融合三阶段流水线
+  topology_fusion_cli.py       两份已有 JSON 的离线融合工具
   topology_text_recognizer.py  Unicode 拓扑文本的保守语义重建
   vision_recognition.py        CanvasVision 帧与适配器协议
   perception.py                DOM / Canvas Mock 感知适配器

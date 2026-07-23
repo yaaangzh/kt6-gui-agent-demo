@@ -224,6 +224,7 @@ class CodeAgentCanvasVisionAdapter:
     DEFAULT_MAX_STDERR_BYTES = 256 * 1024
     MAX_PROMPT_BYTES = 2 * 1024 * 1024
     MAX_CV_CONTEXT_BYTES = 1536 * 1024
+    MAX_TIMEOUT_SECONDS = 900.0
     _AGENT_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
     _SERIAL_GATE = threading.BoundedSemaphore(value=1)
 
@@ -253,7 +254,9 @@ class CodeAgentCanvasVisionAdapter:
         self.executable = self._resolve_executable(executable)
         self.agent = agent_name
         self.timeout_seconds = self._positive_finite(
-            timeout_seconds, "timeout_seconds", maximum=300.0
+            timeout_seconds,
+            "timeout_seconds",
+            maximum=self.MAX_TIMEOUT_SECONDS,
         )
         self.max_event_bytes = self._positive_int(
             max_event_bytes, "max_event_bytes", maximum=32 * 1024 * 1024
