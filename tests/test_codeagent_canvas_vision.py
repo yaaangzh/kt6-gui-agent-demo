@@ -230,7 +230,6 @@ class CodeAgentCanvasVisionAdapterTest(unittest.TestCase):
         self.assertEqual(staged["bytes"], ONE_PIXEL_PNG)
         self.assertFalse(Path(staged["path"]).exists())
         call = runner.calls[0]
-        staged_dir = str(Path(request_from_call(call)["frames"][0]["local_path"]).parent)
         self.assertEqual(
             call["args"],
             (
@@ -250,11 +249,12 @@ class CodeAgentCanvasVisionAdapterTest(unittest.TestCase):
                 "dontAsk",
                 "--no-session-persistence",
                 "--disable-slash-commands",
-                "--add-dir",
-                staged_dir,
             ),
         )
         self.assertEqual(call["cwd"], self.root)
+        staged_path = Path(request_from_call(call)["frames"][0]["local_path"])
+        self.assertTrue(staged_path.is_relative_to(self.root))
+        self.assertNotIn("--add-dir", call["args"])
         self.assertNotIn(str(self.image_path), call["stdin"].decode("utf-8"))
         self.assertNotIn("Authorization", call["stdin"].decode("utf-8"))
 
@@ -268,6 +268,26 @@ class CodeAgentCanvasVisionAdapterTest(unittest.TestCase):
         )
 
         self.assertEqual(result["objects"][0]["business_id"], "GW-001")
+
+    def test_permission_mode_can_be_explicitly_bypassed(self):
+        runner = StubRunner(
+            lambda call: CodeAgentProcessResult(
+                0, successful_stream_events(call), b""
+            )
+        )
+        adapter = CodeAgentCanvasVisionAdapter(
+            workdir=self.root,
+            executable=sys.executable,
+            permission_mode="bypassPermissions",
+            timeout_seconds=2,
+            runner=runner,
+        )
+
+        adapter.recognize(page=self.page(), frames=(self.frame(),))
+
+        args = runner.calls[0]["args"]
+        permission_index = args.index("--permission-mode")
+        self.assertEqual(args[permission_index + 1], "bypassPermissions")
 
     def test_hybrid_context_is_bounded_and_sent_as_untrusted_cv_evidence(self):
         captured = {}
@@ -660,6 +680,12 @@ class CodeAgentCanvasVisionAdapterTest(unittest.TestCase):
                 executable=sys.executable,
                 timeout_seconds=0,
             )
+        with self.assertRaisesRegex(ValueError, "permission_mode"):
+            CodeAgentCanvasVisionAdapter(
+                workdir=self.root,
+                executable=sys.executable,
+                permission_mode="unsafe-mode",
+            )
         with self.assertRaisesRegex(ValueError, "not found"):
             CodeAgentCanvasVisionAdapter(
                 workdir=self.root,
@@ -702,9 +728,11 @@ class SubprocessCodeAgentRunnerTest(unittest.TestCase):
 
     def test_stdout_is_streamed_to_sink_and_reports_progress(self):
         sink = BytesIO()
+        stderr_sink = BytesIO()
         progress = []
         runner = SubprocessCodeAgentRunner(
             stdout_sink=sink,
+            stderr_sink=stderr_sink,
             progress_callback=progress.append,
             heartbeat_seconds=0.01,
         )
@@ -714,7 +742,8 @@ class SubprocessCodeAgentRunnerTest(unittest.TestCase):
                 "-c",
                 "import json,sys,time; "
                 "print(json.dumps({'type':'system','subtype':'init'}), flush=True); "
-                "sys.stdout.flush(); time.sleep(.05)",
+                "sys.stderr.write('diagnostic\\n'); sys.stderr.flush(); "
+                "time.sleep(.05)",
             ),
             stdin=b"",
             cwd=Path.cwd(),
@@ -723,27 +752,37 @@ class SubprocessCodeAgentRunnerTest(unittest.TestCase):
             max_stderr_bytes=1024,
         )
         self.assertEqual(sink.getvalue(), result.stdout)
+        self.assertEqual(stderr_sink.getvalue(), result.stderr)
         self.assertTrue(progress)
         self.assertTrue(any(item.idle_seconds is not None for item in progress))
         self.assertTrue(
             any(item.last_event == "system/init" for item in progress)
         )
         self.assertTrue(any(item.stdout_bytes > 0 for item in progress))
+        self.assertTrue(any(item.stderr_bytes > 0 for item in progress))
+        self.assertTrue(
+            any(item.stderr_idle_seconds is not None for item in progress)
+        )
 
     def test_timeout_reports_last_event_and_preserves_streamed_bytes(self):
         sink = BytesIO()
-        runner = SubprocessCodeAgentRunner(stdout_sink=sink)
+        stderr_sink = BytesIO()
+        runner = SubprocessCodeAgentRunner(
+            stdout_sink=sink,
+            stderr_sink=stderr_sink,
+        )
         with self.assertRaisesRegex(
             CodeAgentVisionTransportError,
-            "last event: assistant/tool_use:Read",
+            "last event: assistant/tool_use:Read.*stderr [1-9][0-9]* bytes",
         ):
             runner.run(
                 executable=Path(sys.executable),
                 args=(
                     "-c",
-                    "import json,time; "
+                    "import json,sys,time; "
                     "print(json.dumps({'type':'assistant','message':{'content':["
                     "{'type':'tool_use','name':'Read'}]}}), flush=True); "
+                    "sys.stderr.write('waiting for read\\n'); sys.stderr.flush(); "
                     "time.sleep(5)",
                 ),
                 stdin=b"",
@@ -753,6 +792,7 @@ class SubprocessCodeAgentRunnerTest(unittest.TestCase):
                 max_stderr_bytes=1024,
             )
         self.assertIn(b'"name": "Read"', sink.getvalue())
+        self.assertIn(b"waiting for read", stderr_sink.getvalue())
 
     def test_success_event_ends_process_after_grace_period(self):
         runner = SubprocessCodeAgentRunner(terminal_grace_seconds=0.05)

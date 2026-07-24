@@ -143,15 +143,19 @@ python -m kt6_backend.topology_image_cli .\topology.png `
 python -m kt6_backend.topology_hybrid_cli .\topology.png `
   --source-id hybrid-file-v1 `
   --out-dir .\runtime_data\hybrid-file-v1 `
-  --timeout 600
+  --timeout 600 `
+  --permission-mode dontAsk
 ```
 
-CodeAgent 阶段会实时追加原始 `codeagent-events.jsonl`，终端不会展开事件中的
-图片 Base64。每 10 秒输出的心跳会显示最后一个完整事件、已保存字节数和无输出
-时长；连续 30 秒没有新输出时会明确标记。超时错误同样包含最后事件，便于区分
-启动、图片 `Read`、模型推理和最终结果阶段。收到成功 `result` 后，如果 CLI
-超过短暂宽限仍不退出，KT6 会终止进程树并继续验证已经完整落盘的结果。按
-`Ctrl+C` 也会可靠终止进程树，并保留已完成的 CV 和 CodeAgent 事件文件。
+CodeAgent 阶段会实时追加原始 `codeagent-events.jsonl` 和
+`codeagent-stderr.log`，终端不会展开事件中的图片 Base64。暂存图片位于
+CodeAgent 工作目录内部，因此不再为每次随机目录传递 `--add-dir`。每 10 秒
+输出的心跳会显示最后一个完整事件、stdout/stderr 字节数和无输出时长；连续
+30 秒没有新 stdout 时会明确标记。超时错误同样包含最后事件和 stderr 状态，
+便于区分启动权限、图片 `Read`、模型推理和最终结果阶段。收到成功 `result`
+后，如果 CLI 超过短暂宽限仍不退出，KT6 会终止进程树并继续验证已经完整落盘
+的结果。按 `Ctrl+C` 也会可靠终止进程树，并保留已完成的 CV 和 CodeAgent
+诊断文件。
 模型阶段失败后，可复用 CV 文件只重试模型识别与融合：
 
 ```powershell
@@ -159,8 +163,12 @@ python -m kt6_backend.topology_hybrid_cli .\topology.png `
   --source-id hybrid-file-v1 `
   --out-dir .\runtime_data\hybrid-file-v1 `
   --timeout 600 `
+  --permission-mode bypassPermissions `
   --reuse-cv
 ```
+
+`--permission-mode` 仅接受 `dontAsk`（默认）或 `bypassPermissions`。后者只建议
+在隔离测试环境中显式使用，不会在代码中写死。
 
 成功后目录包含：
 
@@ -168,6 +176,7 @@ python -m kt6_backend.topology_hybrid_cli .\topology.png `
 cv-result.json             本地 RapidOCR/OpenCV 原始结果
 model-result.json          CodeAgent 严格协议模型结果
 codeagent-events.jsonl     CodeAgent 原始 stream-json 事件
+codeagent-stderr.log       CodeAgent 启动与错误诊断
 fused-result.json          两份结果的离线融合结果
 ```
 
@@ -183,6 +192,8 @@ python -m kt6_backend.topology_model_cli .\topology.png `
   --cv .\cv-result.json `
   --out .\model-result.json `
   --events .\codeagent-events.jsonl `
+  --stderr .\codeagent-stderr.log `
+  --permission-mode dontAsk `
   --timeout 600
 
 python -m kt6_backend.topology_fusion_cli `

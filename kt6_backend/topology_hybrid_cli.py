@@ -24,6 +24,7 @@ def run_pipeline(
     output_dir: Path,
     executable: str = "codeagent",
     agent: str | None = None,
+    permission_mode: str = "dontAsk",
     timeout_seconds: float = 600.0,
     workdir: Path | None = None,
     reuse_cv: bool = False,
@@ -32,10 +33,13 @@ def run_pipeline(
     cv_path = output_dir / "cv-result.json"
     model_path = output_dir / "model-result.json"
     events_path = output_dir / "codeagent-events.jsonl"
+    stderr_path = output_dir / "codeagent-stderr.log"
     fused_path = output_dir / "fused-result.json"
 
-    stale_paths = (model_path, events_path, fused_path) if reuse_cv else (
-        cv_path, model_path, events_path, fused_path
+    stale_paths = (
+        (model_path, events_path, stderr_path, fused_path)
+        if reuse_cv
+        else (cv_path, model_path, events_path, stderr_path, fused_path)
     )
     for stale_path in stale_paths:
         try:
@@ -62,9 +66,11 @@ def run_pipeline(
         source_id=source_id,
         output_path=model_path,
         events_path=events_path,
+        stderr_path=stderr_path,
         cv_path=cv_path,
         executable=executable,
         agent=agent,
+        permission_mode=permission_mode,
         timeout_seconds=timeout_seconds,
         workdir=workdir,
     )
@@ -73,6 +79,7 @@ def run_pipeline(
         "cv": cv_path,
         "model": model_path,
         "events": events_path,
+        "stderr": stderr_path,
         "fused": fused_path,
     }
 
@@ -90,6 +97,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, default=600.0)
     parser.add_argument("--executable", default="codeagent")
     parser.add_argument("--agent")
+    parser.add_argument(
+        "--permission-mode",
+        choices=("dontAsk", "bypassPermissions"),
+        default="dontAsk",
+    )
     parser.add_argument("--workdir", type=Path, default=Path.cwd())
     parser.add_argument(
         "--reuse-cv",
@@ -108,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=args.out_dir,
             executable=args.executable,
             agent=args.agent,
+            permission_mode=args.permission_mode,
             timeout_seconds=args.timeout,
             workdir=args.workdir,
             reuse_cv=args.reuse_cv,
@@ -128,6 +141,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     except KeyboardInterrupt:
         events_path = args.out_dir / "codeagent-events.jsonl"
+        stderr_path = args.out_dir / "codeagent-stderr.log"
         print(
             json.dumps(
                 {
@@ -135,6 +149,9 @@ def main(argv: list[str] | None = None) -> int:
                     "error_type": "KeyboardInterrupt",
                     "events": (
                         str(events_path.resolve()) if events_path.exists() else None
+                    ),
+                    "stderr": (
+                        str(stderr_path.resolve()) if stderr_path.exists() else None
                     ),
                 },
                 ensure_ascii=False,
@@ -152,6 +169,7 @@ def main(argv: list[str] | None = None) -> int:
         ValueError,
     ) as exc:
         events_path = args.out_dir / "codeagent-events.jsonl"
+        stderr_path = args.out_dir / "codeagent-stderr.log"
         print(
             json.dumps(
                 {
@@ -159,6 +177,9 @@ def main(argv: list[str] | None = None) -> int:
                     "error_type": type(exc).__name__,
                     "events": (
                         str(events_path.resolve()) if events_path.exists() else None
+                    ),
+                    "stderr": (
+                        str(stderr_path.resolve()) if stderr_path.exists() else None
                     ),
                 },
                 ensure_ascii=False,

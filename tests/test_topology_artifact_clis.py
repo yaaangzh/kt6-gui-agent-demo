@@ -106,7 +106,11 @@ class SuccessfulModelRunner:
             )
             + "\n"
         ).encode("utf-8")
-        return CodeAgentProcessResult(returncode=0, stdout=stdout, stderr=b"")
+        return CodeAgentProcessResult(
+            returncode=0,
+            stdout=stdout,
+            stderr=b"model diagnostic\n",
+        )
 
 
 class TopologyArtifactCLITest(unittest.TestCase):
@@ -146,6 +150,7 @@ class TopologyArtifactCLITest(unittest.TestCase):
         )
         output_path = self.root / "model-result.json"
         events_path = self.root / "codeagent-events.jsonl"
+        stderr_path = self.root / "codeagent-stderr.log"
         runner = SuccessfulModelRunner()
 
         result = generate_model_artifact(
@@ -153,8 +158,10 @@ class TopologyArtifactCLITest(unittest.TestCase):
             source_id="hybrid-v1",
             output_path=output_path,
             events_path=events_path,
+            stderr_path=stderr_path,
             cv_path=cv_path,
             executable=sys.executable,
+            permission_mode="bypassPermissions",
             timeout_seconds=600,
             workdir=self.root,
             runner=runner,
@@ -167,6 +174,7 @@ class TopologyArtifactCLITest(unittest.TestCase):
         )
         event_lines = events_path.read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(event_lines), 3)
+        self.assertEqual(stderr_path.read_bytes(), b"model diagnostic\n")
         prompt = runner.call["stdin"].decode("utf-8")
         _heading, request_text = prompt.split("\n", 1)
         request = json.loads(request_text)
@@ -175,8 +183,12 @@ class TopologyArtifactCLITest(unittest.TestCase):
             "GW-001",
         )
         self.assertEqual(runner.call["timeout_seconds"], 600.0)
+        args = runner.call["args"]
+        permission_index = args.index("--permission-mode")
+        self.assertEqual(args[permission_index + 1], "bypassPermissions")
+        self.assertNotIn("--add-dir", args)
 
-    def test_pipeline_keeps_all_three_artifacts(self):
+    def test_pipeline_keeps_all_artifacts(self):
         output_dir = self.root / "artifacts"
 
         def fake_cv(image_path, *, source_id, output_path):
@@ -190,10 +202,12 @@ class TopologyArtifactCLITest(unittest.TestCase):
             source_id,
             output_path,
             events_path,
+            stderr_path,
             **_kwargs,
         ):
             output_path.write_text(json.dumps(_model_result()), encoding="utf-8")
             events_path.write_text('{"type":"result"}\n', encoding="utf-8")
+            stderr_path.write_text("", encoding="utf-8")
             return _model_result()
 
         with patch(
@@ -211,7 +225,10 @@ class TopologyArtifactCLITest(unittest.TestCase):
                 workdir=self.root,
             )
 
-        self.assertEqual(set(paths), {"cv", "model", "events", "fused"})
+        self.assertEqual(
+            set(paths),
+            {"cv", "model", "events", "stderr", "fused"},
+        )
         for path in paths.values():
             self.assertTrue(path.is_file(), path)
         fused = json.loads(paths["fused"].read_text(encoding="utf-8"))
@@ -237,10 +254,12 @@ class TopologyArtifactCLITest(unittest.TestCase):
             *,
             output_path,
             events_path,
+            stderr_path,
             **_kwargs,
         ):
             output_path.write_text(json.dumps(_model_result()), encoding="utf-8")
             events_path.write_text('{"type":"result"}\n', encoding="utf-8")
+            stderr_path.write_text("", encoding="utf-8")
             return _model_result()
 
         with patch(

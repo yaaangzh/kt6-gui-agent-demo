@@ -42,8 +42,10 @@ class CodeAgentProcessResult:
 class CodeAgentProgress:
     elapsed_seconds: float
     idle_seconds: float | None
+    stderr_idle_seconds: float | None
     last_event: str | None
     stdout_bytes: int
+    stderr_bytes: int
 
 
 class CodeAgentRunner(Protocol):
@@ -70,6 +72,7 @@ class SubprocessCodeAgentRunner:
         self,
         *,
         stdout_sink: BinaryIO | None = None,
+        stderr_sink: BinaryIO | None = None,
         progress_callback: Callable[[CodeAgentProgress], None] | None = None,
         heartbeat_seconds: float = 10.0,
         terminal_grace_seconds: float = 5.0,
@@ -81,6 +84,7 @@ class SubprocessCodeAgentRunner:
                 "terminal_grace_seconds must be non-negative and finite"
             )
         self.stdout_sink = stdout_sink
+        self.stderr_sink = stderr_sink
         self.progress_callback = progress_callback
         self.heartbeat_seconds = heartbeat_seconds
         self.terminal_grace_seconds = terminal_grace_seconds
@@ -129,6 +133,7 @@ class SubprocessCodeAgentRunner:
         state_lock = threading.Lock()
         started_at = time.monotonic()
         last_stdout_at: list[float | None] = [None]
+        last_stderr_at: list[float | None] = [None]
         last_event: list[str | None] = [None]
         terminal_success_at: list[float | None] = [None]
         event_buffer = bytearray()
@@ -175,11 +180,16 @@ class SubprocessCodeAgentRunner:
                             if name == "stdout":
                                 last_stdout_at[0] = time.monotonic()
                                 observe_events(accepted, last_stdout_at[0])
+                            elif name == "stderr":
+                                last_stderr_at[0] = time.monotonic()
                         if len(chunk) > remaining:
                             overflow.append(name)
-                    if name == "stdout" and accepted and self.stdout_sink is not None:
-                        self.stdout_sink.write(accepted)
-                        self.stdout_sink.flush()
+                    sink = (
+                        self.stdout_sink if name == "stdout" else self.stderr_sink
+                    )
+                    if accepted and sink is not None:
+                        sink.write(accepted)
+                        sink.flush()
                     if len(chunk) > remaining:
                         return
             except BaseException as exc:  # pragma: no cover - OS pipe failure
@@ -243,8 +253,10 @@ class SubprocessCodeAgentRunner:
                 if self.progress_callback is not None and now >= next_heartbeat:
                     with state_lock:
                         last_output = last_stdout_at[0]
+                        last_stderr = last_stderr_at[0]
                         event_name = last_event[0]
                         output_size = len(stdout)
+                        stderr_size = len(stderr)
                     try:
                         self.progress_callback(
                             CodeAgentProgress(
@@ -252,8 +264,14 @@ class SubprocessCodeAgentRunner:
                                 idle_seconds=(
                                     None if last_output is None else now - last_output
                                 ),
+                                stderr_idle_seconds=(
+                                    None
+                                    if last_stderr is None
+                                    else now - last_stderr
+                                ),
                                 last_event=event_name,
                                 stdout_bytes=output_size,
+                                stderr_bytes=stderr_size,
                             )
                         )
                     except KeyboardInterrupt:
@@ -287,14 +305,24 @@ class SubprocessCodeAgentRunner:
             with state_lock:
                 event_name = last_event[0] or "none"
                 last_output = last_stdout_at[0]
+                last_stderr = last_stderr_at[0]
+                stderr_size = len(stderr)
             idle_text = (
                 "no stdout received"
                 if last_output is None
                 else f"stdout idle for {max(0.0, time.monotonic() - last_output):.0f}s"
             )
+            stderr_text = (
+                "no stderr received"
+                if last_stderr is None
+                else (
+                    f"stderr {stderr_size} bytes, idle for "
+                    f"{max(0.0, time.monotonic() - last_stderr):.0f}s"
+                )
+            )
             raise CodeAgentVisionTransportError(
                 "codeagent perception timed out "
-                f"(last event: {event_name}; {idle_text})"
+                f"(last event: {event_name}; {idle_text}; {stderr_text})"
             )
         if overflow:
             raise CodeAgentVisionTransportError(
@@ -384,6 +412,7 @@ class CodeAgentCanvasVisionAdapter:
     MAX_CV_CONTEXT_BYTES = 1536 * 1024
     MAX_TIMEOUT_SECONDS = 900.0
     _AGENT_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
+    _PERMISSION_MODES = frozenset({"dontAsk", "bypassPermissions"})
     _SERIAL_GATE = threading.BoundedSemaphore(value=1)
 
     def __init__(
@@ -392,6 +421,7 @@ class CodeAgentCanvasVisionAdapter:
         workdir: Path,
         executable: str = "codeagent",
         agent: str | None = None,
+        permission_mode: str = "dontAsk",
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         max_event_bytes: int = DEFAULT_MAX_EVENT_BYTES,
         max_stderr_bytes: int = DEFAULT_MAX_STDERR_BYTES,
@@ -411,6 +441,12 @@ class CodeAgentCanvasVisionAdapter:
         self.workdir = root
         self.executable = self._resolve_executable(executable)
         self.agent = agent_name
+        normalized_permission_mode = str(permission_mode).strip()
+        if normalized_permission_mode not in self._PERMISSION_MODES:
+            raise ValueError(
+                "permission_mode must be dontAsk or bypassPermissions"
+            )
+        self.permission_mode = normalized_permission_mode
         self.timeout_seconds = self._positive_finite(
             timeout_seconds,
             "timeout_seconds",
@@ -541,11 +577,9 @@ class CodeAgentCanvasVisionAdapter:
                     "--allowedTools",
                     "Read",
                     "--permission-mode",
-                    "dontAsk",
+                    self.permission_mode,
                     "--no-session-persistence",
                     "--disable-slash-commands",
-                    "--add-dir",
-                    str(staging_dir),
                 )
             )
             result = self._runner.run(
