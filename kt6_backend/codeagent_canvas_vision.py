@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Mapping, Protocol
+from typing import Any, BinaryIO, Callable, Mapping, Protocol
 
 from .topology_vision_contract import TopologyVisionContract
 from .vision_recognition import CanvasFrame
@@ -38,6 +38,14 @@ class CodeAgentProcessResult:
     stderr: bytes
 
 
+@dataclass(frozen=True)
+class CodeAgentProgress:
+    elapsed_seconds: float
+    idle_seconds: float | None
+    last_event: str | None
+    stdout_bytes: int
+
+
 class CodeAgentRunner(Protocol):
     def run(
         self,
@@ -57,6 +65,25 @@ class SubprocessCodeAgentRunner:
     """Bounded, non-shell subprocess runner used by the CodeAgent adapter."""
 
     _READ_CHUNK_BYTES = 64 * 1024
+
+    def __init__(
+        self,
+        *,
+        stdout_sink: BinaryIO | None = None,
+        progress_callback: Callable[[CodeAgentProgress], None] | None = None,
+        heartbeat_seconds: float = 10.0,
+        terminal_grace_seconds: float = 5.0,
+    ) -> None:
+        if not math.isfinite(heartbeat_seconds) or heartbeat_seconds <= 0:
+            raise ValueError("heartbeat_seconds must be positive and finite")
+        if not math.isfinite(terminal_grace_seconds) or terminal_grace_seconds < 0:
+            raise ValueError(
+                "terminal_grace_seconds must be non-negative and finite"
+            )
+        self.stdout_sink = stdout_sink
+        self.progress_callback = progress_callback
+        self.heartbeat_seconds = heartbeat_seconds
+        self.terminal_grace_seconds = terminal_grace_seconds
 
     def run(
         self,
@@ -98,21 +125,63 @@ class SubprocessCodeAgentRunner:
         overflow: list[str] = []
         reader_errors: list[BaseException] = []
         writer_errors: list[BaseException] = []
+        progress_errors: list[BaseException] = []
         state_lock = threading.Lock()
+        started_at = time.monotonic()
+        last_stdout_at: list[float | None] = [None]
+        last_event: list[str | None] = [None]
+        terminal_success_at: list[float | None] = [None]
+        event_buffer = bytearray()
+
+        def observe_events(chunk: bytes, observed_at: float) -> None:
+            event_buffer.extend(chunk)
+            while True:
+                newline = event_buffer.find(b"\n")
+                if newline < 0:
+                    return
+                line = bytes(event_buffer[:newline]).strip()
+                del event_buffer[: newline + 1]
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    last_event[0] = "malformed-event"
+                    continue
+                if not isinstance(payload, dict):
+                    last_event[0] = "non-object-event"
+                    continue
+                last_event[0] = self._event_label(payload)
+                if (
+                    payload.get("type") == "result"
+                    and payload.get("subtype") == "success"
+                    and payload.get("is_error") is not True
+                ):
+                    terminal_success_at[0] = observed_at
 
         def read_stream(stream: Any, target: bytearray, limit: int, name: str) -> None:
             try:
                 while True:
-                    chunk = stream.read(self._READ_CHUNK_BYTES)
+                    reader = getattr(stream, "read1", stream.read)
+                    chunk = reader(self._READ_CHUNK_BYTES)
                     if not chunk:
                         return
+                    accepted = b""
                     with state_lock:
                         remaining = limit - len(target)
                         if remaining > 0:
-                            target.extend(chunk[:remaining])
+                            accepted = chunk[:remaining]
+                            target.extend(accepted)
+                            if name == "stdout":
+                                last_stdout_at[0] = time.monotonic()
+                                observe_events(accepted, last_stdout_at[0])
                         if len(chunk) > remaining:
                             overflow.append(name)
-                            return
+                    if name == "stdout" and accepted and self.stdout_sink is not None:
+                        self.stdout_sink.write(accepted)
+                        self.stdout_sink.flush()
+                    if len(chunk) > remaining:
+                        return
             except BaseException as exc:  # pragma: no cover - OS pipe failure
                 reader_errors.append(exc)
 
@@ -145,16 +214,57 @@ class SubprocessCodeAgentRunner:
             thread.start()
 
         deadline = time.monotonic() + timeout_seconds
+        next_heartbeat = started_at + self.heartbeat_seconds
         timed_out = False
-        while process.poll() is None:
-            if overflow:
-                self._kill_process_tree(process)
-                break
-            if time.monotonic() >= deadline:
-                timed_out = True
-                self._kill_process_tree(process)
-                break
-            time.sleep(0.02)
+        interrupted = False
+        completed_from_event = False
+        try:
+            while process.poll() is None:
+                now = time.monotonic()
+                if overflow:
+                    self._kill_process_tree(process)
+                    break
+                if reader_errors or writer_errors or progress_errors:
+                    self._kill_process_tree(process)
+                    break
+                if now >= deadline:
+                    timed_out = True
+                    self._kill_process_tree(process)
+                    break
+                with state_lock:
+                    terminal_at = terminal_success_at[0]
+                if (
+                    terminal_at is not None
+                    and now >= terminal_at + self.terminal_grace_seconds
+                ):
+                    completed_from_event = True
+                    self._kill_process_tree(process)
+                    break
+                if self.progress_callback is not None and now >= next_heartbeat:
+                    with state_lock:
+                        last_output = last_stdout_at[0]
+                        event_name = last_event[0]
+                        output_size = len(stdout)
+                    try:
+                        self.progress_callback(
+                            CodeAgentProgress(
+                                elapsed_seconds=now - started_at,
+                                idle_seconds=(
+                                    None if last_output is None else now - last_output
+                                ),
+                                last_event=event_name,
+                                stdout_bytes=output_size,
+                            )
+                        )
+                    except KeyboardInterrupt:
+                        raise
+                    except BaseException as exc:  # pragma: no cover - callback failure
+                        progress_errors.append(exc)
+                    next_heartbeat = now + self.heartbeat_seconds
+                time.sleep(0.02)
+        except KeyboardInterrupt:
+            interrupted = True
+            self._kill_process_tree(process)
 
         try:
             process.wait(timeout=5)
@@ -171,19 +281,67 @@ class SubprocessCodeAgentRunner:
             except (OSError, ValueError):
                 pass
 
+        if interrupted:
+            raise KeyboardInterrupt
         if timed_out:
-            raise CodeAgentVisionTransportError("codeagent perception timed out")
+            with state_lock:
+                event_name = last_event[0] or "none"
+                last_output = last_stdout_at[0]
+            idle_text = (
+                "no stdout received"
+                if last_output is None
+                else f"stdout idle for {max(0.0, time.monotonic() - last_output):.0f}s"
+            )
+            raise CodeAgentVisionTransportError(
+                "codeagent perception timed out "
+                f"(last event: {event_name}; {idle_text})"
+            )
         if overflow:
             raise CodeAgentVisionTransportError(
                 f"codeagent {overflow[0]} exceeded the configured size limit"
             )
         if reader_errors or writer_errors:
             raise CodeAgentVisionTransportError("codeagent process pipe failed")
+        if progress_errors:
+            raise CodeAgentVisionTransportError(
+                "codeagent progress reporting failed"
+            )
         return CodeAgentProcessResult(
-            returncode=int(process.returncode or 0),
+            returncode=0 if completed_from_event else int(process.returncode or 0),
             stdout=bytes(stdout),
             stderr=bytes(stderr),
         )
+
+    @staticmethod
+    def _event_label(payload: Mapping[str, Any]) -> str:
+        event_type = str(payload.get("type") or "unknown")
+        subtype = payload.get("subtype")
+        if event_type in {"system", "result"} and subtype:
+            return f"{event_type}/{subtype}"
+        part = payload.get("part")
+        if isinstance(part, Mapping):
+            part_type = str(part.get("type") or event_type)
+            if event_type == "tool_use" or part_type == "tool_use":
+                tool_name = str(part.get("tool") or part.get("name") or "unknown")
+                return f"tool_use:{tool_name}"
+            return f"{event_type}/{part_type}"
+        message = payload.get("message")
+        if isinstance(message, Mapping):
+            content = message.get("content")
+            if isinstance(content, list):
+                content_types: list[str] = []
+                for part in content:
+                    if not isinstance(part, Mapping):
+                        continue
+                    part_type = str(part.get("type") or "unknown")
+                    if part_type == "tool_use":
+                        tool_name = str(part.get("name") or "unknown")
+                        content_types.append(f"tool_use:{tool_name}")
+                    else:
+                        content_types.append(part_type)
+                if content_types:
+                    return f"{event_type}/{'|'.join(content_types)}"
+        return event_type
 
     @staticmethod
     def _kill_process_tree(process: subprocess.Popen[bytes]) -> None:

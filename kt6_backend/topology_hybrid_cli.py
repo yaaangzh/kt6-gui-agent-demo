@@ -13,6 +13,7 @@ from .local_cv_canvas_vision import (
 from .topology_artifact_common import TopologyArtifactCLIError, write_json
 from .topology_cv_cli import generate_cv_artifact
 from .topology_fusion import TopologyFusionError, fuse_topology_payloads
+from .topology_fusion_cli import load_json
 from .topology_model_cli import generate_model_artifact
 
 
@@ -25,6 +26,7 @@ def run_pipeline(
     agent: str | None = None,
     timeout_seconds: float = 600.0,
     workdir: Path | None = None,
+    reuse_cv: bool = False,
 ) -> dict[str, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     cv_path = output_dir / "cv-result.json"
@@ -32,7 +34,10 @@ def run_pipeline(
     events_path = output_dir / "codeagent-events.jsonl"
     fused_path = output_dir / "fused-result.json"
 
-    for stale_path in (cv_path, model_path, events_path, fused_path):
+    stale_paths = (model_path, events_path, fused_path) if reuse_cv else (
+        cv_path, model_path, events_path, fused_path
+    )
+    for stale_path in stale_paths:
         try:
             stale_path.unlink(missing_ok=True)
         except OSError as exc:
@@ -40,11 +45,18 @@ def run_pipeline(
                 f"cannot replace stale artifact: {stale_path}"
             ) from exc
 
-    cv_result = generate_cv_artifact(
-        image_path,
-        source_id=source_id,
-        output_path=cv_path,
-    )
+    if reuse_cv:
+        if not cv_path.is_file():
+            raise TopologyArtifactCLIError(
+                f"cannot reuse missing CV artifact: {cv_path}"
+            )
+        cv_result = load_json(cv_path)
+    else:
+        cv_result = generate_cv_artifact(
+            image_path,
+            source_id=source_id,
+            output_path=cv_path,
+        )
     model_result = generate_model_artifact(
         image_path,
         source_id=source_id,
@@ -79,6 +91,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--executable", default="codeagent")
     parser.add_argument("--agent")
     parser.add_argument("--workdir", type=Path, default=Path.cwd())
+    parser.add_argument(
+        "--reuse-cv",
+        action="store_true",
+        help="keep and reuse an existing cv-result.json; retry only model/fusion",
+    )
     return parser
 
 
@@ -93,6 +110,7 @@ def main(argv: list[str] | None = None) -> int:
             agent=args.agent,
             timeout_seconds=args.timeout,
             workdir=args.workdir,
+            reuse_cv=args.reuse_cv,
         )
         print(
             json.dumps(
@@ -108,6 +126,22 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0
+    except KeyboardInterrupt:
+        events_path = args.out_dir / "codeagent-events.jsonl"
+        print(
+            json.dumps(
+                {
+                    "error": "interrupted; CodeAgent process tree was terminated",
+                    "error_type": "KeyboardInterrupt",
+                    "events": (
+                        str(events_path.resolve()) if events_path.exists() else None
+                    ),
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return 130
     except (
         CodeAgentVisionError,
         LocalVisionDependencyError,
@@ -117,9 +151,16 @@ def main(argv: list[str] | None = None) -> int:
         OSError,
         ValueError,
     ) as exc:
+        events_path = args.out_dir / "codeagent-events.jsonl"
         print(
             json.dumps(
-                {"error": str(exc), "error_type": type(exc).__name__},
+                {
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "events": (
+                        str(events_path.resolve()) if events_path.exists() else None
+                    ),
+                },
                 ensure_ascii=False,
             ),
             file=sys.stderr,

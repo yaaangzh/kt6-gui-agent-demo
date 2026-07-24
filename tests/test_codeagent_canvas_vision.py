@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from io import BytesIO
 import json
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
 
 from kt6_backend.codeagent_canvas_vision import (
@@ -697,6 +699,88 @@ class SubprocessCodeAgentRunnerTest(unittest.TestCase):
                 max_stdout_bytes=1024,
                 max_stderr_bytes=1024,
             )
+
+    def test_stdout_is_streamed_to_sink_and_reports_progress(self):
+        sink = BytesIO()
+        progress = []
+        runner = SubprocessCodeAgentRunner(
+            stdout_sink=sink,
+            progress_callback=progress.append,
+            heartbeat_seconds=0.01,
+        )
+        result = runner.run(
+            executable=Path(sys.executable),
+            args=(
+                "-c",
+                "import json,sys,time; "
+                "print(json.dumps({'type':'system','subtype':'init'}), flush=True); "
+                "sys.stdout.flush(); time.sleep(.05)",
+            ),
+            stdin=b"",
+            cwd=Path.cwd(),
+            timeout_seconds=5,
+            max_stdout_bytes=1024,
+            max_stderr_bytes=1024,
+        )
+        self.assertEqual(sink.getvalue(), result.stdout)
+        self.assertTrue(progress)
+        self.assertTrue(any(item.idle_seconds is not None for item in progress))
+        self.assertTrue(
+            any(item.last_event == "system/init" for item in progress)
+        )
+        self.assertTrue(any(item.stdout_bytes > 0 for item in progress))
+
+    def test_timeout_reports_last_event_and_preserves_streamed_bytes(self):
+        sink = BytesIO()
+        runner = SubprocessCodeAgentRunner(stdout_sink=sink)
+        with self.assertRaisesRegex(
+            CodeAgentVisionTransportError,
+            "last event: assistant/tool_use:Read",
+        ):
+            runner.run(
+                executable=Path(sys.executable),
+                args=(
+                    "-c",
+                    "import json,time; "
+                    "print(json.dumps({'type':'assistant','message':{'content':["
+                    "{'type':'tool_use','name':'Read'}]}}), flush=True); "
+                    "time.sleep(5)",
+                ),
+                stdin=b"",
+                cwd=Path.cwd(),
+                timeout_seconds=0.1,
+                max_stdout_bytes=4096,
+                max_stderr_bytes=1024,
+            )
+        self.assertIn(b'"name": "Read"', sink.getvalue())
+
+    def test_success_event_ends_process_after_grace_period(self):
+        runner = SubprocessCodeAgentRunner(terminal_grace_seconds=0.05)
+        started = time.monotonic()
+        result = runner.run(
+            executable=Path(sys.executable),
+            args=(
+                "-c",
+                "import json,time; "
+                "print(json.dumps({'type':'result','subtype':'success',"
+                "'is_error':False,'result':'ok'}), flush=True); "
+                "time.sleep(5)",
+            ),
+            stdin=b"",
+            cwd=Path.cwd(),
+            timeout_seconds=2,
+            max_stdout_bytes=4096,
+            max_stderr_bytes=1024,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertIn(b'"subtype": "success"', result.stdout)
+
+    def test_progress_intervals_must_be_finite(self):
+        with self.assertRaisesRegex(ValueError, "heartbeat_seconds"):
+            SubprocessCodeAgentRunner(heartbeat_seconds=0)
+        with self.assertRaisesRegex(ValueError, "terminal_grace_seconds"):
+            SubprocessCodeAgentRunner(terminal_grace_seconds=-1)
 
 
 if __name__ == "__main__":

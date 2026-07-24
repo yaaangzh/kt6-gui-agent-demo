@@ -8,6 +8,7 @@ from typing import Any
 
 from .codeagent_canvas_vision import (
     CodeAgentCanvasVisionAdapter,
+    CodeAgentProgress,
     CodeAgentProcessResult,
     CodeAgentRunner,
     CodeAgentVisionError,
@@ -24,22 +25,54 @@ from .topology_fusion_cli import load_json
 
 
 class RecordingCodeAgentRunner:
-    """Persist successful CodeAgent stdout before response validation."""
+    """Persist CodeAgent stdout as it arrives, including failed attempts."""
 
     def __init__(
         self,
         output_path: Path,
         *,
         delegate: CodeAgentRunner | None = None,
+        heartbeat_seconds: float = 10.0,
     ) -> None:
         self.output_path = output_path
-        self.delegate = delegate or SubprocessCodeAgentRunner()
+        self.delegate = delegate
+        self.heartbeat_seconds = heartbeat_seconds
+
+    @staticmethod
+    def _report_progress(progress: CodeAgentProgress) -> None:
+        state = "正在启动（尚无输出）" if progress.idle_seconds is None else (
+            f"长时间无输出（{progress.idle_seconds:.0f}秒）"
+            if progress.idle_seconds >= 30
+            else "正在运行"
+        )
+        event = progress.last_event or "none"
+        print(
+            f"[CodeAgent] {state}，已运行 {progress.elapsed_seconds:.0f} 秒，"
+            f"最后事件 {event}，已保存 {progress.stdout_bytes} 字节",
+            file=sys.stderr,
+            flush=True,
+        )
 
     def run(self, **kwargs: Any) -> CodeAgentProcessResult:
-        result = self.delegate.run(**kwargs)
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        self.output_path.write_bytes(result.stdout)
-        return result
+        sink = None
+        delegate = self.delegate
+        streaming = delegate is None
+        if delegate is None:
+            sink = self.output_path.open("wb")
+            delegate = SubprocessCodeAgentRunner(
+                stdout_sink=sink,
+                progress_callback=self._report_progress,
+                heartbeat_seconds=self.heartbeat_seconds,
+            )
+        try:
+            result = delegate.run(**kwargs)
+            if not streaming:
+                self.output_path.write_bytes(result.stdout)
+            return result
+        finally:
+            if sink is not None:
+                sink.close()
 
 
 def generate_model_artifact(
@@ -132,6 +165,21 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0
+    except KeyboardInterrupt:
+        print(
+            json.dumps(
+                {
+                    "error": "interrupted; CodeAgent process tree was terminated",
+                    "error_type": "KeyboardInterrupt",
+                    "events": (
+                        str(args.events.resolve()) if args.events.exists() else None
+                    ),
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return 130
     except (CodeAgentVisionError, TopologyArtifactCLIError, OSError, ValueError) as exc:
         print(
             json.dumps(

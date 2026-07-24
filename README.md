@@ -146,6 +146,22 @@ python -m kt6_backend.topology_hybrid_cli .\topology.png `
   --timeout 600
 ```
 
+CodeAgent 阶段会实时追加原始 `codeagent-events.jsonl`，终端不会展开事件中的
+图片 Base64。每 10 秒输出的心跳会显示最后一个完整事件、已保存字节数和无输出
+时长；连续 30 秒没有新输出时会明确标记。超时错误同样包含最后事件，便于区分
+启动、图片 `Read`、模型推理和最终结果阶段。收到成功 `result` 后，如果 CLI
+超过短暂宽限仍不退出，KT6 会终止进程树并继续验证已经完整落盘的结果。按
+`Ctrl+C` 也会可靠终止进程树，并保留已完成的 CV 和 CodeAgent 事件文件。
+模型阶段失败后，可复用 CV 文件只重试模型识别与融合：
+
+```powershell
+python -m kt6_backend.topology_hybrid_cli .\topology.png `
+  --source-id hybrid-file-v1 `
+  --out-dir .\runtime_data\hybrid-file-v1 `
+  --timeout 600 `
+  --reuse-cv
+```
+
 成功后目录包含：
 
 ```text

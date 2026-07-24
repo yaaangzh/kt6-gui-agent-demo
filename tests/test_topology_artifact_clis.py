@@ -226,6 +226,56 @@ class TopologyArtifactCLITest(unittest.TestCase):
         )
         self.assertEqual(adapter.timeout_seconds, 600.0)
 
+    def test_pipeline_can_reuse_cv_artifact_for_model_retry(self):
+        output_dir = self.root / "retry"
+        output_dir.mkdir()
+        cv_path = output_dir / "cv-result.json"
+        cv_path.write_text(json.dumps(_cv_result()), encoding="utf-8")
+
+        def fake_model(
+            image_path,
+            *,
+            output_path,
+            events_path,
+            **_kwargs,
+        ):
+            output_path.write_text(json.dumps(_model_result()), encoding="utf-8")
+            events_path.write_text('{"type":"result"}\n', encoding="utf-8")
+            return _model_result()
+
+        with patch(
+            "kt6_backend.topology_hybrid_cli.generate_cv_artifact"
+        ) as cv_generator, patch(
+            "kt6_backend.topology_hybrid_cli.generate_model_artifact",
+            side_effect=fake_model,
+        ):
+            paths = run_pipeline(
+                self.image_path,
+                source_id="pipeline-v1",
+                output_dir=output_dir,
+                executable=sys.executable,
+                workdir=self.root,
+                reuse_cv=True,
+            )
+
+        cv_generator.assert_not_called()
+        self.assertEqual(
+            json.loads(paths["cv"].read_text(encoding="utf-8")),
+            _cv_result(),
+        )
+        self.assertTrue(paths["fused"].is_file())
+
+    def test_pipeline_rejects_reuse_when_cv_artifact_is_missing(self):
+        with self.assertRaisesRegex(ValueError, "missing CV artifact"):
+            run_pipeline(
+                self.image_path,
+                source_id="pipeline-v1",
+                output_dir=self.root / "missing-retry",
+                executable=sys.executable,
+                workdir=self.root,
+                reuse_cv=True,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
