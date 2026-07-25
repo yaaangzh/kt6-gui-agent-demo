@@ -146,22 +146,24 @@ class TopologyModelContractTest(unittest.TestCase):
                 )
                 self.assertEqual(result, payload)
 
-    def test_rejects_json_fence_with_leading_commentary(self):
+    def test_accepts_unique_fenced_json_after_leading_commentary(self):
         payload = {
             "schema_version": MODEL_SCHEMA_VERSION,
-            "nodes": [],
+            "nodes": [{"id": "GW-001", "type": "gateway"}],
             "links": [],
         }
-        fenced = (
-            "Here is the result:\n```json\n"
+        response = (
+            "I inspected the image and found one gateway.\r\n\r\n"
+            "```json\r\n"
             + json.dumps(payload)
-            + "\n```"
+            + "\r\n```\r\nAdditional analysis follows."
         )
 
-        with self.assertRaises(TopologyModelResponseError):
-            TopologyModelContract.parse_response_bytes(
-                fenced.encode("utf-8")
-            )
+        result = TopologyModelContract.parse_response_bytes(
+            response.encode("utf-8")
+        )
+
+        self.assertEqual(result, payload)
 
     def test_rejects_additional_fenced_block_after_json(self):
         payload = {
@@ -174,6 +176,54 @@ class TopologyModelContractTest(unittest.TestCase):
             + json.dumps(payload)
             + "\n```\n```text\nsecond block\n```"
         )
+
+        with self.assertRaises(TopologyModelResponseError):
+            TopologyModelContract.parse_response_bytes(
+                response.encode("utf-8")
+            )
+
+    def test_rejects_two_model_protocol_objects(self):
+        payload = {
+            "schema_version": MODEL_SCHEMA_VERSION,
+            "nodes": [],
+            "links": [],
+        }
+        response = json.dumps(payload) + "\n" + json.dumps(payload)
+
+        with self.assertRaises(TopologyModelResponseError):
+            TopologyModelContract.parse_response_bytes(
+                response.encode("utf-8")
+            )
+
+    def test_ignores_nested_schema_marker_outside_protocol_root(self):
+        payload = {
+            "schema_version": MODEL_SCHEMA_VERSION,
+            "nodes": [
+                {
+                    "id": "GW-001",
+                    "type": "gateway",
+                    "attributes": {
+                        "embedded": {"schema_version": MODEL_SCHEMA_VERSION}
+                    },
+                }
+            ],
+            "links": [],
+        }
+        response = "Analysis before JSON.\n" + json.dumps(payload)
+
+        result = TopologyModelContract.parse_response_bytes(
+            response.encode("utf-8")
+        )
+
+        self.assertEqual(result, payload)
+
+    def test_rejects_malformed_fence_before_valid_protocol_object(self):
+        payload = {
+            "schema_version": MODEL_SCHEMA_VERSION,
+            "nodes": [],
+            "links": [],
+        }
+        response = "```json\nnot-json\n```\n" + json.dumps(payload)
 
         with self.assertRaises(TopologyModelResponseError):
             TopologyModelContract.parse_response_bytes(

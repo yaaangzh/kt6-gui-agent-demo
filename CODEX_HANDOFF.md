@@ -94,8 +94,9 @@ tests/test_topology_fusion.py
 - 允许顺序重复读取同一张白名单暂存图片。
 - 仍禁止读取其他路径、调用其他工具或发起未完成的并发重复读取。
 - 离线模型阶段使用 `kt6.topology-model.v1` 精简协议。
-- 接受纯 JSON、JSON fenced block，以及 JSON 后追加的模型分析文字。
-- 只解析响应开头第一个完整 JSON 对象，随后执行严格协议校验。
+- 接受纯 JSON、单个 JSON fenced block，以及 JSON 前后追加的模型分析文字。
+- 在有界响应中定位唯一 `kt6.topology-model.v1` 根对象，随后执行严格协议校验。
+- 显式围栏必须直接包含协议对象；损坏围栏、多个围栏或多个协议对象仍会拒绝。
 
 ## 4. CodeAgentCLI 运行事实
 
@@ -201,11 +202,12 @@ confidence
 
 模型响应校验：
 
-- 响应必须以 JSON 对象或 JSON fenced block 开始。
-- 使用 `JSONDecoder.raw_decode` 读取第一个完整 JSON 对象。
-- JSON 后面的自然语言分析可以忽略。
-- JSON 前面的解释、第二个 fenced block、重复 key、NaN、无限值、未知字段和
-  超限数组仍会拒绝。
+- 响应可以是纯 JSON，也可以在自然语言说明中包含单个 JSON fenced block。
+- 使用 `JSONDecoder.raw_decode` 定位唯一 `kt6.topology-model.v1` 根对象。
+- JSON 前后的自然语言分析可以忽略。
+- 显式围栏必须直接包含协议对象；第二个 fenced block、第二个协议对象、损坏
+  围栏、重复 key、NaN、无限值、未知字段和超限数组仍会拒绝。
+- schema marker 和候选起点扫描均有上限；嵌套属性中的同名 marker 不算协议根。
 - 节点、连接、模板、置信度和属性均有类型及数量边界。
 
 ## 6. 融合逻辑
@@ -242,7 +244,7 @@ spatially_inferred
 开发环境最后一次结果：
 
 ```text
-234 项通过
+237 项通过
 42 项跳过
 ```
 
@@ -263,7 +265,7 @@ python -m unittest `
   tests.test_topology_artifact_clis
 ```
 
-当前定向结果应为 40 项通过。
+当前定向结果应为 43 项通过。
 
 ### 7.2 测试环境端到端命令
 
@@ -347,10 +349,10 @@ python -m kt6_backend.topology_hybrid_cli `
   分析，不是链路失败。
 - CodeAgent 处理困难图片时可能顺序读取同一图片两次，事件日志中的图片 Base64
   因此可能从约 1 MB 增至 2 MB 以上。
-- 第三张图片在功能基线 `f16ef7f` 之前的运行中，CodeAgent 于约 631 秒返回
-  `result/success`，最终内容以 JSON fenced block 开头，随后追加自然语言分析。
-  `f16ef7f` 已增加这种格式的解析兼容，但测试环境尚需在同步新提交后做一次新的
-  端到端确认。
+- 第三张图片最近一次运行中，CodeAgent 已返回 `result/success`；最终文本长
+  22177 字符，前 1329 字符是英文分析，随后才是单个完整 JSON fenced block。
+  旧解析器因要求 JSON 位于响应开头而失败。当前版本已改为提取唯一协议根，并用
+  同形态回归测试覆盖；测试环境仍需同步新提交后重新做一次端到端确认。
 
 最后一项不要在交接时误写成“第三张图片已经通过”。
 
@@ -369,7 +371,7 @@ python -m kt6_backend.topology_hybrid_cli `
 
 - 同一图片的 Read 和推理时间可能显著波动。
 - 模型可能重复 Read 同一张图。
-- 模型可能用 fenced JSON，或在 JSON 后追加说明。
+- 模型可能用 fenced JSON，或在 JSON 前后追加说明。
 - 模型成功不代表语义识别一定正确。
 
 ### 9.3 事件文件
@@ -410,10 +412,13 @@ result/success 在截止线仍报 timeout
 → 允许已完成后的顺序重复，仍限制路径和工具
 
 模型返回 fenced JSON
-→ 兼容单个开头 JSON fenced block
+→ 兼容单个 JSON fenced block，关闭围栏不计作第二个代码块
 
-模型在 JSON 后追加分析
-→ 提取第一个完整 JSON，再进行严格协议校验
+模型在 JSON 前后追加分析
+→ 定位唯一 `kt6.topology-model.v1` 根对象，再进行严格协议校验
+
+模型返回多个协议对象或损坏围栏
+→ 拒绝歧义响应，不绕过严格协议校验
 ```
 
 ## 11. 后续建议

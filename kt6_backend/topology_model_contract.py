@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from typing import Any, Mapping
 
 
@@ -226,10 +227,10 @@ class TopologyModelContract:
                 "model response is empty or exceeds the size limit"
             )
         try:
-            payload = cls._decode_leading_json(body.decode("utf-8"))
+            payload = cls._decode_unique_model_json(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             raise TopologyModelResponseError(
-                "model response does not start with strict UTF-8 JSON"
+                "model response does not contain one strict UTF-8 model JSON object"
             ) from exc
         if not isinstance(payload, dict):
             raise TopologyModelResponseError("model response root must be an object")
@@ -249,30 +250,80 @@ class TopologyModelContract:
         return payload
 
     @classmethod
-    def _decode_leading_json(cls, value: str) -> Any:
-        """Decode the first JSON value while ignoring trailing model commentary."""
-
-        stripped = value.strip()
-        if stripped.startswith("```"):
-            opening, separator, remainder = stripped.partition("\n")
-            if (
-                not separator
-                or opening.strip().casefold() not in {"```", "```json"}
-            ):
-                raise ValueError("model response has an invalid JSON fence")
-            stripped = remainder.lstrip()
+    def _decode_unique_model_json(cls, value: str) -> Any:
+        """Find exactly one model-protocol JSON object in bounded commentary."""
 
         decoder = json.JSONDecoder(
             object_pairs_hook=cls._unique_object,
             parse_constant=cls._reject_constant,
         )
-        payload, end = decoder.raw_decode(stripped)
-        suffix = stripped[end:].strip()
-        if suffix.startswith("```"):
-            suffix = suffix[3:].lstrip()
-        if "```" in suffix:
-            raise ValueError("model response contains an additional fenced block")
-        return payload
+        fence_lines = list(
+            re.finditer(r"(?im)^[ \t]*```([^`\r\n]*)[ \t]*(?:\r?\n|$)", value)
+        )
+        fence_openings: list[tuple[re.Match[str], str]] = []
+        inside_fence = False
+        for match in fence_lines:
+            info = match.group(1).strip().casefold()
+            if not inside_fence:
+                fence_openings.append((match, info))
+                inside_fence = True
+            elif info:
+                fence_openings.append((match, info))
+            else:
+                inside_fence = False
+        if len(fence_openings) > 1:
+            raise ValueError("model response contains multiple fenced blocks")
+        if fence_openings and fence_openings[0][1] not in {"", "json"}:
+            raise ValueError("model response has an invalid JSON fence")
+
+        offsets: set[int] = set()
+        fenced_offset: int | None = None
+        leading_offset = len(value) - len(value.lstrip())
+        if leading_offset < len(value) and value[leading_offset] == "{":
+            offsets.add(leading_offset)
+        if fence_openings:
+            fenced_offset = fence_openings[0][0].end()
+            while fenced_offset < len(value) and value[fenced_offset].isspace():
+                fenced_offset += 1
+            offsets.add(fenced_offset)
+
+        schema_pattern = re.compile(
+            rf'"schema_version"\s*:\s*"{re.escape(MODEL_SCHEMA_VERSION)}"'
+        )
+        schema_matches = list(schema_pattern.finditer(value))
+        if len(schema_matches) > 16:
+            raise ValueError("model response contains too many schema markers")
+        for schema_match in schema_matches:
+            search_start = max(0, schema_match.start() - 64 * 1024)
+            brace_position = value.rfind("{", search_start, schema_match.start())
+            attempts = 0
+            while brace_position >= search_start and attempts < 64:
+                offsets.add(brace_position)
+                attempts += 1
+                brace_position = value.rfind("{", search_start, brace_position)
+
+        matches: dict[tuple[int, int], Any] = {}
+        for offset in sorted(offsets):
+            if offset >= len(value):
+                continue
+            try:
+                payload, end = decoder.raw_decode(value, offset)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if (
+                isinstance(payload, dict)
+                and payload.get("schema_version") == MODEL_SCHEMA_VERSION
+                and {"nodes", "links"}.issubset(payload)
+            ):
+                matches[(offset, end)] = payload
+
+        if fenced_offset is not None and not any(
+            offset == fenced_offset for offset, _end in matches
+        ):
+            raise ValueError("JSON fence does not contain a protocol object")
+        if len(matches) != 1:
+            raise ValueError("model response must contain exactly one protocol object")
+        return next(iter(matches.values()))
 
     @classmethod
     def _validate_nodes(cls, value: Any) -> None:
