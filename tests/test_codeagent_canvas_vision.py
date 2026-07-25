@@ -4,11 +4,13 @@ import base64
 import hashlib
 from io import BytesIO
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from kt6_backend.codeagent_canvas_vision import (
     CodeAgentCanvasVisionAdapter,
@@ -255,6 +257,7 @@ class CodeAgentCanvasVisionAdapterTest(unittest.TestCase):
         staged_path = Path(request_from_call(call)["frames"][0]["local_path"])
         self.assertTrue(staged_path.is_relative_to(self.root))
         self.assertNotIn("--add-dir", call["args"])
+        self.assertTrue(call["stdin"].endswith(b"\n"))
         self.assertNotIn(str(self.image_path), call["stdin"].decode("utf-8"))
         self.assertNotIn("Authorization", call["stdin"].decode("utf-8"))
 
@@ -268,6 +271,110 @@ class CodeAgentCanvasVisionAdapterTest(unittest.TestCase):
         )
 
         self.assertEqual(result["objects"][0]["business_id"], "GW-001")
+
+    def test_allows_sequential_repeated_reads_of_expected_frame(self):
+        def repeated_reads(call: dict) -> CodeAgentProcessResult:
+            frame_path = request_from_call(call)["frames"][0]["local_path"]
+            response_text = json.dumps(
+                response_payload(),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            events = [
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": f"read-{index}",
+                                "name": "Read",
+                                "input": {"file_path": frame_path},
+                            }
+                        ]
+                    },
+                }
+                for index in (1, 2)
+            ]
+            tool_results = [
+                {
+                    "type": "user",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": f"read-{index}",
+                                "content": "image read successfully",
+                            }
+                        ]
+                    },
+                }
+                for index in (1, 2)
+            ]
+            stdout = json_events(
+                events[0],
+                tool_results[0],
+                events[1],
+                tool_results[1],
+                {
+                    "type": "assistant",
+                    "message": {
+                        "content": [{"type": "text", "text": response_text}]
+                    },
+                },
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": response_text,
+                },
+            )
+            return CodeAgentProcessResult(0, stdout, b"")
+
+        result = self.adapter(StubRunner(repeated_reads)).recognize(
+            page=self.page(),
+            frames=(self.frame(),),
+        )
+
+        self.assertEqual(result["objects"][0]["business_id"], "GW-001")
+
+    def test_rejects_concurrent_duplicate_reads_of_expected_frame(self):
+        def concurrent_reads(call: dict) -> CodeAgentProcessResult:
+            frame_path = request_from_call(call)["frames"][0]["local_path"]
+            return CodeAgentProcessResult(
+                0,
+                json_events(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "id": "read-1",
+                                    "name": "Read",
+                                    "input": {"file_path": frame_path},
+                                },
+                                {
+                                    "type": "tool_use",
+                                    "id": "read-2",
+                                    "name": "Read",
+                                    "input": {"file_path": frame_path},
+                                },
+                            ]
+                        },
+                    },
+                    {"type": "result", "subtype": "success", "is_error": False},
+                ),
+                b"",
+            )
+
+        with self.assertRaisesRegex(
+            CodeAgentVisionResponseError, "before completion"
+        ):
+            self.adapter(StubRunner(concurrent_reads)).recognize(
+                page=self.page(),
+                frames=(self.frame(),),
+            )
 
     def test_permission_mode_can_be_explicitly_bypassed(self):
         runner = StubRunner(
@@ -694,6 +801,24 @@ class CodeAgentCanvasVisionAdapterTest(unittest.TestCase):
 
 
 class SubprocessCodeAgentRunnerTest(unittest.TestCase):
+    def test_runner_removes_parent_ci_marker(self):
+        runner = SubprocessCodeAgentRunner()
+        with patch.dict(os.environ, {"CI": "1"}):
+            result = runner.run(
+                executable=Path(sys.executable),
+                args=(
+                    "-c",
+                    "import os,sys; "
+                    "sys.stdout.write(os.environ.get('CI', 'missing'))",
+                ),
+                stdin=b"",
+                cwd=Path.cwd(),
+                timeout_seconds=5,
+                max_stdout_bytes=1024,
+                max_stderr_bytes=1024,
+            )
+        self.assertEqual(result.stdout, b"missing")
+
     def test_prompt_is_sent_over_stdin_without_shell(self):
         prompt = b'{"request":"pixels"}'
         runner = SubprocessCodeAgentRunner()
@@ -814,6 +939,59 @@ class SubprocessCodeAgentRunnerTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0)
         self.assertLess(time.monotonic() - started, 2)
+        self.assertIn(b'"subtype": "success"', result.stdout)
+
+    def test_success_event_at_deadline_wins_over_process_timeout(self):
+        runner = SubprocessCodeAgentRunner(terminal_grace_seconds=5)
+        result = runner.run(
+            executable=Path(sys.executable),
+            args=(
+                "-c",
+                "import json,time; "
+                "print(json.dumps({'type':'result','subtype':'success',"
+                "'is_error':False,'result':'ok'}), flush=True); "
+                "time.sleep(5)",
+            ),
+            stdin=b"",
+            cwd=Path.cwd(),
+            timeout_seconds=0.2,
+            max_stdout_bytes=4096,
+            max_stderr_bytes=1024,
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertIn(b'"subtype": "success"', result.stdout)
+
+    def test_buffered_success_found_during_timeout_cleanup_is_accepted(self):
+        runner = SubprocessCodeAgentRunner(terminal_grace_seconds=5)
+        original_event_label = SubprocessCodeAgentRunner._event_label
+
+        def delayed_event_label(payload):
+            time.sleep(0.2)
+            return original_event_label(payload)
+
+        with patch.object(
+            SubprocessCodeAgentRunner,
+            "_event_label",
+            side_effect=delayed_event_label,
+        ):
+            result = runner.run(
+                executable=Path(sys.executable),
+                args=(
+                    "-c",
+                    "import json,time; "
+                    "print(json.dumps({'type':'result','subtype':'success',"
+                    "'is_error':False,'result':'ok'}), flush=True); "
+                    "time.sleep(5)",
+                ),
+                stdin=b"",
+                cwd=Path.cwd(),
+                timeout_seconds=0.05,
+                max_stdout_bytes=4096,
+                max_stderr_bytes=1024,
+            )
+
+        self.assertEqual(result.returncode, 0)
         self.assertIn(b'"subtype": "success"', result.stdout)
 
     def test_progress_intervals_must_be_finite(self):

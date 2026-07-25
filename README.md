@@ -156,6 +156,13 @@ CodeAgent 工作目录内部，因此不再为每次随机目录传递 `--add-di
 后，如果 CLI 超过短暂宽限仍不退出，KT6 会终止进程树并继续验证已经完整落盘
 的结果。按 `Ctrl+C` 也会可靠终止进程树，并保留已完成的 CV 和 CodeAgent
 诊断文件。
+为兼容 CodeAgentCLI 的无交互文本输入，KT6 不再向子进程注入 `CI=1`，并确保
+stdin 提示以换行结尾。
+独立模型阶段使用 `kt6.topology-model.v1` 精简语义协议：图片仍必须由
+CodeAgent 通过 `Read` 检查，但提示中只传递 CV 节点 ID、标签、中心点、置信度
+和候选连接，不再传递 bbox、像素轨迹等详细证据；模型只返回节点语义、层级、
+连接、结构模板和明确否决的 CV 误连。CV 的真实坐标与像素证据由离线融合保留，
+避免让模型重复生成完整像素协议。
 模型阶段失败后，可复用 CV 文件只重试模型识别与融合：
 
 ```powershell
@@ -174,7 +181,7 @@ python -m kt6_backend.topology_hybrid_cli .\topology.png `
 
 ```text
 cv-result.json             本地 RapidOCR/OpenCV 原始结果
-model-result.json          CodeAgent 严格协议模型结果
+model-result.json          CodeAgent 精简语义模型结果
 codeagent-events.jsonl     CodeAgent 原始 stream-json 事件
 codeagent-stderr.log       CodeAgent 启动与错误诊断
 fused-result.json          两份结果的离线融合结果

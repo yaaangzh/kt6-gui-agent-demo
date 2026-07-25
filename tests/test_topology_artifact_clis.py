@@ -15,6 +15,7 @@ from kt6_backend.codeagent_canvas_vision import (
 from kt6_backend.topology_cv_cli import generate_cv_artifact
 from kt6_backend.topology_hybrid_cli import run_pipeline
 from kt6_backend.topology_model_cli import generate_model_artifact
+from kt6_backend.topology_model_contract import MODEL_SCHEMA_VERSION
 from kt6_backend.topology_vision_contract import RESPONSE_SCHEMA_VERSION
 
 
@@ -45,21 +46,22 @@ def _cv_result() -> dict:
 
 def _model_result() -> dict:
     return {
-        "schema_version": RESPONSE_SCHEMA_VERSION,
+        "schema_version": MODEL_SCHEMA_VERSION,
         "confidence": 0.97,
-        "objects": [
+        "nodes": [
             {
-                "business_id": "GW-001",
+                "id": "GW-001",
                 "type": "gateway",
                 "label": "GW-001",
-                "canvas_id": "uploaded_topology",
-                "bbox": [0, 0, 1, 1],
+                "role": "edge_gateway",
+                "vendor": "ZTE",
                 "confidence": 0.97,
-                "attributes": {"vendor": "ZTE"},
             }
         ],
         "links": [],
-        "co_channel_relations": [],
+        "structure_templates": [],
+        "negative_edges": [],
+        "no_connections": True,
     }
 
 
@@ -167,7 +169,7 @@ class TopologyArtifactCLITest(unittest.TestCase):
             runner=runner,
         )
 
-        self.assertEqual(result["objects"][0]["attributes"]["vendor"], "ZTE")
+        self.assertEqual(result["nodes"][0]["vendor"], "ZTE")
         self.assertEqual(
             json.loads(output_path.read_text(encoding="utf-8")),
             result,
@@ -181,6 +183,19 @@ class TopologyArtifactCLITest(unittest.TestCase):
         self.assertEqual(
             request["cv_observations"]["objects"][0]["business_id"],
             "GW-001",
+        )
+        self.assertNotIn(
+            "bbox",
+            request["cv_observations"]["objects"][0],
+        )
+        self.assertNotIn(
+            "attributes",
+            request["cv_observations"]["objects"][0],
+        )
+        self.assertNotIn("output_schema", request)
+        self.assertEqual(
+            request["output_shape"]["schema_version"],
+            MODEL_SCHEMA_VERSION,
         )
         self.assertEqual(runner.call["timeout_seconds"], 600.0)
         args = runner.call["args"]

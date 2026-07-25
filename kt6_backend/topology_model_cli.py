@@ -143,9 +143,9 @@ def generate_model_artifact(
         runner=recording_runner,
     )
     if cv_context is None:
-        result = adapter.recognize(page=page, frames=frames)
+        result = adapter.recognize_model(page=page, frames=frames)
     else:
-        result = adapter.recognize_with_context(
+        result = adapter.recognize_model_with_context(
             page=page,
             frames=frames,
             cv_observations=cv_context,
@@ -211,7 +211,9 @@ def main(argv: list[str] | None = None) -> int:
                             or args.events.with_name("codeagent-stderr.log")
                         ).resolve()
                     ),
-                    "object_count": len(result.get("objects", [])),
+                    "object_count": len(
+                        result.get("nodes", result.get("objects", []))
+                    ),
                     "link_count": len(result.get("links", [])),
                 },
                 ensure_ascii=False,

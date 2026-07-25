@@ -15,6 +15,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, BinaryIO, Callable, Mapping, Protocol
 
+from .topology_model_contract import TopologyModelContract
 from .topology_vision_contract import TopologyVisionContract
 from .vision_recognition import CanvasFrame
 
@@ -102,7 +103,7 @@ class SubprocessCodeAgentRunner:
     ) -> CodeAgentProcessResult:
         environment = os.environ.copy()
         environment.setdefault("NO_COLOR", "1")
-        environment.setdefault("CI", "1")
+        environment.pop("CI", None)
         creationflags = 0
         start_new_session = os.name != "nt"
         if os.name == "nt":
@@ -237,17 +238,20 @@ class SubprocessCodeAgentRunner:
                 if reader_errors or writer_errors or progress_errors:
                     self._kill_process_tree(process)
                     break
-                if now >= deadline:
-                    timed_out = True
-                    self._kill_process_tree(process)
-                    break
                 with state_lock:
                     terminal_at = terminal_success_at[0]
                 if (
                     terminal_at is not None
-                    and now >= terminal_at + self.terminal_grace_seconds
+                    and (
+                        now >= terminal_at + self.terminal_grace_seconds
+                        or now >= deadline
+                    )
                 ):
                     completed_from_event = True
+                    self._kill_process_tree(process)
+                    break
+                if now >= deadline:
+                    timed_out = True
                     self._kill_process_tree(process)
                     break
                 if self.progress_callback is not None and now >= next_heartbeat:
@@ -298,6 +302,17 @@ class SubprocessCodeAgentRunner:
                     stream.close()
             except (OSError, ValueError):
                 pass
+
+        # A complete result may already be buffered in stdout when the deadline
+        # fires, then become visible only while the reader thread drains the pipe.
+        # Treat that verified terminal event as success and let response validation
+        # decide whether its payload is usable.
+        if timed_out:
+            with state_lock:
+                terminal_at = terminal_success_at[0]
+            if terminal_at is not None:
+                timed_out = False
+                completed_from_event = True
 
         if interrupted:
             raise KeyboardInterrupt
@@ -460,6 +475,7 @@ class CodeAgentCanvasVisionAdapter:
         )
         self._runner = runner or SubprocessCodeAgentRunner()
         self._contract = contract or TopologyVisionContract()
+        self._model_contract = TopologyModelContract()
 
     def recognize(
         self,
@@ -484,12 +500,44 @@ class CodeAgentCanvasVisionAdapter:
             cv_observations=self._cv_context(cv_observations),
         )
 
+    def recognize_model(
+        self,
+        *,
+        page: dict[str, Any],
+        frames: tuple[CanvasFrame, ...],
+    ) -> dict[str, Any]:
+        """Return a compact semantic artifact for deterministic offline fusion."""
+
+        return self._recognize(
+            page=page,
+            frames=frames,
+            cv_observations=None,
+            response_kind="model",
+        )
+
+    def recognize_model_with_context(
+        self,
+        *,
+        page: dict[str, Any],
+        frames: tuple[CanvasFrame, ...],
+        cv_observations: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Return semantics while sending only bounded CV identifiers and links."""
+
+        return self._recognize(
+            page=page,
+            frames=frames,
+            cv_observations=self._model_contract.compact_cv_context(cv_observations),
+            response_kind="model",
+        )
+
     def _recognize(
         self,
         *,
         page: dict[str, Any],
         frames: tuple[CanvasFrame, ...],
         cv_observations: dict[str, Any] | None,
+        response_kind: str = "vision",
     ) -> dict[str, Any]:
         prepared = self._contract.prepare_frames(frames)
         page_payload = self._contract.prepare_page(page)
@@ -501,6 +549,7 @@ class CodeAgentCanvasVisionAdapter:
                 page_payload,
                 prepared,
                 cv_observations=cv_observations,
+                response_kind=response_kind,
             )
         finally:
             self._SERIAL_GATE.release()
@@ -511,6 +560,7 @@ class CodeAgentCanvasVisionAdapter:
         prepared: Any,
         *,
         cv_observations: dict[str, Any] | None,
+        response_kind: str,
     ) -> dict[str, Any]:
         jobs_root = self.workdir / "runtime_data" / "codeagent_jobs"
         try:
@@ -552,12 +602,18 @@ class CodeAgentCanvasVisionAdapter:
                     }
                 )
 
-            prompt = self._prompt(
-                page_payload,
-                staged_frames,
-                cv_observations=cv_observations,
-            )
-            prompt_bytes = prompt.encode("utf-8")
+            if response_kind == "model":
+                prompt = self._model_contract.prompt(
+                    staged_frames,
+                    cv_observations=cv_observations,
+                )
+            else:
+                prompt = self._prompt(
+                    page_payload,
+                    staged_frames,
+                    cv_observations=cv_observations,
+                )
+            prompt_bytes = (prompt + "\n").encode("utf-8")
             if len(prompt_bytes) > self.MAX_PROMPT_BYTES:
                 raise CodeAgentVisionTransportError("codeagent perception prompt is too large")
             arguments = [
@@ -596,6 +652,8 @@ class CodeAgentCanvasVisionAdapter:
                     f"codeagent perception exited with status {result.returncode}"
                 )
             response_bytes = self._response_from_events(result.stdout, expected_paths)
+            if response_kind == "model":
+                return self._model_contract.parse_response_bytes(response_bytes)
             return self._contract.parse_response_bytes(
                 response_bytes,
                 prepared.frame_dimensions,
@@ -899,10 +957,13 @@ class CodeAgentCanvasVisionAdapter:
                 raise CodeAgentVisionResponseError(
                     "codeagent attempted to read an unexpected file"
                 )
-            if path_key in read_paths or path_key in pending_reads.values():
+            if tool_id in pending_reads or path_key in pending_reads.values():
                 raise CodeAgentVisionResponseError(
-                    "codeagent attempted to read a Canvas frame more than once"
+                    "codeagent started a duplicate Canvas read before completion"
                 )
+            # A model may deliberately re-read a difficult image after the first
+            # Read completed. The path allowlist remains authoritative; repeated
+            # completed reads of the same staged frame do not expand access.
             pending_reads[tool_id] = path_key
         return texts
 
