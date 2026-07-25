@@ -6,6 +6,10 @@
 
 当前阶段结论：**KT6 核心架构、端到端 PoC 和三种 Canvas 像素识别驱动已完成；真实业务系统、真实图片准确率评测和真实设备下发尚未完成。**
 
+供其他 Codex 或新开发环境接手时，请同时阅读
+[CODEX_HANDOFF.md](./CODEX_HANDOFF.md)；其中记录了当前工作目录、分阶段拓扑链路、
+CodeAgentCLI 的 Windows 启动方式、真实图片验证结论、已知限制和下一步建议。
+
 ## 已实现能力
 
 | 能力 | 当前实现 |
@@ -22,7 +26,7 @@
 | 拓扑变化检测 | 节点、位置、链路增删及链路语义属性变化检测；关键变化触发重规划 |
 | 运行记忆 | SQLite 持久化任务、事件、检查点、场景和业务处理结果 |
 | KT5 接入基础 | 感知拓扑与生成拓扑共用统一 Scene Graph 契约 |
-| 自动化测试 | 当前 158 项测试通过 |
+| 自动化测试 | 当前 234 项通过，42 项因缺少可选 RapidOCR/OpenCV 依赖而跳过 |
 
 ## 业务场景
 
@@ -143,7 +147,7 @@ python -m kt6_backend.topology_image_cli .\topology.png `
 python -m kt6_backend.topology_hybrid_cli .\topology.png `
   --source-id hybrid-file-v1 `
   --out-dir .\runtime_data\hybrid-file-v1 `
-  --timeout 600 `
+  --timeout 900 `
   --permission-mode dontAsk
 ```
 
@@ -156,6 +160,13 @@ CodeAgent 工作目录内部，因此不再为每次随机目录传递 `--add-di
 后，如果 CLI 超过短暂宽限仍不退出，KT6 会终止进程树并继续验证已经完整落盘
 的结果。按 `Ctrl+C` 也会可靠终止进程树，并保留已完成的 CV 和 CodeAgent
 诊断文件。
+
+完整 `result/success` 是模型阶段的终止依据：即使它恰好在总超时截止线到达，
+或先进入 stdout 缓冲区、在线程清理时才被解析，也优先按成功结果继续验证，不会
+误报超时。CodeAgent 对困难图片可能顺序重复调用 `Read`；KT6 允许重复读取同一
+张已白名单化的暂存图片，但仍拒绝其他路径、其他工具，以及前一次尚未完成时发起
+的并发重复读取。
+
 为兼容 CodeAgentCLI 的无交互文本输入，KT6 不再向子进程注入 `CI=1`，并确保
 stdin 提示以换行结尾。
 独立模型阶段使用 `kt6.topology-model.v1` 精简语义协议：图片仍必须由
@@ -163,13 +174,19 @@ CodeAgent 通过 `Read` 检查，但提示中只传递 CV 节点 ID、标签、�
 和候选连接，不再传递 bbox、像素轨迹等详细证据；模型只返回节点语义、层级、
 连接、结构模板和明确否决的 CV 误连。CV 的真实坐标与像素证据由离线融合保留，
 避免让模型重复生成完整像素协议。
+
+模型最终文本可以是纯 JSON，也可以以 JSON fenced code block 开始。解析器只
+提取响应开头的第一个完整 JSON 对象，并继续执行严格 schema、字段、数量和数值
+校验；JSON 之后的模型分析说明会被忽略，但 JSON 之前的说明、第二个 fenced
+block、重复 JSON key 和未知协议字段仍会拒绝。
+
 模型阶段失败后，可复用 CV 文件只重试模型识别与融合：
 
 ```powershell
 python -m kt6_backend.topology_hybrid_cli .\topology.png `
   --source-id hybrid-file-v1 `
   --out-dir .\runtime_data\hybrid-file-v1 `
-  --timeout 600 `
+  --timeout 900 `
   --permission-mode bypassPermissions `
   --reuse-cv
 ```
@@ -187,6 +204,20 @@ codeagent-stderr.log       CodeAgent 启动与错误诊断
 fused-result.json          两份结果的离线融合结果
 ```
 
+端到端成功时终端 JSON 的 `status` 为 `ok`，退出码为 `0`，并且上述五个文件
+全部生成。建议进一步确认融合计数：
+
+```powershell
+$f = Get-Content .\runtime_data\hybrid-file-v1\fused-result.json `
+  -Raw -Encoding UTF8 | ConvertFrom-Json
+
+$f.summary | Format-List
+```
+
+至少应满足 `cv_object_count > 0`、`model_object_count > 0` 和
+`fused_object_count > 0`。这些条件证明三阶段链路已经执行，不代表所有节点、
+厂商、型号和连接都已达到生产准确率。
+
 也可以逐步执行，以便单独重试模型或调整融合算法而不重复运行 CV：
 
 ```powershell
@@ -201,7 +232,7 @@ python -m kt6_backend.topology_model_cli .\topology.png `
   --events .\codeagent-events.jsonl `
   --stderr .\codeagent-stderr.log `
   --permission-mode dontAsk `
-  --timeout 600
+  --timeout 900
 
 python -m kt6_backend.topology_fusion_cli `
   .\cv-result.json `
@@ -209,7 +240,9 @@ python -m kt6_backend.topology_fusion_cli `
   --out .\fused-result.json
 ```
 
-独立 CodeAgent CLI 最长允许 900 秒；HTTP 感知接口仍维持 300 秒上限。
+独立 CodeAgent CLI 当前最长允许 900 秒；这是现有安全上限，而不是固定等待
+时长，模型提前产生 `result/success` 时会立即进入验证和融合。HTTP 感知接口
+仍维持 300 秒上限。复杂图片超过 900 秒的离线任务上限拆分尚未实现。
 
 Browser Use 后续可以作为浏览器会话、DOM 获取、截图和通用 GUI 操作底座，但其内置视觉不能单独替代拓扑感知：稳定的节点/链路重建、业务 ID 绑定、跨帧对象一致性和拓扑版本判断仍需要 Renderer Adapter 或专用 Canvas Vision Adapter。
 
@@ -360,10 +393,13 @@ kt6_backend/
   codeagent_canvas_vision.py   本机 CodeAgent read-tool 视觉 Adapter
   http_canvas_vision.py        生产 HTTP 视觉 Adapter 与严格输入输出协议
   topology_vision_contract.py  三种视觉驱动共用的图片与拓扑严格契约
+  topology_model_contract.py   离线模型阶段的精简语义协议与严格解析
+  topology_artifact_common.py  单图元数据、路径和 UTF-8 JSON 公共工具
   topology_image_cli.py        pixels-only 图片验收命令行工具
   topology_cv_cli.py           单图本地 CV 原始结果生成工具
   topology_model_cli.py        CodeAgent 模型结果与原始事件生成工具
   topology_hybrid_cli.py       CV、CodeAgent 与离线融合三阶段流水线
+  topology_fusion.py           CV 与模型结果的确定性离线融合
   topology_fusion_cli.py       两份已有 JSON 的离线融合工具
   topology_text_recognizer.py  Unicode 拓扑文本的保守语义重建
   vision_recognition.py        CanvasVision 帧与适配器协议
@@ -386,4 +422,12 @@ tests/                         自动化测试
 python -m unittest discover -s tests
 ```
 
-当前覆盖 158 项测试，包括意图路由、缺参澄清、动作授权、Playbook 预检、步骤注册、资源锁、执行后置条件、运行记忆、页面采集失败回退、DOM/ARIA `ui_tree`、文本拓扑重建、本地 RapidOCR/OpenCV、密集星型、图标与偏移标签、分层主干、紧凑交叉线、容器外框、密集纹理、OCR 标签遮挡、500 节点候选预算、缩放虚线与黑底彩色加权图、HTTP/CodeAgent Vision、read 工具像素证据、共享契约、TLS/图片完整性、pixels-only CLI、DOM-like 语义树、不可执行 grounding 门禁、缓存命中、并行链路变化、重新绑定和重新规划。
+当前结果为 234 项通过、42 项跳过。跳过项来自当前开发环境缺少可选
+RapidOCR/OpenCV 运行依赖，不是测试失败。覆盖范围包括意图路由、缺参澄清、
+动作授权、Playbook 预检、步骤注册、资源锁、执行后置条件、运行记忆、页面采集
+失败回退、DOM/ARIA `ui_tree`、文本拓扑重建、本地 RapidOCR/OpenCV、密集星型、
+图标与偏移标签、分层主干、紧凑交叉线、容器外框、密集纹理、OCR 标签遮挡、
+500 节点候选预算、缩放虚线与黑底彩色加权图、HTTP/CodeAgent Vision、Read
+像素证据、重复 Read、截止线成功事件、精简模型协议、尾随模型说明、共享契约、
+TLS/图片完整性、pixels-only CLI、DOM-like 语义树、不可执行 grounding 门禁、
+缓存命中、并行链路变化、重新绑定和重新规划。
