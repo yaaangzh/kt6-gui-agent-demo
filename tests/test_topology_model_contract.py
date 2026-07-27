@@ -19,7 +19,6 @@ class TopologyModelContractTest(unittest.TestCase):
                         "business_id": "GW-001",
                         "type": "gateway",
                         "label": "GW-001",
-                        "center": [120.5, 80.5],
                         "bbox": [100, 60, 41, 41],
                         "confidence": 0.92,
                         "attributes": {
@@ -51,6 +50,29 @@ class TopologyModelContractTest(unittest.TestCase):
             },
         )
         self.assertNotIn("attributes", context["links"][0])
+
+    def test_compact_cv_context_rejects_invalid_coordinate_values(self):
+        context = TopologyModelContract.compact_cv_context(
+            {
+                "objects": [
+                    {
+                        "business_id": "fallback",
+                        "bbox": [0, 0, 0, 10],
+                        "center": [3, 4],
+                    },
+                    {
+                        "business_id": "invalid",
+                        "bbox": [0, 0, "bad", 10],
+                        "center": [float("nan"), 4],
+                    },
+                ],
+                "links": [],
+            }
+        )
+
+        self.assertEqual(context["objects"][0]["center"], [3.0, 4.0])
+        self.assertNotIn("center", context["objects"][1])
+        self.assertNotIn("bbox", json.dumps(context))
 
     def test_prompt_requests_semantics_without_full_pixel_schema(self):
         prompt = TopologyModelContract.prompt(

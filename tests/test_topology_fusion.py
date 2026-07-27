@@ -163,6 +163,38 @@ class TopologyFusionTest(unittest.TestCase):
             fused["unresolved_links"][0]["attributes"]["geometry_status"],
             "unresolved_endpoint",
         )
+        mappings = {
+            item["semantic_node_id"]: item
+            for item in fused["node_coordinate_mappings"]
+        }
+        self.assertEqual(mappings["GW-001"]["model_node_id"], "GW001")
+        self.assertEqual(mappings["GW-001"]["match_method"], "compact_unique")
+        self.assertEqual(mappings["GW-001"]["bbox"], [10.0, 10.0, 80.0, 30.0])
+        self.assertEqual(mappings["GW-001"]["center"], [50.0, 25.0])
+        self.assertFalse(mappings["GW-001"]["interaction_eligible"])
+        self.assertEqual(mappings["CORE-001"]["match_method"], "exact")
+        self.assertEqual(mappings["AGG-003"]["mapping_status"], "unmatched")
+        self.assertEqual(
+            mappings["AGG-003"]["unmatched_reason"], "no_cv_candidate"
+        )
+        self.assertEqual(
+            mappings["AGG-003"]["geometry_status"], "spatially_inferred"
+        )
+        self.assertTrue(mappings["AGG-003"]["rendering_only"])
+        self.assertFalse(mappings["AGG-003"]["interaction_eligible"])
+        self.assertEqual(summary["exact_coordinate_mapping_count"], 2)
+        self.assertEqual(summary["compact_coordinate_mapping_count"], 1)
+        self.assertEqual(summary["unmatched_model_coordinate_count"], 1)
+        self.assertEqual(
+            summary["coordinate_mapping_count"], summary["semantic_object_count"]
+        )
+        self.assertEqual(
+            summary["exact_coordinate_mapping_count"]
+            + summary["compact_coordinate_mapping_count"]
+            + summary["unmatched_model_coordinate_count"]
+            + summary["cv_only_coordinate_count"],
+            summary["coordinate_mapping_count"],
+        )
 
         # The grounded result remains consumable by the existing KT6 vision contract.
         parsed = TopologyVisionContract().parse_response_bytes(
@@ -171,6 +203,76 @@ class TopologyFusionTest(unittest.TestCase):
         )
         self.assertEqual(len(parsed["objects"]), 3)
         self.assertEqual(len(parsed["links"]), 2)
+
+    def test_coordinate_mapping_keeps_ambiguous_and_prefix_ids_unmatched(self):
+        cv = {
+            "objects": [
+                {
+                    "business_id": business_id,
+                    "type": "device",
+                    "label": business_id,
+                    "canvas_id": "c1",
+                    "bbox": [index * 30, 10, 20, 20],
+                    "confidence": 0.9,
+                }
+                for index, business_id in enumerate(
+                    ("A-1", "A1", "EXTRA", "testNE7931"), start=1
+                )
+            ],
+            "links": [],
+        }
+        model = {
+            "nodes": [{"id": "A 1"}, {"id": "testNE793"}],
+            "links": [],
+        }
+
+        fused = fuse_topology_payloads(cv, model)
+        mappings = {
+            item["semantic_node_id"]: item
+            for item in fused["node_coordinate_mappings"]
+        }
+
+        self.assertEqual(mappings["A 1"]["mapping_status"], "unmatched")
+        self.assertEqual(
+            mappings["A 1"]["unmatched_reason"], "ambiguous_compact_identifier"
+        )
+        self.assertEqual(mappings["testNE793"]["mapping_status"], "unmatched")
+        self.assertEqual(
+            mappings["testNE793"]["unmatched_reason"], "no_cv_candidate"
+        )
+        self.assertEqual(mappings["A-1"]["mapping_status"], "cv_only")
+        self.assertEqual(mappings["A1"]["mapping_status"], "cv_only")
+        self.assertEqual(mappings["EXTRA"]["mapping_status"], "cv_only")
+        self.assertEqual(mappings["EXTRA"]["center"], [100.0, 20.0])
+        self.assertEqual(fused["summary"]["coordinate_mapping_count"], 6)
+        self.assertEqual(fused["summary"]["unmatched_model_coordinate_count"], 2)
+        self.assertEqual(fused["summary"]["cv_only_coordinate_count"], 4)
+        self.assertEqual(fused["summary"]["exact_coordinate_mapping_count"], 0)
+        self.assertEqual(fused["summary"]["compact_coordinate_mapping_count"], 0)
+
+    def test_ambiguous_model_identifiers_fail_closed(self):
+        cv = {
+            "objects": [
+                {
+                    "business_id": "A-1",
+                    "type": "device",
+                    "label": "A-1",
+                    "canvas_id": "c1",
+                    "bbox": [10, 10, 20, 20],
+                    "confidence": 0.9,
+                }
+            ],
+            "links": [],
+        }
+        model = {
+            "nodes": [{"id": "A-1"}, {"id": "A1"}],
+            "links": [],
+        }
+
+        with self.assertRaisesRegex(
+            TopologyFusionError, "ambiguous model identifiers"
+        ):
+            fuse_topology_payloads(cv, model)
 
     def test_nodes_edges_format_preserves_edge_attributes(self):
         cv = {
@@ -494,6 +596,63 @@ class TopologyFusionTest(unittest.TestCase):
             "disputed",
         )
         self.assertEqual(fused["summary"]["rejected_link_count"], 0)
+
+    def test_negative_reference_can_resolve_unique_cv_alias_without_model_node(self):
+        cv = {
+            "objects": [
+                {
+                    "business_id": "A-001",
+                    "type": "device",
+                    "label": "A-001",
+                    "canvas_id": "c1",
+                    "bbox": [10, 10, 20, 20],
+                    "confidence": 0.9,
+                },
+                {
+                    "business_id": "B",
+                    "type": "device",
+                    "label": "B",
+                    "canvas_id": "c1",
+                    "bbox": [80, 10, 20, 20],
+                    "confidence": 0.9,
+                },
+            ],
+            "links": [
+                {
+                    "source": "A-001",
+                    "target": "B",
+                    "type": "topology_link",
+                    "confidence": 0.7,
+                }
+            ],
+        }
+        model = {
+            "nodes": [{"id": "B"}],
+            "links": [],
+            "negative_edges": [
+                {
+                    "source": "A001",
+                    "target": "B",
+                    "reason": "visible gap",
+                    "confidence": 0.99,
+                }
+            ],
+        }
+
+        fused = fuse_topology_payloads(cv, model)
+
+        self.assertEqual(fused["result"]["links"], [])
+        self.assertEqual(fused["summary"]["rejected_link_count"], 1)
+        self.assertEqual(
+            fused["rejected_links"][0]["attributes"]["relation_state"],
+            "rejected",
+        )
+        a_mapping = next(
+            item
+            for item in fused["node_coordinate_mappings"]
+            if item["semantic_node_id"] == "A-001"
+        )
+        self.assertEqual(a_mapping["mapping_status"], "cv_only")
 
     def test_layer_template_infers_rendering_only_geometry(self):
         cv = {

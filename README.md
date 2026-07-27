@@ -26,7 +26,7 @@ CodeAgentCLI 的 Windows 启动方式、真实图片验证结论、已知限制�
 | 拓扑变化检测 | 节点、位置、链路增删及链路语义属性变化检测；关键变化触发重规划 |
 | 运行记忆 | SQLite 持久化任务、事件、检查点、场景和业务处理结果 |
 | KT5 接入基础 | 感知拓扑与生成拓扑共用统一 Scene Graph 契约 |
-| 自动化测试 | 当前 240 项通过，42 项因缺少可选 RapidOCR/OpenCV 依赖而跳过 |
+| 自动化测试 | 当前 244 项通过，42 项因缺少可选 RapidOCR/OpenCV 依赖而跳过 |
 
 ## 业务场景
 
@@ -170,10 +170,12 @@ CodeAgent 工作目录内部，因此不再为每次随机目录传递 `--add-di
 为兼容 CodeAgentCLI 的无交互文本输入，KT6 不再向子进程注入 `CI=1`，并确保
 stdin 提示以换行结尾。
 独立模型阶段使用 `kt6.topology-model.v1` 精简语义协议：图片仍必须由
-CodeAgent 通过 `Read` 检查，但提示中只传递 CV 节点 ID、标签、中心点、置信度
-和候选连接，不再传递 bbox、像素轨迹等详细证据；模型只返回节点语义、层级、
-连接、结构模板和明确否决的 CV 误连。CV 的真实坐标与像素证据由离线融合保留，
-避免让模型重复生成完整像素协议。
+CodeAgent 通过 `Read` 检查，但提示中只传递 CV 节点 ID、标签、画布 ID、中心点、
+置信度和候选连接，不再传递 bbox、像素轨迹等详细证据；若 CV 对象只有 bbox，
+KT6 会
+先在本地派生中心点再生成紧凑候选。模型只返回节点语义、层级、连接、结构模板
+和明确否决的 CV 误连。CV 的真实坐标与像素证据由离线融合保留，避免让模型重复
+生成完整像素协议。
 
 模型最终文本可以是纯 JSON，也可以包含单个 JSON fenced code block。解析器会
 在受大小限制的响应中定位唯一 `kt6.topology-model.v1` 根对象，因此允许 JSON
@@ -185,6 +187,15 @@ CodeAgent 通过 `Read` 检查，但提示中只传递 CV 节点 ID、标签、�
 节点和链路，继续用于现有页面感知；`display_graph` 额外包含具有推断渲染坐标的
 模型节点及其 `display_only` 链路，但统一标记为不可交互；`semantic_graph` 保留
 完整语义并集，包括仍无法定位的节点和链路。推断坐标不会进入可点击结果。
+
+`node_coordinate_mappings` 显式记录语义节点、模型节点与 CV 节点的对应关系，
+并给出 `canvas_id`、`bbox`、派生 `center` 和坐标来源。该审计表本身不授予
+点击权限，`interaction_eligible` 固定为 `false`；真实操作仍需页面资产绑定和
+适配器能力门禁。匹配先执行规范化后的大小写精确匹配，再只接受一对一唯一的
+紧凑 ID 匹配，例如 `GW001` 与
+`GW-001`；歧义候选和 `testNE793`/`testNE7931` 这类前缀相似项不会猜测绑定。
+模型独有节点即使获得空间推断坐标，仍保持 `unmatched`、`rendering_only=true`
+且不可点击。
 
 模型负证据使用独立的 `relation_state=accepted|disputed|rejected`。全局
 `no_connections`、缺少置信度的负边、弱负证据或高置信 CV 像素链路只会进入
@@ -229,7 +240,9 @@ $f.summary | Format-List
 `fused_object_count > 0`。这些条件证明三阶段链路已经执行，不代表所有节点、
 厂商、型号和连接都已达到生产准确率。新增的 `grounded_*`、`display_*`、
 `semantic_*`、`disputed_link_count` 和 `grounding_coverage` 可分别衡量像素落地、
-可展示语义、完整语义和冲突保留情况。
+可展示语义、完整语义和冲突保留情况。`exact_coordinate_mapping_count`、
+`compact_coordinate_mapping_count`、`unmatched_model_coordinate_count` 和
+`cv_only_coordinate_count` 用于审计节点与坐标是否真正对齐。
 
 也可以逐步执行，以便单独重试模型或调整融合算法而不重复运行 CV：
 
@@ -435,13 +448,14 @@ tests/                         自动化测试
 python -m unittest discover -s tests
 ```
 
-当前结果为 240 项通过、42 项跳过。跳过项来自当前开发环境缺少可选
+当前结果为 244 项通过、42 项跳过。跳过项来自当前开发环境缺少可选
 RapidOCR/OpenCV 运行依赖，不是测试失败。覆盖范围包括意图路由、缺参澄清、
 动作授权、Playbook 预检、步骤注册、资源锁、执行后置条件、运行记忆、页面采集
 失败回退、DOM/ARIA `ui_tree`、文本拓扑重建、本地 RapidOCR/OpenCV、密集星型、
 图标与偏移标签、分层主干、紧凑交叉线、容器外框、密集纹理、OCR 标签遮挡、
 500 节点候选预算、缩放虚线与黑底彩色加权图、HTTP/CodeAgent Vision、Read
 像素证据、重复 Read、截止线成功事件、精简模型协议、前置/尾随模型说明、
-唯一协议对象、grounded/display/semantic 三层图、软否决、共享契约、
-TLS/图片完整性、pixels-only CLI、DOM-like 语义树、不可执行 grounding 门禁、
+唯一协议对象、grounded/display/semantic 三层图、软否决、节点—坐标显式映射、
+歧义 ID fail-closed、bbox 中心派生、共享契约、TLS/图片完整性、pixels-only CLI、
+DOM-like 语义树、不可执行 grounding 门禁、
 缓存命中、并行链路变化、重新绑定和重新规划。

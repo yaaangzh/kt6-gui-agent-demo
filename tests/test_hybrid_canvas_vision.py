@@ -127,6 +127,14 @@ class HybridCanvasVisionAdapterTest(unittest.TestCase):
             result["links"][0]["attributes"]["fusion_status"], "confirmed"
         )
         self.assertIn("structure_templates", result["fusion_analysis"])
+        self.assertIn("node_coordinate_mappings", result["fusion_analysis"])
+        gw_mapping = next(
+            item
+            for item in result["fusion_analysis"]["node_coordinate_mappings"]
+            if item["semantic_node_id"] == "GW-001"
+        )
+        self.assertEqual(gw_mapping["model_node_id"], "GW001")
+        self.assertEqual(gw_mapping["center"], [30.0, 20.0])
         self.assertIn("grounded_graph", result["fusion_analysis"])
         self.assertIn("display_graph", result["fusion_analysis"])
         self.assertIn("semantic_graph", result["fusion_analysis"])
@@ -178,6 +186,14 @@ class HybridCanvasVisionAdapterTest(unittest.TestCase):
         self.assertIn(
             "AGG-003", {item["business_id"] for item in display_graph["objects"]}
         )
+        agg_mapping = next(
+            item
+            for item in result["fusion_analysis"]["node_coordinate_mappings"]
+            if item["semantic_node_id"] == "AGG-003"
+        )
+        self.assertEqual(agg_mapping["mapping_status"], "unmatched")
+        self.assertEqual(agg_mapping["geometry_status"], "spatially_inferred")
+        self.assertTrue(agg_mapping["rendering_only"])
         self.assertIn(
             "AGG-003",
             {

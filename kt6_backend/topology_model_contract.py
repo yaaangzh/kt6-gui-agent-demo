@@ -89,6 +89,7 @@ class TopologyModelContract:
                     "business_id",
                     "type",
                     "label",
+                    "canvas_id",
                     "center",
                     "confidence",
                 ),
@@ -532,6 +533,11 @@ class TopologyModelContract:
     ) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for name in fields:
+            if name == "center":
+                center = TopologyModelContract._compact_center(value)
+                if center is not None:
+                    result[name] = center
+                continue
             item = value.get(name)
             if item is None:
                 continue
@@ -540,14 +546,46 @@ class TopologyModelContract:
             elif isinstance(item, bool):
                 result[name] = item
             elif isinstance(item, (int, float)):
-                result[name] = item if not isinstance(item, float) or math.isfinite(item) else None
-            elif (
-                name == "center"
-                and isinstance(item, (list, tuple))
-                and len(item) == 2
-            ):
-                result[name] = list(item)
+                result[name] = (
+                    item
+                    if not isinstance(item, float) or math.isfinite(item)
+                    else None
+                )
         return result
+
+    @staticmethod
+    def _compact_center(value: Mapping[str, Any]) -> list[float] | None:
+        raw_bbox = value.get("bbox")
+        if (
+            isinstance(raw_bbox, (list, tuple))
+            and len(raw_bbox) == 4
+            and all(
+                not isinstance(item, bool)
+                and isinstance(item, (int, float))
+                and math.isfinite(float(item))
+                for item in raw_bbox
+            )
+            and float(raw_bbox[2]) > 0
+            and float(raw_bbox[3]) > 0
+        ):
+            return [
+                round(float(raw_bbox[0]) + float(raw_bbox[2]) / 2.0, 3),
+                round(float(raw_bbox[1]) + float(raw_bbox[3]) / 2.0, 3),
+            ]
+
+        raw_center = value.get("center")
+        if (
+            isinstance(raw_center, (list, tuple))
+            and len(raw_center) == 2
+            and all(
+                not isinstance(item, bool)
+                and isinstance(item, (int, float))
+                and math.isfinite(float(item))
+                for item in raw_center
+            )
+        ):
+            return [round(float(item), 3) for item in raw_center]
+        return None
 
     @staticmethod
     def _encoded_size(value: Any) -> int:

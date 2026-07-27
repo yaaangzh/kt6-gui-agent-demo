@@ -58,19 +58,21 @@ def fuse_topology_payloads(
         negative_evidence,
     ) = _normalize_model_payload(model_payload)
     cv_index = _CVIdentifierIndex(cv_objects)
+    (
+        model_to_cv,
+        model_match_methods,
+        model_unmatched_reasons,
+    ) = _match_model_nodes_to_cv(model_nodes, cv_index)
 
-    model_matches: dict[str, tuple[str, dict[str, Any]]] = {}
-    model_only_objects: list[dict[str, Any]] = []
-    for model_id, model_node in model_nodes.items():
-        cv_id = cv_index.resolve(model_id)
-        if cv_id is None:
-            model_only_objects.append(_unlocated_object(model_id, model_node))
-            continue
-        existing = model_matches.get(cv_id)
-        if existing is None:
-            model_matches[cv_id] = (model_id, copy.deepcopy(model_node))
-        else:
-            existing[1].update(copy.deepcopy(model_node))
+    model_matches = {
+        cv_id: (model_id, copy.deepcopy(model_nodes[model_id]))
+        for model_id, cv_id in model_to_cv.items()
+    }
+    model_only_objects = [
+        _unlocated_object(model_id, model_node)
+        for model_id, model_node in model_nodes.items()
+        if model_id not in model_to_cv
+    ]
 
     fused_objects = [
         _fuse_object(cv_object, model_matches.get(str(cv_object["business_id"])), canvas_id)
@@ -90,11 +92,23 @@ def fuse_topology_payloads(
         str(item["business_id"]) for item in model_grounded_objects
     }
 
+    model_endpoint_by_exact: dict[str, str | None] = {
+        _exact_identifier_key(model_id): (
+            model_to_cv.get(model_id)
+            or (model_id if model_id in model_grounded_ids else None)
+        )
+        for model_id in model_nodes
+    }
+
     def resolve_endpoint(value: str) -> str | None:
-        resolved = cv_index.resolve(value)
-        if resolved is not None:
-            return resolved
-        return value if value in model_grounded_ids else None
+        exact_key = _exact_identifier_key(value)
+        if exact_key in model_endpoint_by_exact:
+            return model_endpoint_by_exact[exact_key]
+        exact_cv_id = cv_index.resolve_exact(value)
+        if exact_cv_id is not None:
+            return exact_cv_id
+        compact_candidates = cv_index.compact_candidates(value)
+        return compact_candidates[0] if len(compact_candidates) == 1 else None
 
     normalized_model_links: list[dict[str, Any]] = []
     semantic_model_links: list[dict[str, Any]] = []
@@ -216,6 +230,14 @@ def fuse_topology_payloads(
         "co_channel_relations": [],
     }
     semantic_nodes = copy.deepcopy(result_objects) + copy.deepcopy(unlocated_objects)
+    node_coordinate_mappings = _build_node_coordinate_mappings(
+        semantic_nodes=semantic_nodes,
+        cv_objects=cv_objects,
+        model_nodes=model_nodes,
+        model_to_cv=model_to_cv,
+        match_methods=model_match_methods,
+        unmatched_reasons=model_unmatched_reasons,
+    )
     semantic_links = copy.deepcopy(fused_links) + copy.deepcopy(unresolved_links)
     disputed_links = [
         copy.deepcopy(item)
@@ -242,6 +264,27 @@ def fuse_topology_payloads(
             "semantic_object_count": len(semantic_nodes),
             "display_only_object_count": len(display_only_objects),
             "grounding_coverage": grounding_coverage,
+            "coordinate_mapping_count": len(node_coordinate_mappings),
+            "exact_coordinate_mapping_count": sum(
+                1
+                for item in node_coordinate_mappings
+                if item["match_method"] == "exact"
+            ),
+            "compact_coordinate_mapping_count": sum(
+                1
+                for item in node_coordinate_mappings
+                if item["match_method"] == "compact_unique"
+            ),
+            "unmatched_model_coordinate_count": sum(
+                1
+                for item in node_coordinate_mappings
+                if item["mapping_status"] == "unmatched"
+            ),
+            "cv_only_coordinate_count": sum(
+                1
+                for item in node_coordinate_mappings
+                if item["mapping_status"] == "cv_only"
+            ),
             "confirmed_object_count": object_statuses.get("confirmed", 0),
             "cv_only_object_count": object_statuses.get("cv_only", 0),
             "model_grounded_object_count": len(model_grounded_objects),
@@ -274,6 +317,7 @@ def fuse_topology_payloads(
         },
         "model_metadata": model_metadata,
         "structure_templates": resolved_structure_templates,
+        "node_coordinate_mappings": node_coordinate_mappings,
         "result": result,
         "grounded_graph": copy.deepcopy(result),
         "display_graph": display_graph,
@@ -319,25 +363,80 @@ def fuse_topology_payloads(
 class _CVIdentifierIndex:
     def __init__(self, objects: list[dict[str, Any]]) -> None:
         self._exact: dict[str, str] = {}
-        compact_candidates: dict[str, list[str]] = {}
+        self._compact_candidates: dict[str, list[str]] = {}
         for item in objects:
             business_id = str(item["business_id"])
             exact = _exact_identifier_key(business_id)
             if exact in self._exact:
                 raise TopologyFusionError(f"duplicate CV business_id: {business_id}")
             self._exact[exact] = business_id
-            compact_candidates.setdefault(_compact_identifier_key(business_id), []).append(
-                business_id
-            )
-        self._compact = {
-            key: values[0] for key, values in compact_candidates.items() if len(values) == 1
-        }
+            self._compact_candidates.setdefault(
+                _compact_identifier_key(business_id), []
+            ).append(business_id)
 
-    def resolve(self, value: str) -> str | None:
-        exact = self._exact.get(_exact_identifier_key(value))
-        if exact is not None:
-            return exact
-        return self._compact.get(_compact_identifier_key(value))
+    def resolve_exact(self, value: str) -> str | None:
+        return self._exact.get(_exact_identifier_key(value))
+
+    def compact_candidates(self, value: str) -> tuple[str, ...]:
+        return tuple(
+            self._compact_candidates.get(_compact_identifier_key(value), ())
+        )
+
+
+def _match_model_nodes_to_cv(
+    model_nodes: Mapping[str, Mapping[str, Any]],
+    cv_index: _CVIdentifierIndex,
+) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    """Match semantic model identifiers to CV identifiers exactly once.
+
+    Exact identifier matches claim coordinates first. Remaining identifiers are
+    matched only when both the model and CV compact-key buckets are unique.
+    """
+
+    matches: dict[str, str] = {}
+    methods: dict[str, str] = {}
+    unmatched_reasons: dict[str, str] = {}
+    claimed_cv_ids: set[str] = set()
+    remaining_model_ids: list[str] = []
+
+    for model_id in model_nodes:
+        cv_id = cv_index.resolve_exact(model_id)
+        if cv_id is None:
+            remaining_model_ids.append(model_id)
+            continue
+        if cv_id in claimed_cv_ids:
+            unmatched_reasons[model_id] = "cv_candidate_already_claimed"
+            continue
+        matches[model_id] = cv_id
+        methods[model_id] = "exact"
+        claimed_cv_ids.add(cv_id)
+
+    model_buckets: dict[str, list[str]] = {}
+    for model_id in remaining_model_ids:
+        model_buckets.setdefault(_compact_identifier_key(model_id), []).append(
+            model_id
+        )
+
+    for model_ids in model_buckets.values():
+        candidates = list(cv_index.compact_candidates(model_ids[0]))
+        available = [item for item in candidates if item not in claimed_cv_ids]
+        if len(model_ids) == 1 and len(available) == 1:
+            model_id = model_ids[0]
+            cv_id = available[0]
+            matches[model_id] = cv_id
+            methods[model_id] = "compact_unique"
+            claimed_cv_ids.add(cv_id)
+            continue
+        if not candidates:
+            reason = "no_cv_candidate"
+        elif not available:
+            reason = "cv_candidate_already_claimed"
+        else:
+            reason = "ambiguous_compact_identifier"
+        for model_id in model_ids:
+            unmatched_reasons[model_id] = reason
+
+    return matches, methods, unmatched_reasons
 
 
 def _resolve_structure_templates(
@@ -511,7 +610,17 @@ def _normalize_model_payload(
             raw_node.get("id", raw_node.get("business_id")), "model node"
         )
         key = _compact_identifier_key(node_id)
-        canonical_model_id = node_ids_by_key.get(key, node_id)
+        existing_model_id = node_ids_by_key.get(key)
+        if (
+            existing_model_id is not None
+            and _exact_identifier_key(existing_model_id)
+            != _exact_identifier_key(node_id)
+        ):
+            raise TopologyFusionError(
+                "ambiguous model identifiers share a compact key: "
+                f"{existing_model_id}, {node_id}"
+            )
+        canonical_model_id = existing_model_id or node_id
         node_ids_by_key.setdefault(key, canonical_model_id)
         attributes = _safe_attributes(raw_node.get("attributes", {}))
         attributes.update(
@@ -1559,6 +1668,107 @@ def _infer_unlocated_geometry(
         if not progress:
             break
     return inferred_objects
+
+
+def _build_node_coordinate_mappings(
+    *,
+    semantic_nodes: list[dict[str, Any]],
+    cv_objects: list[dict[str, Any]],
+    model_nodes: Mapping[str, Mapping[str, Any]],
+    model_to_cv: Mapping[str, str],
+    match_methods: Mapping[str, str],
+    unmatched_reasons: Mapping[str, str],
+) -> list[dict[str, Any]]:
+    cv_by_exact = {
+        _exact_identifier_key(str(item["business_id"])): str(item["business_id"])
+        for item in cv_objects
+    }
+    model_by_exact = {
+        _exact_identifier_key(model_id): model_id for model_id in model_nodes
+    }
+    model_by_cv = {cv_id: model_id for model_id, cv_id in model_to_cv.items()}
+    mappings: list[dict[str, Any]] = []
+
+    for node in semantic_nodes:
+        semantic_id = str(node["business_id"])
+        cv_id = cv_by_exact.get(_exact_identifier_key(semantic_id))
+        model_id = model_by_cv.get(cv_id) if cv_id is not None else None
+        if model_id is None and cv_id is None:
+            model_id = model_by_exact.get(_exact_identifier_key(semantic_id))
+
+        if cv_id is not None and model_id is not None:
+            mapping_status = "matched"
+            match_method = match_methods[model_id]
+        elif cv_id is not None:
+            mapping_status = "cv_only"
+            match_method = "none"
+        else:
+            mapping_status = "unmatched"
+            match_method = "none"
+
+        attributes = node.get("attributes", {})
+        if not isinstance(attributes, Mapping):
+            attributes = {}
+        geometry_status = str(attributes.get("geometry_status", "unlocated"))
+        raw_bbox = node.get("bbox")
+        bbox: list[float] | None = None
+        if (
+            isinstance(raw_bbox, list)
+            and len(raw_bbox) == 4
+            and all(
+                not isinstance(value, bool)
+                and isinstance(value, (int, float))
+                and math.isfinite(float(value))
+                for value in raw_bbox
+            )
+        ):
+            bbox = [round(float(value), 3) for value in raw_bbox]
+
+        raw_center = node.get("center")
+        center: list[float] | None = None
+        if (
+            isinstance(raw_center, (list, tuple))
+            and len(raw_center) == 2
+            and all(
+                not isinstance(value, bool)
+                and isinstance(value, (int, float))
+                and math.isfinite(float(value))
+                for value in raw_center
+            )
+        ):
+            center = [round(float(value), 3) for value in raw_center]
+        elif bbox is not None:
+            center_x, center_y = _box_center(bbox)
+            center = [round(center_x, 3), round(center_y, 3)]
+
+        rendering_only = bool(attributes.get("rendering_only"))
+        mapping: dict[str, Any] = {
+            "semantic_node_id": semantic_id,
+            "model_node_id": model_id,
+            "cv_node_id": cv_id,
+            "mapping_status": mapping_status,
+            "match_method": match_method,
+            "geometry_status": geometry_status,
+            "canvas_id": str(node["canvas_id"]) if node.get("canvas_id") else None,
+            "bbox": bbox,
+            "center": center,
+            "rendering_only": rendering_only,
+            # A coordinate mapping is audit evidence, not click authorization.
+            "interaction_eligible": False,
+        }
+        if mapping_status == "unmatched" and model_id is not None:
+            mapping["unmatched_reason"] = unmatched_reasons.get(
+                model_id, "no_cv_candidate"
+            )
+        mappings.append(mapping)
+
+    return sorted(
+        mappings,
+        key=lambda item: (
+            _identifier_sort_key(item["semantic_node_id"]),
+            _identifier_sort_key(item.get("model_node_id") or ""),
+        ),
+    )
 
 
 def _build_display_graph(

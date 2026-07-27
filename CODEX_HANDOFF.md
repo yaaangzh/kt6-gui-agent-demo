@@ -39,7 +39,7 @@ cv-result.json + model-result.json
 测试目录：D:\04project\FreeStyle_Copilot_KT6_demo
 GitHub：git@github.com:yaaangzh/kt6-gui-agent-demo.git
 分支：main
-功能代码基线：f16ef7f
+已推送融合基线：41583d6；当前最新提交以 `git log` 为准
 ```
 
 包含本文和 README 更新的实际最新提交应以以下命令为准：
@@ -82,7 +82,7 @@ tests/test_topology_artifact_clis.py
 tests/test_topology_fusion.py
 ```
 
-功能代码基线 `f16ef7f` 已包含：
+当前代码已包含：
 
 - 无交互启动时移除继承的 `CI` 环境变量。
 - 发送给 CodeAgent 的 stdin 保证以换行结尾。
@@ -193,7 +193,8 @@ confidence
 
 - 节点 ID
 - 类型与标签
-- 中心点
+- 画布 ID
+- 中心点（CV 只有 bbox 时由 KT6 本地派生）
 - 置信度
 - 候选连接
 
@@ -216,8 +217,13 @@ confidence
 
 已实现：
 
-- 对齐 `GW001` 与 `GW-001` 等 ID 差异。
-- 保留 CV bbox、center、OCR 置信度和像素证据。
+- 全局一对一对齐模型节点和 CV 节点：精确匹配优先，其次仅接受唯一紧凑 ID
+  匹配，例如 `GW001` 与 `GW-001`。
+- 歧义紧凑 ID、前缀相似 ID 和模型内部 compact-key 冲突均 fail-closed，绝不
+  猜测绑定坐标。
+- 保留 CV bbox、派生 center、canvas_id、OCR 置信度和像素证据。
+- 通过 `node_coordinate_mappings` 显式审计语义节点、模型节点、CV 节点和坐标
+  的对应关系。
 - 补充模型角色、厂商、型号、层级和连接。
 - 支持直接连接和多跳路径等价。
 - 保留 `star`、`layered` 结构模板。
@@ -245,7 +251,14 @@ spatially_inferred
 result / grounded_graph  真实像素落地图，保持既有消费者兼容
 display_graph            grounded + 可渲染推断节点/链路，始终不可交互
 semantic_graph           完整语义并集，可包含未定位节点和 unresolved 链路
+node_coordinate_mappings 节点 ID 与 canvas/bbox/center 的显式审计表
 ```
+
+`node_coordinate_mappings` 的 `mapping_status` 为 `matched`、`cv_only` 或
+`unmatched`，`match_method` 为 `exact`、`compact_unique` 或 `none`。推断坐标
+保持 `unmatched` 和 `rendering_only=true`。该表不授予点击权限，所有映射的
+`interaction_eligible` 固定为 `false`；真实动作仍需 PagePerception 资产绑定、
+适配器能力和动作授权共同通过。
 
 链路另有正交字段 `relation_state=accepted|disputed|rejected`。仅高置信的明确
 pair-level 负证据与低于阈值的 CV 链路组合会真正 rejected；全局
@@ -259,7 +272,7 @@ pair-level 负证据与低于阈值的 CV 链路组合会真正 rejected；全�
 开发环境最后一次结果：
 
 ```text
-240 项通过
+244 项通过
 42 项跳过
 ```
 
@@ -280,7 +293,7 @@ python -m unittest `
   tests.test_topology_artifact_clis
 ```
 
-当前定向结果应为 43 项通过。
+当前定向结果应为 44 项通过。
 
 ### 7.2 测试环境端到端命令
 
@@ -440,6 +453,12 @@ result/success 在截止线仍报 timeout
 
 模型用 no_connections 全局否决 CV 链路
 → 改为 disputed；只有高置信明确负边与较弱 CV 证据组合才真正 rejected
+
+模型 ID 与多个 CV ID 紧凑化后相同，或仅为前缀相似
+→ `node_coordinate_mappings` 保持 unmatched/cv_only，不猜测坐标绑定
+
+模型 negative_edges 引用未列入 nodes 的 CV 端点别名
+→ 仅在精确或唯一紧凑候选时安全解析，但不会伪造 model-node 坐标绑定
 ```
 
 ## 11. 后续建议
@@ -447,7 +466,7 @@ result/success 在截止线仍报 timeout
 按当前用户优先级排序：
 
 1. 在测试环境同步最新 `main`，重新确认三张图片的 grounded、display、semantic
-   计数及 disputed/rejected 状态。
+   计数、disputed/rejected 状态及 `node_coordinate_mappings` 对齐情况。
 2. 建立三张真实图片的人工节点/链路真值，不再用“链接越多越好”判断准确率。
 3. 后续再拆分 HTTP timeout 和离线模型 timeout，并考虑 idle timeout。
 4. 增加正式 events 恢复 CLI，避免成功结果因后处理失败而需要重新调用模型。

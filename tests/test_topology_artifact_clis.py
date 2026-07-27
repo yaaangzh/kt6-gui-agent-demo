@@ -184,6 +184,14 @@ class TopologyArtifactCLITest(unittest.TestCase):
             request["cv_observations"]["objects"][0]["business_id"],
             "GW-001",
         )
+        self.assertEqual(
+            request["cv_observations"]["objects"][0]["canvas_id"],
+            "uploaded_topology",
+        )
+        self.assertEqual(
+            request["cv_observations"]["objects"][0]["center"],
+            [0.5, 0.5],
+        )
         self.assertNotIn(
             "bbox",
             request["cv_observations"]["objects"][0],
