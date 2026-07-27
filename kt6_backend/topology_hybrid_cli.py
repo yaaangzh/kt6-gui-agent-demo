@@ -14,7 +14,12 @@ from .topology_artifact_common import TopologyArtifactCLIError, write_json
 from .topology_cv_cli import generate_cv_artifact
 from .topology_fusion import TopologyFusionError, fuse_topology_payloads
 from .topology_fusion_cli import load_json
-from .topology_model_cli import generate_model_artifact
+from .topology_model_cli import (
+    DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS,
+    DEFAULT_MODEL_MAX_ATTEMPTS,
+    MAX_MODEL_ATTEMPTS,
+    generate_model_artifact,
+)
 
 
 def run_pipeline(
@@ -26,6 +31,8 @@ def run_pipeline(
     agent: str | None = None,
     permission_mode: str = "dontAsk",
     timeout_seconds: float = 600.0,
+    idle_timeout_seconds: float | None = DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS,
+    max_attempts: int = DEFAULT_MODEL_MAX_ATTEMPTS,
     workdir: Path | None = None,
     reuse_cv: bool = False,
 ) -> dict[str, Path]:
@@ -72,6 +79,8 @@ def run_pipeline(
         agent=agent,
         permission_mode=permission_mode,
         timeout_seconds=timeout_seconds,
+        idle_timeout_seconds=idle_timeout_seconds,
+        max_attempts=max_attempts,
         workdir=workdir,
     )
     write_json(fused_path, fuse_topology_payloads(cv_result, model_result))
@@ -94,7 +103,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("image", type=Path)
     parser.add_argument("--source-id", required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
-    parser.add_argument("--timeout", type=float, default=600.0)
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=600.0,
+        help="total wall-clock budget shared by all model attempts",
+    )
+    parser.add_argument(
+        "--idle-timeout",
+        type=float,
+        default=DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS,
+        help=(
+            "abort and retry after this many post-Read seconds without stdout; "
+            "use 0 to disable"
+        ),
+    )
+    parser.add_argument(
+        "--max-attempts",
+        type=int,
+        choices=range(1, MAX_MODEL_ATTEMPTS + 1),
+        default=DEFAULT_MODEL_MAX_ATTEMPTS,
+        help="maximum CodeAgent sessions within --timeout",
+    )
     parser.add_argument("--executable", default="codeagent")
     parser.add_argument("--agent")
     parser.add_argument(
@@ -122,6 +152,8 @@ def main(argv: list[str] | None = None) -> int:
             agent=args.agent,
             permission_mode=args.permission_mode,
             timeout_seconds=args.timeout,
+            idle_timeout_seconds=args.idle_timeout,
+            max_attempts=args.max_attempts,
             workdir=args.workdir,
             reuse_cv=args.reuse_cv,
         )
@@ -175,6 +207,9 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "error": str(exc),
                     "error_type": type(exc).__name__,
+                    "error_code": getattr(exc, "error_code", None),
+                    "category": getattr(exc, "category", None),
+                    "retryable": getattr(exc, "retryable", False),
                     "events": (
                         str(events_path.resolve()) if events_path.exists() else None
                     ),

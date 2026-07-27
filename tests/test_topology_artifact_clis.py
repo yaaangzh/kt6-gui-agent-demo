@@ -13,8 +13,16 @@ from kt6_backend.codeagent_canvas_vision import (
     CodeAgentProcessResult,
 )
 from kt6_backend.topology_cv_cli import generate_cv_artifact
-from kt6_backend.topology_hybrid_cli import run_pipeline
-from kt6_backend.topology_model_cli import generate_model_artifact
+from kt6_backend.topology_hybrid_cli import (
+    build_parser as build_hybrid_parser,
+    run_pipeline,
+)
+from kt6_backend.topology_model_cli import (
+    DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS,
+    DEFAULT_MODEL_MAX_ATTEMPTS,
+    build_parser as build_model_parser,
+    generate_model_artifact,
+)
 from kt6_backend.topology_model_contract import MODEL_SCHEMA_VERSION
 from kt6_backend.topology_vision_contract import RESPONSE_SCHEMA_VERSION
 
@@ -115,6 +123,102 @@ class SuccessfulModelRunner:
         )
 
 
+class AssistantCandidateRunner:
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def run(self, **kwargs):
+        self.calls.append(kwargs)
+        prompt = kwargs["stdin"].decode("utf-8")
+        _heading, request_text = prompt.split("\n", 1)
+        request = json.loads(request_text)
+        frame_path = request["frames"][0]["local_path"]
+        response_text = json.dumps(
+            _model_result(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return CodeAgentProcessResult(
+            returncode=0,
+            stdout=(
+                "\n".join(
+                    json.dumps(event, separators=(",", ":"))
+                    for event in (
+                        {
+                            "type": "tool_use",
+                            "part": {
+                                "tool": "read",
+                                "state": {
+                                    "status": "completed",
+                                    "input": {"filePath": frame_path},
+                                },
+                            },
+                        },
+                        {
+                            "type": "assistant",
+                            "message": {
+                                "content": [
+                                    {"type": "text", "text": response_text}
+                                ]
+                            },
+                        },
+                        {
+                            "type": "result",
+                            "subtype": "success",
+                            "is_error": False,
+                            "result": "analysis finished",
+                        },
+                    )
+                )
+                + "\n"
+            ).encode("utf-8"),
+            stderr=b"",
+        )
+
+
+class InvalidThenSuccessfulModelRunner:
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def run(self, **kwargs):
+        self.calls.append(kwargs)
+        prompt = kwargs["stdin"].decode("utf-8")
+        _heading, request_text = prompt.split("\n", 1)
+        request = json.loads(request_text)
+        frame_path = request["frames"][0]["local_path"]
+        response_text = (
+            "unable to produce protocol"
+            if len(self.calls) == 1
+            else json.dumps(_model_result(), separators=(",", ":"))
+        )
+        events = (
+            {
+                "type": "tool_use",
+                "part": {
+                    "tool": "read",
+                    "state": {
+                        "status": "completed",
+                        "input": {"filePath": frame_path},
+                    },
+                },
+            },
+            {"type": "text", "part": {"text": response_text}},
+            {"type": "step_finish", "part": {}},
+        )
+        return CodeAgentProcessResult(
+            returncode=0,
+            stdout=(
+                "\n".join(
+                    json.dumps(event, separators=(",", ":")) for event in events
+                )
+                + "\n"
+            ).encode("utf-8"),
+            stderr=(
+                b"invalid first response\n"
+                if len(self.calls) == 1
+                else b"successful retry\n"
+            ),
+        )
 class TopologyArtifactCLITest(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -205,12 +309,97 @@ class TopologyArtifactCLITest(unittest.TestCase):
             request["output_shape"]["schema_version"],
             MODEL_SCHEMA_VERSION,
         )
-        self.assertEqual(runner.call["timeout_seconds"], 600.0)
+        self.assertGreater(runner.call["timeout_seconds"], 0)
+        self.assertLessEqual(runner.call["timeout_seconds"], 600.0)
         args = runner.call["args"]
         permission_index = args.index("--permission-mode")
         self.assertEqual(args[permission_index + 1], "bypassPermissions")
         self.assertNotIn("--add-dir", args)
 
+    def test_model_recovers_valid_assistant_candidate_before_invalid_result(self):
+        output_path = self.root / "model-result.json"
+        events_path = self.root / "codeagent-events.jsonl"
+        runner = AssistantCandidateRunner()
+
+        result = generate_model_artifact(
+            self.image_path,
+            source_id="candidate-recovery",
+            output_path=output_path,
+            events_path=events_path,
+            executable=sys.executable,
+            timeout_seconds=30,
+            max_attempts=1,
+            workdir=self.root,
+            runner=runner,
+        )
+
+        self.assertEqual(result, _model_result())
+        self.assertEqual(len(runner.calls), 1)
+
+    def test_invalid_model_response_is_retried_and_first_events_are_archived(self):
+        output_path = self.root / "model-result.json"
+        events_path = self.root / "codeagent-events.jsonl"
+        stderr_path = self.root / "codeagent-stderr.log"
+        runner = InvalidThenSuccessfulModelRunner()
+
+        result = generate_model_artifact(
+            self.image_path,
+            source_id="automatic-retry",
+            output_path=output_path,
+            events_path=events_path,
+            stderr_path=stderr_path,
+            executable=sys.executable,
+            timeout_seconds=30,
+            max_attempts=2,
+            workdir=self.root,
+            runner=runner,
+        )
+
+        self.assertEqual(result, _model_result())
+        self.assertEqual(len(runner.calls), 2)
+        self.assertLess(runner.calls[1]["timeout_seconds"], 30)
+        archived_events = self.root / "codeagent-events.attempt-1.jsonl"
+        archived_stderr = self.root / "codeagent-stderr.attempt-1.log"
+        self.assertIn("unable to produce protocol", archived_events.read_text())
+        self.assertEqual(
+            archived_stderr.read_bytes(),
+            b"invalid first response\n",
+        )
+        self.assertIn("successful retry", stderr_path.read_text())
+
+    def test_model_cli_retry_defaults_and_explicit_disable(self):
+        model_args = build_model_parser().parse_args(
+            [
+                str(self.image_path),
+                "--source-id",
+                "defaults",
+                "--out",
+                str(self.root / "model.json"),
+                "--events",
+                str(self.root / "events.jsonl"),
+            ]
+        )
+        hybrid_args = build_hybrid_parser().parse_args(
+            [
+                str(self.image_path),
+                "--source-id",
+                "defaults",
+                "--out-dir",
+                str(self.root / "out"),
+                "--idle-timeout",
+                "0",
+                "--max-attempts",
+                "1",
+            ]
+        )
+
+        self.assertEqual(
+            model_args.idle_timeout,
+            DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS,
+        )
+        self.assertEqual(model_args.max_attempts, DEFAULT_MODEL_MAX_ATTEMPTS)
+        self.assertEqual(hybrid_args.idle_timeout, 0)
+        self.assertEqual(hybrid_args.max_attempts, 1)
     def test_pipeline_keeps_all_artifacts(self):
         output_dir = self.root / "artifacts"
 

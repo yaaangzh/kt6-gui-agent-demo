@@ -15,6 +15,7 @@ from unittest.mock import patch
 from kt6_backend.codeagent_canvas_vision import (
     CodeAgentCanvasVisionAdapter,
     CodeAgentProcessResult,
+    CodeAgentVisionIdleTimeoutError,
     CodeAgentVisionResponseError,
     CodeAgentVisionTransportError,
     SubprocessCodeAgentRunner,
@@ -851,6 +852,56 @@ class SubprocessCodeAgentRunnerTest(unittest.TestCase):
                 max_stderr_bytes=1024,
             )
 
+    def test_post_read_idle_timeout_terminates_retryable_session(self):
+        runner = SubprocessCodeAgentRunner(idle_timeout_seconds=0.05)
+        started = time.monotonic()
+
+        with self.assertRaises(CodeAgentVisionIdleTimeoutError) as raised:
+            runner.run(
+                executable=Path(sys.executable),
+                args=(
+                    "-c",
+                    "import json,time; "
+                    "print(json.dumps({'type':'assistant','message':{'content':["
+                    "{'type':'tool_use','name':'Read','id':'read-1'}]}}), flush=True); "
+                    "print(json.dumps({'type':'user','message':{'content':["
+                    "{'type':'tool_result','tool_use_id':'read-1'}]}}), flush=True); "
+                    "time.sleep(5)",
+                ),
+                stdin=b"",
+                cwd=Path.cwd(),
+                timeout_seconds=2,
+                max_stdout_bytes=4096,
+                max_stderr_bytes=1024,
+            )
+
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertEqual(raised.exception.error_code, "post_read_idle_timeout")
+        self.assertEqual(raised.exception.category, "transient_transport")
+        self.assertTrue(raised.exception.retryable)
+
+    def test_idle_timeout_waits_for_read_completion(self):
+        runner = SubprocessCodeAgentRunner(idle_timeout_seconds=0.05)
+
+        with self.assertRaises(CodeAgentVisionTransportError) as raised:
+            runner.run(
+                executable=Path(sys.executable),
+                args=(
+                    "-c",
+                    "import json,time; "
+                    "print(json.dumps({'type':'assistant','message':{'content':["
+                    "{'type':'tool_use','name':'Read','id':'read-1'}]}}), flush=True); "
+                    "time.sleep(5)",
+                ),
+                stdin=b"",
+                cwd=Path.cwd(),
+                timeout_seconds=0.12,
+                max_stdout_bytes=4096,
+                max_stderr_bytes=1024,
+            )
+
+        self.assertIs(type(raised.exception), CodeAgentVisionTransportError)
+        self.assertEqual(raised.exception.error_code, "transport_timeout")
     def test_stdout_is_streamed_to_sink_and_reports_progress(self):
         sink = BytesIO()
         stderr_sink = BytesIO()
@@ -999,6 +1050,8 @@ class SubprocessCodeAgentRunnerTest(unittest.TestCase):
             SubprocessCodeAgentRunner(heartbeat_seconds=0)
         with self.assertRaisesRegex(ValueError, "terminal_grace_seconds"):
             SubprocessCodeAgentRunner(terminal_grace_seconds=-1)
+        with self.assertRaisesRegex(ValueError, "idle_timeout_seconds"):
+            SubprocessCodeAgentRunner(idle_timeout_seconds=0)
 
 
 if __name__ == "__main__":

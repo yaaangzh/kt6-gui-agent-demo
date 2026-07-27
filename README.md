@@ -26,7 +26,7 @@ CodeAgentCLI 的 Windows 启动方式、真实图片验证结论、已知限制�
 | 拓扑变化检测 | 节点、位置、链路增删及链路语义属性变化检测；关键变化触发重规划 |
 | 运行记忆 | SQLite 持久化任务、事件、检查点、场景和业务处理结果 |
 | KT5 接入基础 | 感知拓扑与生成拓扑共用统一 Scene Graph 契约 |
-| 自动化测试 | 当前 244 项通过，42 项因缺少可选 RapidOCR/OpenCV 依赖而跳过 |
+| 自动化测试 | 当前 249 项通过，42 项因缺少可选 RapidOCR/OpenCV 依赖而跳过 |
 
 ## 业务场景
 
@@ -161,6 +161,13 @@ CodeAgent 工作目录内部，因此不再为每次随机目录传递 `--add-di
 的结果。按 `Ctrl+C` 也会可靠终止进程树，并保留已完成的 CV 和 CodeAgent
 诊断文件。
 
+离线 model/hybrid CLI 默认把 `--timeout` 作为所有模型尝试共享的总预算，最多
+尝试 2 次。图片 `Read` 完成后若连续 300 秒没有 stdout，会终止已停滞的进程树，
+保留首次诊断文件并在剩余总预算内重试。可用 `--idle-timeout` 调整阈值；设置
+`--idle-timeout 0 --max-attempts 1` 可关闭空闲监控和自动重试。首次失败的日志会
+保存为 `codeagent-events.attempt-1.jsonl` 与 `codeagent-stderr.attempt-1.log`，
+最终一次尝试仍使用原文件名。
+
 完整 `result/success` 是模型阶段的终止依据：即使它恰好在总超时截止线到达，
 或先进入 stdout 缓冲区、在线程清理时才被解析，也优先按成功结果继续验证，不会
 误报超时。CodeAgent 对困难图片可能顺序重复调用 `Read`；KT6 允许重复读取同一
@@ -181,7 +188,9 @@ KT6 会
 在受大小限制的响应中定位唯一 `kt6.topology-model.v1` 根对象，因此允许 JSON
 前后出现模型分析说明；若使用显式 fenced block，协议对象必须直接位于围栏内。
 第二个 fenced block、第二个协议对象、损坏围栏、重复 JSON key、非法数值和未知
-协议字段仍会拒绝。
+协议字段仍会拒绝。若同一 stream 中较早的 assistant 候选包含唯一有效协议，而
+末尾 `result.result` 只是说明文字或无效文本，解析器会恢复该有效候选；多个不同
+的有效协议对象仍按歧义响应拒绝，不会猜测选择。
 
 融合结果同时提供三种视图：`result`/`grounded_graph` 只保留具有可靠像素落地的
 节点和链路，继续用于现有页面感知；`display_graph` 额外包含具有推断渲染坐标的
@@ -223,6 +232,7 @@ cv-result.json             本地 RapidOCR/OpenCV 原始结果
 model-result.json          CodeAgent 精简语义模型结果
 codeagent-events.jsonl     CodeAgent 原始 stream-json 事件
 codeagent-stderr.log       CodeAgent 启动与错误诊断
+*.attempt-1.*              首次失败尝试的 events/stderr（发生重试时）
 fused-result.json          两份结果的离线融合结果
 ```
 
@@ -266,9 +276,10 @@ python -m kt6_backend.topology_fusion_cli `
   --out .\fused-result.json
 ```
 
-独立 CodeAgent CLI 当前最长允许 900 秒；这是现有安全上限，而不是固定等待
-时长，模型提前产生 `result/success` 时会立即进入验证和融合。HTTP 感知接口
-仍维持 300 秒上限。复杂图片超过 900 秒的离线任务上限拆分尚未实现。
+独立 CodeAgent CLI 当前总预算最长允许 900 秒；这是所有尝试共享的安全上限，
+不是每次尝试各等待 900 秒。模型提前产生 `result/success` 时会立即进入验证和
+融合。HTTP 感知接口仍维持 300 秒上限；复杂图片超过 900 秒的离线任务上限拆分
+尚未实现。
 
 Browser Use 后续可以作为浏览器会话、DOM 获取、截图和通用 GUI 操作底座，但其内置视觉不能单独替代拓扑感知：稳定的节点/链路重建、业务 ID 绑定、跨帧对象一致性和拓扑版本判断仍需要 Renderer Adapter 或专用 Canvas Vision Adapter。
 
@@ -448,7 +459,7 @@ tests/                         自动化测试
 python -m unittest discover -s tests
 ```
 
-当前结果为 244 项通过、42 项跳过。跳过项来自当前开发环境缺少可选
+当前结果为 249 项通过、42 项跳过。跳过项来自当前开发环境缺少可选
 RapidOCR/OpenCV 运行依赖，不是测试失败。覆盖范围包括意图路由、缺参澄清、
 动作授权、Playbook 预检、步骤注册、资源锁、执行后置条件、运行记忆、页面采集
 失败回退、DOM/ARIA `ui_tree`、文本拓扑重建、本地 RapidOCR/OpenCV、密集星型、

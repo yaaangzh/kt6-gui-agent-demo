@@ -15,7 +15,10 @@ import time
 from dataclasses import dataclass
 from typing import Any, BinaryIO, Callable, Mapping, Protocol
 
-from .topology_model_contract import TopologyModelContract
+from .topology_model_contract import (
+    TopologyModelContract,
+    TopologyModelResponseError,
+)
 from .topology_vision_contract import TopologyVisionContract
 from .vision_recognition import CanvasFrame
 
@@ -23,9 +26,26 @@ from .vision_recognition import CanvasFrame
 class CodeAgentVisionError(RuntimeError):
     """Base error for the local CodeAgent Canvas vision adapter."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: str = "codeagent_error",
+        category: str = "unknown",
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.category = category
+        self.retryable = retryable
+
 
 class CodeAgentVisionTransportError(CodeAgentVisionError):
     """CodeAgent could not be launched or did not finish safely."""
+
+
+class CodeAgentVisionIdleTimeoutError(CodeAgentVisionTransportError):
+    """CodeAgent stopped producing stdout after a completed image Read."""
 
 
 class CodeAgentVisionResponseError(CodeAgentVisionError):
@@ -47,6 +67,7 @@ class CodeAgentProgress:
     last_event: str | None
     stdout_bytes: int
     stderr_bytes: int
+    phase: str = "starting"
 
 
 class CodeAgentRunner(Protocol):
@@ -77,6 +98,7 @@ class SubprocessCodeAgentRunner:
         progress_callback: Callable[[CodeAgentProgress], None] | None = None,
         heartbeat_seconds: float = 10.0,
         terminal_grace_seconds: float = 5.0,
+        idle_timeout_seconds: float | None = None,
     ) -> None:
         if not math.isfinite(heartbeat_seconds) or heartbeat_seconds <= 0:
             raise ValueError("heartbeat_seconds must be positive and finite")
@@ -84,11 +106,16 @@ class SubprocessCodeAgentRunner:
             raise ValueError(
                 "terminal_grace_seconds must be non-negative and finite"
             )
+        if idle_timeout_seconds is not None and (
+            not math.isfinite(idle_timeout_seconds) or idle_timeout_seconds <= 0
+        ):
+            raise ValueError("idle_timeout_seconds must be positive and finite")
         self.stdout_sink = stdout_sink
         self.stderr_sink = stderr_sink
         self.progress_callback = progress_callback
         self.heartbeat_seconds = heartbeat_seconds
         self.terminal_grace_seconds = terminal_grace_seconds
+        self.idle_timeout_seconds = idle_timeout_seconds
 
     def run(
         self,
@@ -136,8 +163,60 @@ class SubprocessCodeAgentRunner:
         last_stdout_at: list[float | None] = [None]
         last_stderr_at: list[float | None] = [None]
         last_event: list[str | None] = [None]
-        terminal_success_at: list[float | None] = [None]
+        terminal_event_at: list[float | None] = [None]
+        read_requested: list[bool] = [False]
+        read_completed: list[bool] = [False]
+        outstanding_read_ids: set[str] = set()
         event_buffer = bytearray()
+
+        def phase() -> str:
+            if terminal_event_at[0] is not None:
+                return "terminal"
+            if outstanding_read_ids or (read_requested[0] and not read_completed[0]):
+                return "reading"
+            if read_completed[0]:
+                return "post_read_inference"
+            return "starting"
+
+        def observe_read_state(payload: Mapping[str, Any]) -> None:
+            event_type = payload.get("type")
+            if event_type == "tool_use":
+                part = payload.get("part")
+                if isinstance(part, Mapping) and str(part.get("tool", "")).casefold() == "read":
+                    read_requested[0] = True
+                    state = part.get("state")
+                    if isinstance(state, Mapping) and state.get("status") == "completed":
+                        read_completed[0] = True
+                return
+            if event_type == "assistant":
+                message = payload.get("message")
+                content = message.get("content") if isinstance(message, Mapping) else None
+                if not isinstance(content, list):
+                    return
+                for index, block in enumerate(content):
+                    if (
+                        isinstance(block, Mapping)
+                        and block.get("type") == "tool_use"
+                        and str(block.get("name", "")).casefold() == "read"
+                    ):
+                        read_requested[0] = True
+                        tool_id = str(block.get("id") or f"anonymous-read-{index}")
+                        outstanding_read_ids.add(tool_id)
+                return
+            if event_type != "user":
+                return
+            message = payload.get("message")
+            content = message.get("content") if isinstance(message, Mapping) else None
+            if not isinstance(content, list):
+                return
+            for block in content:
+                if not isinstance(block, Mapping) or block.get("type") != "tool_result":
+                    continue
+                tool_id = str(block.get("tool_use_id", ""))
+                if tool_id in outstanding_read_ids:
+                    outstanding_read_ids.discard(tool_id)
+                    if block.get("is_error") is not True:
+                        read_completed[0] = True
 
         def observe_events(chunk: bytes, observed_at: float) -> None:
             event_buffer.extend(chunk)
@@ -158,12 +237,9 @@ class SubprocessCodeAgentRunner:
                     last_event[0] = "non-object-event"
                     continue
                 last_event[0] = self._event_label(payload)
-                if (
-                    payload.get("type") == "result"
-                    and payload.get("subtype") == "success"
-                    and payload.get("is_error") is not True
-                ):
-                    terminal_success_at[0] = observed_at
+                observe_read_state(payload)
+                if payload.get("type") == "result":
+                    terminal_event_at[0] = observed_at
 
         def read_stream(stream: Any, target: bytearray, limit: int, name: str) -> None:
             try:
@@ -227,6 +303,7 @@ class SubprocessCodeAgentRunner:
         deadline = time.monotonic() + timeout_seconds
         next_heartbeat = started_at + self.heartbeat_seconds
         timed_out = False
+        idle_timed_out = False
         interrupted = False
         completed_from_event = False
         try:
@@ -239,7 +316,9 @@ class SubprocessCodeAgentRunner:
                     self._kill_process_tree(process)
                     break
                 with state_lock:
-                    terminal_at = terminal_success_at[0]
+                    terminal_at = terminal_event_at[0]
+                    phase_name = phase()
+                    last_output = last_stdout_at[0]
                 if (
                     terminal_at is not None
                     and (
@@ -248,6 +327,15 @@ class SubprocessCodeAgentRunner:
                     )
                 ):
                     completed_from_event = True
+                    self._kill_process_tree(process)
+                    break
+                if (
+                    self.idle_timeout_seconds is not None
+                    and phase_name == "post_read_inference"
+                    and last_output is not None
+                    and now - last_output >= self.idle_timeout_seconds
+                ):
+                    idle_timed_out = True
                     self._kill_process_tree(process)
                     break
                 if now >= deadline:
@@ -261,6 +349,7 @@ class SubprocessCodeAgentRunner:
                         event_name = last_event[0]
                         output_size = len(stdout)
                         stderr_size = len(stderr)
+                        phase_name = phase()
                     try:
                         self.progress_callback(
                             CodeAgentProgress(
@@ -276,6 +365,7 @@ class SubprocessCodeAgentRunner:
                                 last_event=event_name,
                                 stdout_bytes=output_size,
                                 stderr_bytes=stderr_size,
+                                phase=phase_name,
                             )
                         )
                     except KeyboardInterrupt:
@@ -288,11 +378,15 @@ class SubprocessCodeAgentRunner:
             interrupted = True
             self._kill_process_tree(process)
 
+        cleanup_failed = False
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:  # pragma: no cover - defensive fallback
             self._kill_process_tree(process)
-            process.wait(timeout=5)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                cleanup_failed = True
 
         for thread in threads:
             thread.join(timeout=2)
@@ -302,21 +396,33 @@ class SubprocessCodeAgentRunner:
                     stream.close()
             except (OSError, ValueError):
                 pass
+        for thread in threads:
+            if thread.is_alive():
+                thread.join(timeout=1)
+        if any(thread.is_alive() for thread in threads):
+            cleanup_failed = True
 
-        # A complete result may already be buffered in stdout when the deadline
-        # fires, then become visible only while the reader thread drains the pipe.
-        # Treat that verified terminal event as success and let response validation
-        # decide whether its payload is usable.
-        if timed_out:
+        # A terminal result may already be buffered in stdout when an idle or total
+        # deadline fires, then become visible only while the reader drains the pipe.
+        # Let response validation, not the watchdog, decide that terminal payload.
+        if timed_out or idle_timed_out:
             with state_lock:
-                terminal_at = terminal_success_at[0]
+                terminal_at = terminal_event_at[0]
             if terminal_at is not None:
                 timed_out = False
+                idle_timed_out = False
                 completed_from_event = True
 
         if interrupted:
             raise KeyboardInterrupt
-        if timed_out:
+        if cleanup_failed:
+            raise CodeAgentVisionTransportError(
+                "codeagent process cleanup did not finish safely",
+                error_code="process_cleanup_failed",
+                category="local_process",
+                retryable=False,
+            )
+        if timed_out or idle_timed_out:
             with state_lock:
                 event_name = last_event[0] or "none"
                 last_output = last_stdout_at[0]
@@ -335,19 +441,38 @@ class SubprocessCodeAgentRunner:
                     f"{max(0.0, time.monotonic() - last_stderr):.0f}s"
                 )
             )
+            if idle_timed_out:
+                raise CodeAgentVisionIdleTimeoutError(
+                    "codeagent perception idle timed out after completed Read "
+                    f"(last event: {event_name}; {idle_text}; {stderr_text})",
+                    error_code="post_read_idle_timeout",
+                    category="transient_transport",
+                    retryable=True,
+                )
             raise CodeAgentVisionTransportError(
                 "codeagent perception timed out "
-                f"(last event: {event_name}; {idle_text}; {stderr_text})"
+                f"(last event: {event_name}; {idle_text}; {stderr_text})",
+                error_code="transport_timeout",
+                category="transient_transport",
+                retryable=True,
             )
         if overflow:
             raise CodeAgentVisionTransportError(
                 f"codeagent {overflow[0]} exceeded the configured size limit"
             )
         if reader_errors or writer_errors:
-            raise CodeAgentVisionTransportError("codeagent process pipe failed")
+            raise CodeAgentVisionTransportError(
+                "codeagent process pipe failed",
+                error_code="pipe_failed",
+                category="transient_transport",
+                retryable=True,
+            )
         if progress_errors:
             raise CodeAgentVisionTransportError(
-                "codeagent progress reporting failed"
+                "codeagent progress reporting failed",
+                error_code="progress_reporting_failed",
+                category="local_io",
+                retryable=False,
             )
         return CodeAgentProcessResult(
             returncode=0 if completed_from_event else int(process.returncode or 0),
@@ -388,8 +513,6 @@ class SubprocessCodeAgentRunner:
 
     @staticmethod
     def _kill_process_tree(process: subprocess.Popen[bytes]) -> None:
-        if process.poll() is not None:
-            return
         if os.name == "nt":
             try:
                 subprocess.run(
@@ -539,17 +662,33 @@ class CodeAgentCanvasVisionAdapter:
         cv_observations: dict[str, Any] | None,
         response_kind: str = "vision",
     ) -> dict[str, Any]:
+        deadline = time.monotonic() + self.timeout_seconds
         prepared = self._contract.prepare_frames(frames)
         page_payload = self._contract.prepare_page(page)
-        acquired = self._SERIAL_GATE.acquire(timeout=self.timeout_seconds)
+        remaining = deadline - time.monotonic()
+        acquired = remaining > 0 and self._SERIAL_GATE.acquire(timeout=remaining)
         if not acquired:
-            raise CodeAgentVisionTransportError("codeagent perception worker is busy")
+            raise CodeAgentVisionTransportError(
+                "codeagent perception worker is busy",
+                error_code="worker_busy",
+                category="resource_contention",
+                retryable=True,
+            )
         try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CodeAgentVisionTransportError(
+                    "codeagent perception deadline expired before process start",
+                    error_code="worker_deadline_exhausted",
+                    category="resource_contention",
+                    retryable=True,
+                )
             return self._recognize_prepared(
                 page_payload,
                 prepared,
                 cv_observations=cv_observations,
                 response_kind=response_kind,
+                timeout_seconds=remaining,
             )
         finally:
             self._SERIAL_GATE.release()
@@ -561,6 +700,7 @@ class CodeAgentCanvasVisionAdapter:
         *,
         cv_observations: dict[str, Any] | None,
         response_kind: str,
+        timeout_seconds: float,
     ) -> dict[str, Any]:
         jobs_root = self.workdir / "runtime_data" / "codeagent_jobs"
         try:
@@ -643,21 +783,64 @@ class CodeAgentCanvasVisionAdapter:
                 args=tuple(arguments),
                 stdin=prompt_bytes,
                 cwd=self.workdir,
-                timeout_seconds=self.timeout_seconds,
+                timeout_seconds=timeout_seconds,
                 max_stdout_bytes=self.max_event_bytes,
                 max_stderr_bytes=self.max_stderr_bytes,
             )
             if result.returncode != 0:
                 raise CodeAgentVisionTransportError(
-                    f"codeagent perception exited with status {result.returncode}"
+                    f"codeagent perception exited with status {result.returncode}",
+                    error_code="process_exit",
+                    category="transient_transport",
+                    retryable=True,
                 )
-            response_bytes = self._response_from_events(result.stdout, expected_paths)
+            response_candidates = self._response_candidates_from_events(
+                result.stdout, expected_paths
+            )
             if response_kind == "model":
-                return self._model_contract.parse_response_bytes(response_bytes)
+                return self._parse_unique_model_response(response_candidates)
             return self._contract.parse_response_bytes(
-                response_bytes,
+                response_candidates[-1],
                 prepared.frame_dimensions,
             )
+
+    def _parse_unique_model_response(
+        self, response_candidates: list[bytes]
+    ) -> dict[str, Any]:
+        valid_payloads: dict[str, dict[str, Any]] = {}
+        last_error: TopologyModelResponseError | None = None
+        for candidate in response_candidates:
+            try:
+                payload = self._model_contract.parse_response_bytes(candidate)
+            except TopologyModelResponseError as exc:
+                last_error = exc
+                continue
+            key = json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            valid_payloads[key] = payload
+        if len(valid_payloads) == 1:
+            return next(iter(valid_payloads.values()))
+        if len(valid_payloads) > 1:
+            raise CodeAgentVisionResponseError(
+                "model stream contains multiple distinct strict model JSON objects",
+                error_code="ambiguous_model_response",
+                category="model_response",
+                retryable=True,
+            )
+        message = "codeagent returned no valid topology model protocol object"
+        if last_error is not None:
+            message = f"{message}: {last_error}"
+        raise CodeAgentVisionResponseError(
+            message,
+            error_code="invalid_model_response",
+            category="model_response",
+            retryable=True,
+        ) from last_error
 
     def _prompt(
         self,
@@ -799,11 +982,11 @@ class CodeAgentCanvasVisionAdapter:
             ]
         return str(value)[:500]
 
-    def _response_from_events(
+    def _response_candidates_from_events(
         self,
         stdout: bytes,
         expected_paths: Mapping[str, str],
-    ) -> bytes:
+    ) -> list[bytes]:
         if not stdout:
             raise CodeAgentVisionResponseError("codeagent returned no JSON events")
         try:
@@ -889,21 +1072,35 @@ class CodeAgentCanvasVisionAdapter:
                     step_finished_after_response = True
 
         if not step_finished:
-            raise CodeAgentVisionResponseError("codeagent did not finish a perception step")
+            raise CodeAgentVisionResponseError(
+                "codeagent did not finish a perception step",
+                error_code="step_incomplete",
+                category="model_response",
+                retryable=True,
+            )
         missing = set(expected_paths) - read_paths
         if missing:
             raise CodeAgentVisionResponseError(
-                "codeagent did not prove a completed read for every Canvas frame"
+                "codeagent did not prove a completed read for every Canvas frame",
+                error_code="missing_read_proof",
+                category="model_response",
+                retryable=True,
             )
         if not response_candidates:
             raise CodeAgentVisionResponseError(
-                "codeagent returned no final JSON text after reading the Canvas frames"
+                "codeagent returned no final JSON text after reading the Canvas frames",
+                error_code="missing_final_text",
+                category="model_response",
+                retryable=True,
             )
         if not step_finished_after_response:
             raise CodeAgentVisionResponseError(
-                "codeagent did not finish the step containing its final JSON text"
+                "codeagent did not finish the step containing its final JSON text",
+                error_code="final_step_incomplete",
+                category="model_response",
+                retryable=True,
             )
-        return response_candidates[-1].encode("utf-8")
+        return [candidate.encode("utf-8") for candidate in response_candidates]
 
     def _record_stream_assistant(
         self,
@@ -986,7 +1183,12 @@ class CodeAgentCanvasVisionAdapter:
             if path_key is None:
                 continue
             if block.get("is_error") is True:
-                raise CodeAgentVisionResponseError("codeagent read tool did not complete")
+                raise CodeAgentVisionResponseError(
+                "codeagent read tool did not complete",
+                error_code="read_failed",
+                category="model_response",
+                retryable=True,
+            )
             read_paths.add(path_key)
 
     def _record_tool_use(
@@ -1002,7 +1204,12 @@ class CodeAgentCanvasVisionAdapter:
             raise CodeAgentVisionResponseError("codeagent attempted a tool other than read")
         state = part.get("state")
         if not isinstance(state, dict) or state.get("status") != "completed":
-            raise CodeAgentVisionResponseError("codeagent read tool did not complete")
+            raise CodeAgentVisionResponseError(
+                "codeagent read tool did not complete",
+                error_code="read_failed",
+                category="model_response",
+                retryable=True,
+            )
         tool_input = state.get("input")
         if not isinstance(tool_input, dict):
             raise CodeAgentVisionResponseError("codeagent read tool input is invalid")

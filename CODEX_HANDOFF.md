@@ -96,7 +96,12 @@ tests/test_topology_fusion.py
 - 离线模型阶段使用 `kt6.topology-model.v1` 精简协议。
 - 接受纯 JSON、单个 JSON fenced block，以及 JSON 前后追加的模型分析文字。
 - 在有界响应中定位唯一 `kt6.topology-model.v1` 根对象，随后执行严格协议校验。
+- 同一 stream 中逐个验证 assistant/result 候选；较早候选唯一有效时不再被末尾无效文本覆盖。
 - 显式围栏必须直接包含协议对象；损坏围栏、多个围栏或多个协议对象仍会拒绝。
+- 离线 model/hybrid CLI 默认最多尝试 2 次，共享同一个总 timeout。
+- 图片 Read 完成后默认 300 秒无 stdout 会终止停滞进程并在剩余预算内重试。
+- 首次失败 events/stderr 归档为 `*.attempt-1.*`，不会被下一次尝试覆盖。
+- CLI 错误 JSON 包含 `error_code`、`category` 和 `retryable`。
 
 ## 4. CodeAgentCLI 运行事实
 
@@ -272,7 +277,7 @@ pair-level 负证据与低于阈值的 CV 链路组合会真正 rejected；全�
 开发环境最后一次结果：
 
 ```text
-244 项通过
+249 项通过
 42 项跳过
 ```
 
@@ -293,7 +298,7 @@ python -m unittest `
   tests.test_topology_artifact_clis
 ```
 
-当前定向结果应为 44 项通过。
+当前定向结果应为 49 项通过。
 
 ### 7.2 测试环境端到端命令
 
@@ -380,20 +385,28 @@ python -m kt6_backend.topology_hybrid_cli `
 - 第三张图片最近一次运行中，CodeAgent 已返回 `result/success`；最终文本长
   22177 字符，前 1329 字符是英文分析，随后才是单个完整 JSON fenced block。
   旧解析器因要求 JSON 位于响应开头而失败。当前版本已改为提取唯一协议根，并用
-  同形态回归测试覆盖；测试环境仍需同步新提交后重新做一次端到端确认。
+  同形态回归测试覆盖；测试环境仍需同步后重新做一次端到端确认。
+- `1.png` 在 2026-07-27 11:28 的运行已完成 Read，但旧代码最终只得到无效模型
+  协议。当前版本会验证 stream 中全部候选、避免有效 assistant JSON 被末尾无效
+  `result.result` 覆盖，并对真正无效的模型响应在剩余总预算内重试一次。
+- `2.png` 在 2026-07-27 14:09 的运行完成 Read 后 860 秒无 stdout，最终命中
+  900 秒总超时。当前离线 CLI 默认在图后空闲 300 秒时终止该进程并重试一次。
 
-最后一项不要在交接时误写成“第三张图片已经通过”。
+上述三张图片都需要在测试环境同步当前版本后复测，不要提前写成已经通过。
 
 ## 9. 已知限制
 
-### 9.1 timeout
+### 9.1 timeout 与有限重试
 
 - 独立 CodeAgent Adapter 当前硬上限为 900 秒。
-- 900 秒是最长等待，不是固定等待；收到完整 `result/success` 后会立即继续。
+- 离线 model/hybrid CLI 的 `--timeout` 是所有模型尝试共享的总预算，不是每次
+  尝试各等待相同时间；默认最多 2 次尝试。
+- Read 完成后的默认 idle timeout 为 300 秒，只在离线 CLI 启用；核心 Runner
+  默认仍关闭，HTTP/嵌入式调用不受影响。
+- `--idle-timeout 0 --max-attempts 1` 可恢复为单次、无 idle watchdog 的行为。
+- 收到完整 `result/success` 后会立即继续；截止线已缓冲的终止事件仍优先处理。
 - HTTP 感知接口上限为 300 秒。
-- 用户已经指出：复杂图片可能超过 900 秒。合理后续方案是将 HTTP 在线上限和
-  离线文件任务上限分开，并为离线 CLI 增加可配置总 timeout / idle timeout。
-- 这项尚未实现，当前阶段先保证链路打通。
+- 复杂图片超过 900 秒的离线总预算拆分仍未实现。
 
 ### 9.2 CodeAgent 非确定性
 
@@ -408,6 +421,8 @@ python -m kt6_backend.topology_hybrid_cli `
 - `Read` 的 `tool_result` 可能内含图片 Base64，文件会很大。
 - 不要在终端直接完整输出，也不要未经确认上传包含真实拓扑图片的事件文件。
 - 当前 stdout 上限为 8 MB；大图片、多次重复 Read 可能触及上限。
+- 发生自动重试时，首次日志保存为 `codeagent-events.attempt-1.jsonl` 和
+  `codeagent-stderr.attempt-1.log`，最终一次仍使用标准文件名。
 - 目前没有正式的“从成功 events 恢复 model-result.json”CLI，只有事件保留和
   手工诊断能力。
 
@@ -459,20 +474,26 @@ result/success 在截止线仍报 timeout
 
 模型 negative_edges 引用未列入 nodes 的 CV 端点别名
 → 仅在精确或唯一紧凑候选时安全解析，但不会伪造 model-node 坐标绑定
+
+有效 assistant 模型 JSON 被末尾无效 result 文本覆盖
+→ 逐候选严格验证并按规范化 payload 去重；多个不同有效对象仍拒绝
+
+图片 Read 完成后长时间无 stdout，直到 900 秒才失败
+→ 离线 CLI 默认 300 秒图后 idle watchdog，并在共享总预算内有限重试
 ```
 
 ## 11. 后续建议
 
 按当前用户优先级排序：
 
-1. 在测试环境同步最新 `main`，重新确认三张图片的 grounded、display、semantic
-   计数、disputed/rejected 状态及 `node_coordinate_mappings` 对齐情况。
+1. 在测试环境同步当前修改，依次复测 `1.png`、`2.png`、`3.png`，确认自动重试、
+   grounded/display/semantic 计数、disputed/rejected 状态及坐标映射。
 2. 建立三张真实图片的人工节点/链路真值，不再用“链接越多越好”判断准确率。
-3. 后续再拆分 HTTP timeout 和离线模型 timeout，并考虑 idle timeout。
-4. 增加正式 events 恢复 CLI，避免成功结果因后处理失败而需要重新调用模型。
+3. 后续再拆分 HTTP timeout 和超过 900 秒的离线任务总预算。
+4. 增加正式 events 恢复 CLI，避免成功结果因后处理失败而重新调用模型。
 5. 建立多图片黄金数据集，统计节点、连接、层级、厂商和型号准确率。
-6. 需要 GLM 直连、多模型路由、自动重试时，再抽象
-   `TopologyModelHarness`；当前无需引入大型 Harness 框架。
+6. 需要 GLM 直连或多模型路由时，再抽象 `TopologyModelHarness`；当前无需引入
+   大型 Harness 框架。
 
 ## 12. 新 Codex 接手检查清单
 

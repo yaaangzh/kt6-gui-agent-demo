@@ -154,6 +154,10 @@ class TopologyModelContract:
                 "Use exact visible business identifiers. Align harmless punctuation differences such as GW001 and GW-001 without inventing devices.",
                 "Do not return bbox, center, canvas coordinates, OCR evidence, provenance, Markdown, or commentary.",
                 "Only put a pair in negative_edges when a supplied CV link is clearly contradicted by the image.",
+                "After the final Read completes, stop free-form analysis and immediately produce the final protocol object.",
+                "The first non-whitespace response character must be { and the last must be }; return no text before or after it.",
+                "Prefer a conservative set of confirmed nodes and links over exhaustive uncertain dense-edge enumeration.",
+                "If uncertain, still return one complete protocol object with confidence 0 and bounded arrays instead of prose or no answer.",
                 "Return exactly one strict JSON object matching output_shape.",
             ],
             "output_shape": {

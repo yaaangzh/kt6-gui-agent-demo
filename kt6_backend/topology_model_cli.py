@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +26,11 @@ from .topology_artifact_common import (
 from .topology_fusion_cli import load_json
 
 
+DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS = 300.0
+DEFAULT_MODEL_MAX_ATTEMPTS = 2
+MAX_MODEL_ATTEMPTS = 3
+
+
 class RecordingCodeAgentRunner:
     """Persist CodeAgent stdout as it arrives, including failed attempts."""
 
@@ -34,11 +41,13 @@ class RecordingCodeAgentRunner:
         *,
         delegate: CodeAgentRunner | None = None,
         heartbeat_seconds: float = 10.0,
+        idle_timeout_seconds: float | None = None,
     ) -> None:
         self.output_path = output_path
         self.stderr_path = stderr_path
         self.delegate = delegate
         self.heartbeat_seconds = heartbeat_seconds
+        self.idle_timeout_seconds = idle_timeout_seconds
 
     @staticmethod
     def _report_progress(progress: CodeAgentProgress) -> None:
@@ -54,9 +63,15 @@ class RecordingCodeAgentRunner:
         else:
             state = "正在运行"
         event = progress.last_event or "none"
+        phase = {
+            "starting": "启动",
+            "reading": "读取图片",
+            "post_read_inference": "图后推理",
+            "terminal": "结束",
+        }.get(progress.phase, progress.phase)
         print(
             f"[CodeAgent] {state}，已运行 {progress.elapsed_seconds:.0f} 秒，"
-            f"最后事件 {event}，stdout {progress.stdout_bytes} 字节，"
+            f"阶段 {phase}，最后事件 {event}，stdout {progress.stdout_bytes} 字节，"
             f"stderr {progress.stderr_bytes} 字节",
             file=sys.stderr,
             flush=True,
@@ -78,6 +93,7 @@ class RecordingCodeAgentRunner:
                     stderr_sink=stderr_sink,
                     progress_callback=self._report_progress,
                     heartbeat_seconds=self.heartbeat_seconds,
+                    idle_timeout_seconds=self.idle_timeout_seconds,
                 )
             except BaseException:
                 sink.close()
@@ -95,6 +111,27 @@ class RecordingCodeAgentRunner:
                 stderr_sink.close()
 
 
+def _attempt_artifact_path(path: Path, attempt: int) -> Path:
+    return path.with_name(f"{path.stem}.attempt-{attempt}{path.suffix}")
+
+
+def _archive_failed_attempt(
+    events_path: Path,
+    stderr_path: Path,
+    attempt: int,
+) -> None:
+    for source in (events_path, stderr_path):
+        if not source.exists():
+            continue
+        destination = _attempt_artifact_path(source, attempt)
+        try:
+            source.replace(destination)
+        except OSError as exc:
+            raise TopologyArtifactCLIError(
+                f"cannot archive failed CodeAgent attempt: {source}"
+            ) from exc
+
+
 def generate_model_artifact(
     image_path: Path,
     *,
@@ -107,51 +144,130 @@ def generate_model_artifact(
     agent: str | None = None,
     permission_mode: str = "dontAsk",
     timeout_seconds: float = 600.0,
+    idle_timeout_seconds: float | None = DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS,
+    max_attempts: int = DEFAULT_MODEL_MAX_ATTEMPTS,
     workdir: Path | None = None,
     runner: CodeAgentRunner | None = None,
 ) -> dict[str, Any]:
+    if (
+        isinstance(max_attempts, bool)
+        or not isinstance(max_attempts, int)
+        or not 1 <= max_attempts <= MAX_MODEL_ATTEMPTS
+    ):
+        raise ValueError(
+            f"max_attempts must be an integer from 1 to {MAX_MODEL_ATTEMPTS}"
+        )
+    total_timeout = float(timeout_seconds)
+    if (
+        not math.isfinite(total_timeout)
+        or total_timeout <= 0
+        or total_timeout > CodeAgentCanvasVisionAdapter.MAX_TIMEOUT_SECONDS
+    ):
+        raise ValueError(
+            "timeout_seconds must be positive, finite, and no greater than "
+            f"{CodeAgentCanvasVisionAdapter.MAX_TIMEOUT_SECONDS:g}"
+        )
+    normalized_idle_timeout: float | None
+    if idle_timeout_seconds is None or float(idle_timeout_seconds) == 0:
+        normalized_idle_timeout = None
+    else:
+        normalized_idle_timeout = float(idle_timeout_seconds)
+        if (
+            not math.isfinite(normalized_idle_timeout)
+            or normalized_idle_timeout < 0
+        ):
+            raise ValueError(
+                "idle_timeout_seconds must be non-negative and finite"
+            )
+
     resolved_stderr_path = stderr_path or events_path.with_name(
         "codeagent-stderr.log"
     )
+    attempt_paths = [
+        _attempt_artifact_path(path, attempt)
+        for attempt in range(1, max_attempts)
+        for path in (events_path, resolved_stderr_path)
+    ]
     ensure_distinct_paths(
         image_path,
         cv_path,
         output_path,
         events_path,
         resolved_stderr_path,
+        *attempt_paths,
     )
-    for stale_path in (output_path, events_path, resolved_stderr_path):
+    for stale_path in (
+        output_path,
+        events_path,
+        resolved_stderr_path,
+        *attempt_paths,
+    ):
         try:
             stale_path.unlink(missing_ok=True)
         except OSError as exc:
             raise TopologyArtifactCLIError(
                 f"cannot replace stale artifact: {stale_path}"
             ) from exc
+
     page, frames = build_image_input(image_path, source_id)
     cv_context = normalize_cv_context(load_json(cv_path)) if cv_path else None
-    recording_runner = RecordingCodeAgentRunner(
-        events_path,
-        resolved_stderr_path,
-        delegate=runner,
-    )
-    adapter = CodeAgentCanvasVisionAdapter(
-        workdir=(workdir or Path.cwd()),
-        executable=executable,
-        agent=agent,
-        permission_mode=permission_mode,
-        timeout_seconds=timeout_seconds,
-        runner=recording_runner,
-    )
-    if cv_context is None:
-        result = adapter.recognize_model(page=page, frames=frames)
-    else:
-        result = adapter.recognize_model_with_context(
-            page=page,
-            frames=frames,
-            cv_observations=cv_context,
+    deadline = time.monotonic() + total_timeout
+    for attempt in range(1, max_attempts + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CodeAgentVisionError(
+                "CodeAgent model attempts exhausted the total timeout",
+                error_code="model_retry_deadline_exhausted",
+                category="transient_transport",
+                retryable=True,
+            )
+        attempt_timeout = remaining
+        recording_runner = RecordingCodeAgentRunner(
+            events_path,
+            resolved_stderr_path,
+            delegate=runner,
+            idle_timeout_seconds=normalized_idle_timeout,
         )
-    write_json(output_path, result)
-    return result
+        adapter = CodeAgentCanvasVisionAdapter(
+            workdir=(workdir or Path.cwd()),
+            executable=executable,
+            agent=agent,
+            permission_mode=permission_mode,
+            timeout_seconds=attempt_timeout,
+            runner=recording_runner,
+        )
+        try:
+            if cv_context is None:
+                result = adapter.recognize_model(page=page, frames=frames)
+            else:
+                result = adapter.recognize_model_with_context(
+                    page=page,
+                    frames=frames,
+                    cv_observations=cv_context,
+                )
+        except CodeAgentVisionError as exc:
+            remaining = deadline - time.monotonic()
+            if (
+                attempt >= max_attempts
+                or not exc.retryable
+                or remaining <= 0
+            ):
+                raise
+            _archive_failed_attempt(
+                events_path,
+                resolved_stderr_path,
+                attempt,
+            )
+            print(
+                f"[CodeAgent] 第 {attempt}/{max_attempts} 次模型尝试失败"
+                f"（{exc.error_code}），将在剩余 {remaining:.0f} 秒内重试",
+                file=sys.stderr,
+                flush=True,
+            )
+            continue
+        write_json(output_path, result)
+        return result
+    raise RuntimeError("unreachable CodeAgent attempt state")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -171,7 +287,28 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="CodeAgent stderr log (default: codeagent-stderr.log beside --events)",
     )
-    parser.add_argument("--timeout", type=float, default=600.0)
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=600.0,
+        help="total wall-clock budget shared by all model attempts",
+    )
+    parser.add_argument(
+        "--idle-timeout",
+        type=float,
+        default=DEFAULT_MODEL_IDLE_TIMEOUT_SECONDS,
+        help=(
+            "abort and retry after this many post-Read seconds without stdout; "
+            "use 0 to disable"
+        ),
+    )
+    parser.add_argument(
+        "--max-attempts",
+        type=int,
+        choices=range(1, MAX_MODEL_ATTEMPTS + 1),
+        default=DEFAULT_MODEL_MAX_ATTEMPTS,
+        help="maximum CodeAgent sessions within --timeout",
+    )
     parser.add_argument("--executable", default="codeagent")
     parser.add_argument("--agent")
     parser.add_argument(
@@ -197,6 +334,8 @@ def main(argv: list[str] | None = None) -> int:
             agent=args.agent,
             permission_mode=args.permission_mode,
             timeout_seconds=args.timeout,
+            idle_timeout_seconds=args.idle_timeout,
+            max_attempts=args.max_attempts,
             workdir=args.workdir,
         )
         print(
@@ -248,6 +387,9 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "error": str(exc),
                     "error_type": type(exc).__name__,
+                    "error_code": getattr(exc, "error_code", None),
+                    "category": getattr(exc, "category", None),
+                    "retryable": getattr(exc, "retryable", False),
                     "events": (
                         str(args.events.resolve()) if args.events.exists() else None
                     ),
