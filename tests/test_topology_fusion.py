@@ -129,6 +129,11 @@ class TopologyFusionTest(unittest.TestCase):
         self.assertEqual(summary["confirmed_link_count"], 2)
         self.assertEqual(summary["model_only_link_count"], 0)
         self.assertEqual(summary["unresolved_model_link_count"], 1)
+        self.assertEqual(summary["accepted_link_count"], 3)
+        self.assertEqual(
+            summary["accepted_link_count"] + summary["disputed_link_count"],
+            summary["semantic_link_count"],
+        )
 
         result = fused["result"]
         self.assertEqual(result["schema_version"], RESPONSE_SCHEMA_VERSION)
@@ -376,7 +381,12 @@ class TopologyFusionTest(unittest.TestCase):
         self.assertEqual(fused["rejected_links"], [])
 
         model["topology"]["negative_edges"] = [
-            {"source": "A", "target": "B", "reason": "visible gap"}
+            {
+                "source": "A",
+                "target": "B",
+                "reason": "visible gap",
+                "confidence": 0.95,
+            }
         ]
         fused = fuse_topology_payloads(cv, model)
         self.assertEqual(fused["result"]["links"], [])
@@ -385,6 +395,105 @@ class TopologyFusionTest(unittest.TestCase):
             fused["rejected_links"][0]["attributes"]["fusion_status"],
             "llm_rejected",
         )
+
+    def test_global_or_weak_negative_evidence_disputes_cv_link(self):
+        cv = {
+            "objects": [
+                {
+                    "business_id": "A",
+                    "type": "device",
+                    "label": "A",
+                    "canvas_id": "c1",
+                    "bbox": [10, 10, 20, 20],
+                    "confidence": 0.9,
+                },
+                {
+                    "business_id": "B",
+                    "type": "device",
+                    "label": "B",
+                    "canvas_id": "c1",
+                    "bbox": [80, 10, 20, 20],
+                    "confidence": 0.9,
+                },
+            ],
+            "links": [
+                {
+                    "source": "A",
+                    "target": "B",
+                    "type": "topology_link",
+                    "confidence": 0.75,
+                }
+            ],
+        }
+        model = {
+            "nodes": [{"id": "A"}, {"id": "B"}],
+            "links": [],
+            "no_connections": True,
+            "confidence": 0.99,
+        }
+
+        fused = fuse_topology_payloads(cv, model)
+
+        self.assertEqual(len(fused["result"]["links"]), 1)
+        disputed = fused["result"]["links"][0]
+        self.assertEqual(disputed["attributes"]["fusion_status"], "conflict")
+        self.assertEqual(disputed["attributes"]["relation_state"], "disputed")
+        self.assertEqual(
+            disputed["attributes"]["negative_evidence_kind"],
+            "global_no_connections",
+        )
+        self.assertEqual(fused["summary"]["disputed_link_count"], 1)
+        self.assertEqual(fused["summary"]["rejected_link_count"], 0)
+        self.assertEqual(len(fused["disputed_links"]), 1)
+
+        model["no_connections"] = False
+        model["negative_edges"] = [
+            {
+                "source": "A",
+                "target": "B",
+                "reason": "uncertain visual gap",
+                "confidence": 0.4,
+            }
+        ]
+        fused = fuse_topology_payloads(cv, model)
+        self.assertEqual(len(fused["result"]["links"]), 1)
+        self.assertEqual(fused["summary"]["disputed_link_count"], 1)
+        self.assertEqual(
+            fused["result"]["links"][0]["attributes"][
+                "negative_evidence_confidence"
+            ],
+            0.4,
+        )
+
+        cv["links"][0]["confidence"] = 0.95
+        model["negative_edges"][0]["confidence"] = 0.99
+        fused = fuse_topology_payloads(cv, model)
+        self.assertEqual(len(fused["result"]["links"]), 1)
+        self.assertEqual(
+            fused["result"]["links"][0]["attributes"]["relation_state"],
+            "disputed",
+        )
+
+        cv["links"][0]["confidence"] = 0.75
+        del model["negative_edges"][0]["confidence"]
+        fused = fuse_topology_payloads(cv, model)
+        self.assertEqual(
+            fused["result"]["links"][0]["attributes"]["relation_state"],
+            "disputed",
+        )
+        self.assertNotIn(
+            "negative_evidence_confidence",
+            fused["result"]["links"][0]["attributes"],
+        )
+
+        model["links"] = [{"source": "A", "target": "B", "confidence": 0.92}]
+        model["negative_edges"][0]["confidence"] = 0.99
+        fused = fuse_topology_payloads(cv, model)
+        self.assertEqual(
+            fused["result"]["links"][0]["attributes"]["relation_state"],
+            "disputed",
+        )
+        self.assertEqual(fused["summary"]["rejected_link_count"], 0)
 
     def test_layer_template_infers_rendering_only_geometry(self):
         cv = {
@@ -430,6 +539,51 @@ class TopologyFusionTest(unittest.TestCase):
         self.assertAlmostEqual(inferred["center"][0], 120.0)
         self.assertEqual(fused["summary"]["spatially_inferred_object_count"], 1)
         self.assertEqual(len(fused["result"]["objects"]), 2)
+        self.assertEqual(fused["result"], fused["grounded_graph"])
+        self.assertEqual(fused["summary"]["display_only_object_count"], 1)
+        display_b = next(
+            item
+            for item in fused["display_graph"]["objects"]
+            if item["business_id"] == "B"
+        )
+        self.assertTrue(display_b["attributes"]["rendering_only"])
+        self.assertFalse(display_b["attributes"]["interaction_eligible"])
+        for item in fused["display_graph"]["objects"]:
+            self.assertFalse(item["attributes"]["interaction_eligible"])
+        self.assertNotIn(
+            "display_status",
+            fused["result"]["objects"][0].get("attributes", {}),
+        )
+
+    def test_remaining_unlocated_geometry_stays_out_of_display_graph(self):
+        cv = {
+            "objects": [
+                {
+                    "business_id": "A",
+                    "type": "device",
+                    "label": "A",
+                    "canvas_id": "c1",
+                    "bbox": [10, 10, 20, 20],
+                    "confidence": 0.9,
+                }
+            ],
+            "links": [],
+        }
+        model = {
+            "nodes": [{"id": "A"}, {"id": "B"}],
+            "links": [{"source": "A", "target": "B"}],
+        }
+
+        fused = fuse_topology_payloads(cv, model)
+
+        self.assertEqual(fused["summary"]["remaining_unlocated_object_count"], 1)
+        self.assertEqual(
+            {item["business_id"] for item in fused["display_graph"]["objects"]},
+            {"A"},
+        )
+        self.assertEqual(fused["display_only_links"], [])
+        self.assertEqual(fused["display_graph"]["links"], [])
+        self.assertEqual(len(fused["unresolved_links"]), 1)
 
     def test_star_template_is_preserved_and_derives_missing_edges(self):
         cv = {
@@ -479,6 +633,28 @@ class TopologyFusionTest(unittest.TestCase):
             item for item in fused["unlocated_objects"] if item["business_id"] == "L2"
         )
         self.assertEqual(l2["attributes"]["geometry_status"], "spatially_inferred")
+        display_link = next(
+            link
+            for link in fused["display_only_links"]
+            if link["target"] == "L2"
+        )
+        self.assertEqual(
+            display_link["attributes"]["geometry_status"], "display_only"
+        )
+        self.assertTrue(display_link["attributes"]["rendering_only"])
+        self.assertFalse(display_link["attributes"]["interaction_eligible"])
+        self.assertNotIn(
+            "L2", {link["target"] for link in fused["result"]["links"]}
+        )
+        for item in fused["display_graph"]["objects"]:
+            self.assertFalse(item["attributes"]["interaction_eligible"])
+        for item in fused["display_graph"]["links"]:
+            self.assertFalse(item["attributes"]["interaction_eligible"])
+        self.assertEqual(
+            fused["summary"]["accepted_link_count"]
+            + fused["summary"]["disputed_link_count"],
+            fused["summary"]["semantic_link_count"],
+        )
 
     def test_model_pixel_geometry_and_explicit_star_enter_analysis_result(self):
         cv = {

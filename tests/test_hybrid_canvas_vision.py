@@ -127,6 +127,69 @@ class HybridCanvasVisionAdapterTest(unittest.TestCase):
             result["links"][0]["attributes"]["fusion_status"], "confirmed"
         )
         self.assertIn("structure_templates", result["fusion_analysis"])
+        self.assertIn("grounded_graph", result["fusion_analysis"])
+        self.assertIn("display_graph", result["fusion_analysis"])
+        self.assertIn("semantic_graph", result["fusion_analysis"])
+        self.assertEqual(
+            result["objects"],
+            result["fusion_analysis"]["grounded_graph"]["objects"],
+        )
+
+    def test_inferred_geometry_stays_inside_display_analysis(self):
+        model = {
+            "topology": {
+                "layers": [
+                    {
+                        "name": "network",
+                        "devices": [
+                            {
+                                "id": "GW001",
+                                "connections": {"down": ["CORE-001"]},
+                            },
+                            {
+                                "id": "AGG-003",
+                                "connections": {"up": ["CORE-001"]},
+                            },
+                            {
+                                "id": "CORE-001",
+                                "connections": {
+                                    "up": ["GW001"],
+                                    "down": ["AGG-003"],
+                                },
+                            },
+                        ],
+                    }
+                ]
+            }
+        }
+        adapter = HybridCanvasVisionAdapter(
+            local_adapter=StaticAdapter(local_result()),
+            model_adapter=StaticAdapter(model),
+        )
+
+        result = adapter.recognize(page={"url": "test"}, frames=())
+
+        self.assertNotIn("AGG-003", {item["business_id"] for item in result["objects"]})
+        self.assertNotIn(
+            "AGG-003",
+            {endpoint for link in result["links"] for endpoint in (link["source"], link["target"])},
+        )
+        display_graph = result["fusion_analysis"]["display_graph"]
+        self.assertIn(
+            "AGG-003", {item["business_id"] for item in display_graph["objects"]}
+        )
+        self.assertIn(
+            "AGG-003",
+            {
+                endpoint
+                for link in display_graph["links"]
+                for endpoint in (link["source"], link["target"])
+            },
+        )
+        self.assertEqual(
+            result["objects"],
+            result["fusion_analysis"]["grounded_graph"]["objects"],
+        )
 
     def test_passes_local_cv_candidates_to_context_aware_model(self):
         local = StaticAdapter(local_result())

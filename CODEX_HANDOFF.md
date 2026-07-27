@@ -221,9 +221,11 @@ confidence
 - 补充模型角色、厂商、型号、层级和连接。
 - 支持直接连接和多跳路径等价。
 - 保留 `star`、`layered` 结构模板。
-- 支持模型明确否决 CV 误连。
+- 支持模型明确否决 CV 误连，但全局 `no_connections` 不再无条件硬删除 CV 链路。
+- 保留负证据置信度，并以 `accepted`、`disputed`、`rejected` 三态决策。
 - 对仅用于渲染的未定位节点推断坐标。
-- 推断坐标不可用于真实 GUI 点击。
+- 同时输出 grounded、display 和 semantic 三层图。
+- 推断坐标及 display-only 链路不可用于真实 GUI 点击。
 
 常见 `fusion_status`：
 
@@ -237,6 +239,19 @@ llm_rejected
 spatially_inferred
 ```
 
+融合顶层视图：
+
+```text
+result / grounded_graph  真实像素落地图，保持既有消费者兼容
+display_graph            grounded + 可渲染推断节点/链路，始终不可交互
+semantic_graph           完整语义并集，可包含未定位节点和 unresolved 链路
+```
+
+链路另有正交字段 `relation_state=accepted|disputed|rejected`。仅高置信的明确
+pair-level 负证据与低于阈值的 CV 链路组合会真正 rejected；全局
+`no_connections`、孤立声明、弱负证据和高置信 CV 链路均保留为 disputed。
+`display_only_links`、`disputed_links`、`rejected_links` 分别保留审计明细。
+
 ## 7. 推荐测试命令
 
 ### 7.1 自动化测试
@@ -244,7 +259,7 @@ spatially_inferred
 开发环境最后一次结果：
 
 ```text
-237 项通过
+240 项通过
 42 项跳过
 ```
 
@@ -419,14 +434,21 @@ result/success 在截止线仍报 timeout
 
 模型返回多个协议对象或损坏围栏
 → 拒绝歧义响应，不绕过严格协议校验
+
+模型独有节点有推断坐标但链路在主结果中不可见
+→ 保持 grounded 点击安全，同时在 display_graph 输出 display-only 节点和链路
+
+模型用 no_connections 全局否决 CV 链路
+→ 改为 disputed；只有高置信明确负边与较弱 CV 证据组合才真正 rejected
 ```
 
 ## 11. 后续建议
 
 按当前用户优先级排序：
 
-1. 在测试环境同步最新 `main`，重新确认第三张图片端到端返回 `status=ok`。
-2. 暂停准确率优化，先冻结已打通的五文件产物链路。
+1. 在测试环境同步最新 `main`，重新确认三张图片的 grounded、display、semantic
+   计数及 disputed/rejected 状态。
+2. 建立三张真实图片的人工节点/链路真值，不再用“链接越多越好”判断准确率。
 3. 后续再拆分 HTTP timeout 和离线模型 timeout，并考虑 idle timeout。
 4. 增加正式 events 恢复 CLI，避免成功结果因后处理失败而需要重新调用模型。
 5. 建立多图片黄金数据集，统计节点、连接、层级、厂商和型号准确率。

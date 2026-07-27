@@ -26,7 +26,7 @@ CodeAgentCLI 的 Windows 启动方式、真实图片验证结论、已知限制�
 | 拓扑变化检测 | 节点、位置、链路增删及链路语义属性变化检测；关键变化触发重规划 |
 | 运行记忆 | SQLite 持久化任务、事件、检查点、场景和业务处理结果 |
 | KT5 接入基础 | 感知拓扑与生成拓扑共用统一 Scene Graph 契约 |
-| 自动化测试 | 当前 237 项通过，42 项因缺少可选 RapidOCR/OpenCV 依赖而跳过 |
+| 自动化测试 | 当前 240 项通过，42 项因缺少可选 RapidOCR/OpenCV 依赖而跳过 |
 
 ## 业务场景
 
@@ -181,6 +181,16 @@ CodeAgent 通过 `Read` 检查，但提示中只传递 CV 节点 ID、标签、�
 第二个 fenced block、第二个协议对象、损坏围栏、重复 JSON key、非法数值和未知
 协议字段仍会拒绝。
 
+融合结果同时提供三种视图：`result`/`grounded_graph` 只保留具有可靠像素落地的
+节点和链路，继续用于现有页面感知；`display_graph` 额外包含具有推断渲染坐标的
+模型节点及其 `display_only` 链路，但统一标记为不可交互；`semantic_graph` 保留
+完整语义并集，包括仍无法定位的节点和链路。推断坐标不会进入可点击结果。
+
+模型负证据使用独立的 `relation_state=accepted|disputed|rejected`。全局
+`no_connections`、缺少置信度的负边、弱负证据或高置信 CV 像素链路只会进入
+`disputed`，不会静默删除；只有高置信的明确边级负证据与较弱 CV 链路同时满足
+阈值时才进入 `rejected_links`。
+
 模型阶段失败后，可复用 CV 文件只重试模型识别与融合：
 
 ```powershell
@@ -217,7 +227,9 @@ $f.summary | Format-List
 
 至少应满足 `cv_object_count > 0`、`model_object_count > 0` 和
 `fused_object_count > 0`。这些条件证明三阶段链路已经执行，不代表所有节点、
-厂商、型号和连接都已达到生产准确率。
+厂商、型号和连接都已达到生产准确率。新增的 `grounded_*`、`display_*`、
+`semantic_*`、`disputed_link_count` 和 `grounding_coverage` 可分别衡量像素落地、
+可展示语义、完整语义和冲突保留情况。
 
 也可以逐步执行，以便单独重试模型或调整融合算法而不重复运行 CV：
 
@@ -423,13 +435,13 @@ tests/                         自动化测试
 python -m unittest discover -s tests
 ```
 
-当前结果为 237 项通过、42 项跳过。跳过项来自当前开发环境缺少可选
+当前结果为 240 项通过、42 项跳过。跳过项来自当前开发环境缺少可选
 RapidOCR/OpenCV 运行依赖，不是测试失败。覆盖范围包括意图路由、缺参澄清、
 动作授权、Playbook 预检、步骤注册、资源锁、执行后置条件、运行记忆、页面采集
 失败回退、DOM/ARIA `ui_tree`、文本拓扑重建、本地 RapidOCR/OpenCV、密集星型、
 图标与偏移标签、分层主干、紧凑交叉线、容器外框、密集纹理、OCR 标签遮挡、
 500 节点候选预算、缩放虚线与黑底彩色加权图、HTTP/CodeAgent Vision、Read
 像素证据、重复 Read、截止线成功事件、精简模型协议、前置/尾随模型说明、
-唯一协议对象、共享契约、
+唯一协议对象、grounded/display/semantic 三层图、软否决、共享契约、
 TLS/图片完整性、pixels-only CLI、DOM-like 语义树、不可执行 grounding 门禁、
 缓存命中、并行链路变化、重新绑定和重新规划。

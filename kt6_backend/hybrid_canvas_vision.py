@@ -115,6 +115,11 @@ class HybridCanvasVisionAdapter:
             name: copy.deepcopy(fused.get(name, []))
             for name in (
                 "structure_templates",
+                "grounded_graph",
+                "display_graph",
+                "semantic_graph",
+                "display_only_links",
+                "disputed_links",
                 "rejected_links",
                 "unlocated_objects",
                 "unresolved_links",

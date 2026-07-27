@@ -13,7 +13,10 @@ from .topology_vision_contract import RESPONSE_SCHEMA_VERSION, TopologyVisionCon
 
 
 FUSION_SCHEMA_VERSION = "kt6.topology-fusion.v2"
+DISPLAY_SCHEMA_VERSION = "kt6.topology-display.v1"
 DEFAULT_MODEL_CONFIDENCE = 0.5
+STRONG_NEGATIVE_CONFIDENCE = 0.85
+WEAK_CV_LINK_CONFIDENCE = 0.8
 
 _RESERVED_ATTRIBUTE_KEYS = frozenset(
     {
@@ -118,6 +121,7 @@ def fuse_topology_payloads(
             attributes.update(
                 {
                     "fusion_status": unresolved_status,
+                    "relation_state": "accepted",
                     "evidence_sources": ["multimodal_model"],
                     "geometry_status": "unresolved_endpoint",
                     "resolution_reason": "model_endpoint_has_no_cv_geometry",
@@ -183,6 +187,15 @@ def fuse_topology_payloads(
         semantic_model_links=semantic_model_links,
         canvas_id=canvas_id,
     )
+    display_graph, display_only_objects, display_only_links = _build_display_graph(
+        result_objects=result_objects,
+        fused_links=fused_links,
+        unlocated_objects=unlocated_objects,
+        unresolved_links=unresolved_links,
+    )
+    display_graph["structure_templates"] = copy.deepcopy(
+        resolved_structure_templates
+    )
     confidence_values = [float(item["confidence"]) for item in result_objects]
     confidence_values.extend(float(item["confidence"]) for item in fused_links)
     global_confidence = (
@@ -204,12 +217,31 @@ def fuse_topology_payloads(
     }
     semantic_nodes = copy.deepcopy(result_objects) + copy.deepcopy(unlocated_objects)
     semantic_links = copy.deepcopy(fused_links) + copy.deepcopy(unresolved_links)
+    disputed_links = [
+        copy.deepcopy(item)
+        for item in semantic_links
+        if item.get("attributes", {}).get("relation_state") == "disputed"
+    ]
+    accepted_link_count = sum(
+        1
+        for item in semantic_links
+        if item.get("attributes", {}).get("relation_state", "accepted")
+        == "accepted"
+    )
+    grounding_coverage = (
+        round(len(result_objects) / len(semantic_nodes), 4) if semantic_nodes else 1.0
+    )
     return {
         "schema_version": FUSION_SCHEMA_VERSION,
         "summary": {
             "cv_object_count": len(cv_objects),
             "model_object_count": len(model_nodes),
             "fused_object_count": len(result_objects),
+            "grounded_object_count": len(result_objects),
+            "display_object_count": len(display_graph["objects"]),
+            "semantic_object_count": len(semantic_nodes),
+            "display_only_object_count": len(display_only_objects),
+            "grounding_coverage": grounding_coverage,
             "confirmed_object_count": object_statuses.get("confirmed", 0),
             "cv_only_object_count": object_statuses.get("cv_only", 0),
             "model_grounded_object_count": len(model_grounded_objects),
@@ -217,6 +249,13 @@ def fuse_topology_payloads(
             "cv_link_count": len(cv_links),
             "model_link_count": len(model_links),
             "fused_link_count": len(fused_links),
+            "grounded_link_count": len(fused_links),
+            "display_link_count": len(display_graph["links"]),
+            "semantic_link_count": len(semantic_links),
+            "display_only_link_count": len(display_only_links),
+            "accepted_link_count": accepted_link_count,
+            "disputed_link_count": len(disputed_links),
+            "rejected_link_count": len(rejected_links),
             "confirmed_link_count": link_statuses.get("confirmed", 0),
             "cv_only_link_count": link_statuses.get("cv_only", 0),
             "model_only_link_count": link_statuses.get("model_only", 0),
@@ -236,11 +275,27 @@ def fuse_topology_payloads(
         "model_metadata": model_metadata,
         "structure_templates": resolved_structure_templates,
         "result": result,
+        "grounded_graph": copy.deepcopy(result),
+        "display_graph": display_graph,
         "semantic_graph": {
             "nodes": semantic_nodes,
             "links": semantic_links,
             "structure_templates": copy.deepcopy(resolved_structure_templates),
         },
+        "display_only_links": sorted(
+            display_only_links,
+            key=lambda item: (
+                _identifier_sort_key(item["source"]),
+                _identifier_sort_key(item["target"]),
+            ),
+        ),
+        "disputed_links": sorted(
+            disputed_links,
+            key=lambda item: (
+                _identifier_sort_key(item["source"]),
+                _identifier_sort_key(item["target"]),
+            ),
+        ),
         "unlocated_objects": sorted(
             unlocated_objects, key=lambda item: _identifier_sort_key(item["business_id"])
         ),
@@ -334,6 +389,7 @@ def _resolve_negative_evidence(
                 "reason": _text(
                     raw_pair.get("reason"), "explicit_model_rejection", 500
                 ),
+                "confidence": _optional_confidence(raw_pair.get("confidence")),
             }
         )
     isolated_nodes = [
@@ -342,6 +398,9 @@ def _resolve_negative_evidence(
     ]
     return {
         "reject_all": evidence.get("reject_all") is True,
+        "reject_all_confidence": _optional_confidence(
+            evidence.get("reject_all_confidence")
+        ),
         "pairs": pairs,
         "isolated_nodes": isolated_nodes,
     }
@@ -863,11 +922,15 @@ def _normalize_negative_evidence(
             raise TopologyFusionError(f"model topology.{field_name} must be a list")
         for index, raw_item in enumerate(raw_items):
             reason = "explicit_model_rejection"
+            negative_confidence: float | None = None
             if isinstance(raw_item, Mapping):
                 raw_source = raw_item.get("source")
                 raw_target = raw_item.get("target")
                 if raw_item.get("reason") is not None:
                     reason = _text(raw_item.get("reason"), reason, 500)
+                negative_confidence = _optional_confidence(
+                    raw_item.get("confidence")
+                )
             elif isinstance(raw_item, (list, tuple)) and len(raw_item) == 2:
                 raw_source, raw_target = raw_item
             else:
@@ -888,7 +951,14 @@ def _normalize_negative_evidence(
             if pair in seen_pairs:
                 continue
             seen_pairs.add(pair)
-            pairs.append({"source": source, "target": target, "reason": reason})
+            pairs.append(
+                {
+                    "source": source,
+                    "target": target,
+                    "reason": reason,
+                    "confidence": negative_confidence,
+                }
+            )
 
     isolated_nodes: set[str] = set()
     for node_id, raw_node in connected_nodes:
@@ -905,6 +975,7 @@ def _normalize_negative_evidence(
 
     return {
         "reject_all": topology.get("no_connections") is True,
+        "reject_all_confidence": _optional_confidence(topology.get("confidence")),
         "pairs": pairs,
         "isolated_nodes": sorted(isolated_nodes, key=_identifier_sort_key),
     }
@@ -962,10 +1033,12 @@ def _fuse_links(
         key = _undirected_pair(link["source"], link["target"])
         model_by_pair.setdefault(key, link)
 
-    negative_reasons = {
-        _undirected_pair(str(item["source"]), str(item["target"])): str(
-            item.get("reason", "explicit_model_rejection")
-        )
+    negative_by_pair = {
+        _undirected_pair(str(item["source"]), str(item["target"])): {
+            "kind": "explicit_pair",
+            "reason": str(item.get("reason", "explicit_model_rejection")),
+            "confidence": _optional_confidence(item.get("confidence")),
+        }
         for item in negative_evidence.get("pairs", [])
         if isinstance(item, Mapping) and item.get("source") and item.get("target")
     }
@@ -973,21 +1046,30 @@ def _fuse_links(
         str(node_id) for node_id in negative_evidence.get("isolated_nodes", [])
     }
     reject_all = negative_evidence.get("reject_all") is True
+    reject_all_confidence = _optional_confidence(
+        negative_evidence.get("reject_all_confidence")
+    )
 
-    def rejection_reason(pair: tuple[str, str]) -> str | None:
-        explicit_reason = negative_reasons.get(pair)
-        if explicit_reason is not None:
-            return explicit_reason
+    def negative_for(pair: tuple[str, str]) -> dict[str, Any] | None:
+        explicit = negative_by_pair.get(pair)
+        if explicit is not None:
+            return explicit
         if pair[0] in isolated_nodes or pair[1] in isolated_nodes:
-            return "model_declares_endpoint_has_no_connections"
+            return {
+                "kind": "isolated_endpoint",
+                "reason": "model_declares_endpoint_has_no_connections",
+                "confidence": None,
+            }
         if reject_all and pair[0] in matched_cv_ids and pair[1] in matched_cv_ids:
-            return "model_explicitly_declares_no_connections"
+            return {
+                "kind": "global_no_connections",
+                "reason": "model_explicitly_declares_no_connections",
+                "confidence": reject_all_confidence,
+            }
         return None
 
     active_cv_links = [
-        link
-        for pair, link in cv_by_pair.items()
-        if rejection_reason(pair) is None
+        link for pair, link in cv_by_pair.items() if negative_for(pair) is None
     ]
     cv_adjacency = _graph_adjacency(active_cv_links)
     model_adjacency = _graph_adjacency(semantic_model_links)
@@ -997,30 +1079,44 @@ def _fuse_links(
     for key in sorted(set(cv_by_pair) | set(model_by_pair)):
         cv_link = cv_by_pair.get(key)
         model_link = model_by_pair.get(key)
-        rejected_reason = rejection_reason(key) if cv_link is not None else None
-        if cv_link is not None and rejected_reason is not None and model_link is None:
-            confidence = float(cv_link["confidence"])
-            attributes = _safe_attributes(cv_link.get("attributes", {}))
-            attributes.update(
-                {
-                    "fusion_status": "llm_rejected",
-                    "evidence_sources": ["local_cv", "multimodal_model"],
-                    "cv_confidence": confidence,
-                    "rejection_reason": rejected_reason,
-                    "relation_state": "rejected",
-                }
+        negative = negative_for(key) if cv_link is not None else None
+        if cv_link is not None and negative is not None and model_link is None:
+            cv_confidence = float(cv_link["confidence"])
+            negative_confidence = _optional_confidence(negative.get("confidence"))
+            hard_rejection = (
+                negative.get("kind") == "explicit_pair"
+                and negative_confidence is not None
+                and negative_confidence >= STRONG_NEGATIVE_CONFIDENCE
+                and cv_confidence < WEAK_CV_LINK_CONFIDENCE
             )
-            rejected.append(
-                {
-                    "relation_id": f"fusion-rejected:{cv_link['source']}:{cv_link['target']}",
-                    "source": str(cv_link["source"]),
-                    "target": str(cv_link["target"]),
-                    "type": str(cv_link["type"]),
-                    "confidence": round(confidence, 4),
-                    "attributes": attributes,
-                }
-            )
-            continue
+            if hard_rejection:
+                attributes = _safe_attributes(cv_link.get("attributes", {}))
+                attributes.update(
+                    {
+                        "fusion_status": "llm_rejected",
+                        "relation_state": "rejected",
+                        "evidence_sources": ["local_cv", "multimodal_model"],
+                        "cv_confidence": cv_confidence,
+                        "rejection_reason": str(negative["reason"]),
+                        "negative_evidence_kind": str(negative["kind"]),
+                        "negative_evidence_confidence": negative_confidence,
+                    }
+                )
+                rejected.append(
+                    {
+                        "relation_id": (
+                            f"fusion-rejected:{cv_link['source']}:"
+                            f"{cv_link['target']}"
+                        ),
+                        "source": str(cv_link["source"]),
+                        "target": str(cv_link["target"]),
+                        "type": str(cv_link["type"]),
+                        "confidence": round(cv_confidence, 4),
+                        "attributes": attributes,
+                    }
+                )
+                continue
+
         if cv_link is not None and model_link is not None:
             source = str(model_link["source"])
             target = str(model_link["target"])
@@ -1029,7 +1125,8 @@ def _fuse_links(
             attributes = _safe_attributes(cv_link.get("attributes", {}))
             attributes.update(
                 {
-                    "fusion_status": "conflict" if rejected_reason else "confirmed",
+                    "fusion_status": "conflict" if negative else "confirmed",
+                    "relation_state": "disputed" if negative else "accepted",
                     "evidence_sources": ["local_cv", "multimodal_model"],
                     "cv_confidence": confidence,
                     "model_attributes": _safe_attributes(
@@ -1042,13 +1139,21 @@ def _fuse_links(
                     ),
                 }
             )
-            if rejected_reason:
+            if negative:
                 attributes.update(
                     {
-                        "conflict_reason": "model_contains_positive_and_negative_edge_evidence",
-                        "negative_evidence_reason": rejected_reason,
+                        "conflict_reason": (
+                            "model_contains_positive_and_negative_edge_evidence"
+                        ),
+                        "negative_evidence_reason": str(negative["reason"]),
+                        "negative_evidence_kind": str(negative["kind"]),
                     }
                 )
+                negative_confidence = _optional_confidence(
+                    negative.get("confidence")
+                )
+                if negative_confidence is not None:
+                    attributes["negative_evidence_confidence"] = negative_confidence
             if model_link.get("confidence") is not None:
                 attributes["model_confidence"] = model_link["confidence"]
         elif cv_link is not None:
@@ -1057,39 +1162,62 @@ def _fuse_links(
             relation_type = str(cv_link["type"])
             confidence = float(cv_link["confidence"])
             attributes = _safe_attributes(cv_link.get("attributes", {}))
-            model_path = _find_graph_path(
-                model_adjacency,
-                source,
-                target,
-                max_hops=4,
-                allow_internal=lambda node_id: _model_path_internal_allowed(
-                    node_id, model_nodes_by_semantic_id
-                ),
-            )
-            source_layer = model_layers_by_cv_id.get(source)
-            target_layer = model_layers_by_cv_id.get(target)
-            same_model_layer = bool(source_layer and source_layer == target_layer)
-            fusion_status = "path_equivalent" if model_path is not None else "cv_only"
-            attributes.update(
-                {
-                    "fusion_status": fusion_status,
-                    "evidence_sources": (
-                        ["local_cv", "multimodal_model"]
-                        if model_path is not None
-                        else ["local_cv"]
-                    ),
-                    "cv_confidence": confidence,
-                }
-            )
-            if model_path is not None:
+            if negative:
                 attributes.update(
                     {
-                        "equivalence_kind": "cv_direct_model_logical_path",
-                        "equivalent_model_path": model_path,
+                        "fusion_status": "conflict",
+                        "relation_state": "disputed",
+                        "evidence_sources": ["local_cv", "multimodal_model"],
+                        "cv_confidence": confidence,
+                        "conflict_reason": "model_negative_evidence_disputes_cv_link",
+                        "negative_evidence_reason": str(negative["reason"]),
+                        "negative_evidence_kind": str(negative["kind"]),
                     }
                 )
-            elif same_model_layer:
-                attributes["model_layer_context"] = source_layer
+                negative_confidence = _optional_confidence(
+                    negative.get("confidence")
+                )
+                if negative_confidence is not None:
+                    attributes["negative_evidence_confidence"] = negative_confidence
+            else:
+                model_path = _find_graph_path(
+                    model_adjacency,
+                    source,
+                    target,
+                    max_hops=4,
+                    allow_internal=lambda node_id: _model_path_internal_allowed(
+                        node_id, model_nodes_by_semantic_id
+                    ),
+                )
+                source_layer = model_layers_by_cv_id.get(source)
+                target_layer = model_layers_by_cv_id.get(target)
+                same_model_layer = bool(
+                    source_layer and source_layer == target_layer
+                )
+                fusion_status = (
+                    "path_equivalent" if model_path is not None else "cv_only"
+                )
+                attributes.update(
+                    {
+                        "fusion_status": fusion_status,
+                        "relation_state": "accepted",
+                        "evidence_sources": (
+                            ["local_cv", "multimodal_model"]
+                            if model_path is not None
+                            else ["local_cv"]
+                        ),
+                        "cv_confidence": confidence,
+                    }
+                )
+                if model_path is not None:
+                    attributes.update(
+                        {
+                            "equivalence_kind": "cv_direct_model_logical_path",
+                            "equivalent_model_path": model_path,
+                        }
+                    )
+                elif same_model_layer:
+                    attributes["model_layer_context"] = source_layer
         else:
             assert model_link is not None
             source = str(model_link["source"])
@@ -1120,6 +1248,7 @@ def _fuse_links(
             attributes.update(
                 {
                     "fusion_status": fusion_status,
+                    "relation_state": "accepted",
                     "evidence_sources": (
                         ["local_cv", "multimodal_model"]
                         if cv_path is not None
@@ -1432,6 +1561,100 @@ def _infer_unlocated_geometry(
     return inferred_objects
 
 
+def _build_display_graph(
+    *,
+    result_objects: list[dict[str, Any]],
+    fused_links: list[dict[str, Any]],
+    unlocated_objects: list[dict[str, Any]],
+    unresolved_links: list[dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    display_objects = copy.deepcopy(result_objects)
+    for item in display_objects:
+        attributes = item.setdefault("attributes", {})
+        attributes.update(
+            {
+                "interaction_eligible": False,
+                "display_status": "grounded",
+            }
+        )
+    display_only_objects: list[dict[str, Any]] = []
+    for item in unlocated_objects:
+        attributes = item.get("attributes", {})
+        bbox = item.get("bbox")
+        if (
+            not isinstance(attributes, Mapping)
+            or attributes.get("geometry_status") != "spatially_inferred"
+            or not isinstance(bbox, list)
+            or len(bbox) != 4
+        ):
+            continue
+        display_item = copy.deepcopy(item)
+        display_attributes = display_item.setdefault("attributes", {})
+        display_attributes.update(
+            {
+                "rendering_only": True,
+                "interaction_eligible": False,
+                "display_status": "display_only",
+            }
+        )
+        display_only_objects.append(display_item)
+        display_objects.append(copy.deepcopy(display_item))
+
+    display_ids = {str(item["business_id"]) for item in display_objects}
+    display_links = copy.deepcopy(fused_links)
+    for item in display_links:
+        attributes = item.setdefault("attributes", {})
+        attributes.update(
+            {
+                "interaction_eligible": False,
+                "display_status": "grounded",
+            }
+        )
+    display_only_links: list[dict[str, Any]] = []
+    for item in unresolved_links:
+        if (
+            str(item["source"]) not in display_ids
+            or str(item["target"]) not in display_ids
+        ):
+            continue
+        display_link = copy.deepcopy(item)
+        attributes = display_link.setdefault("attributes", {})
+        previous_geometry_status = attributes.get(
+            "geometry_status", "unresolved_endpoint"
+        )
+        attributes.update(
+            {
+                "geometry_status": "display_only",
+                "promoted_from_geometry_status": previous_geometry_status,
+                "rendering_only": True,
+                "interaction_eligible": False,
+                "display_status": "display_only",
+            }
+        )
+        display_only_links.append(display_link)
+        display_links.append(copy.deepcopy(display_link))
+
+    confidence_values = [float(item["confidence"]) for item in display_objects]
+    confidence_values.extend(float(item["confidence"]) for item in display_links)
+    confidence = (
+        round(sum(confidence_values) / len(confidence_values), 4)
+        if confidence_values
+        else 0.0
+    )
+    return (
+        {
+            "schema_version": DISPLAY_SCHEMA_VERSION,
+            "confidence": confidence,
+            "objects": display_objects,
+            "links": display_links,
+            "co_channel_relations": [],
+            "interaction_eligible": False,
+        },
+        display_only_objects,
+        display_only_links,
+    )
+
+
 def _box_center(bbox: list[float]) -> tuple[float, float]:
     return bbox[0] + bbox[2] / 2.0, bbox[1] + bbox[3] / 2.0
 
@@ -1585,6 +1808,7 @@ def _safe_json(value: Any, depth: int = 0) -> Any:
 
 __all__ = [
     "DEFAULT_MODEL_CONFIDENCE",
+    "DISPLAY_SCHEMA_VERSION",
     "FUSION_SCHEMA_VERSION",
     "TopologyFusionError",
     "fuse_topology_payloads",
