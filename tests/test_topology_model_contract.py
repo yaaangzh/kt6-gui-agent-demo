@@ -100,16 +100,6 @@ class TopologyModelContractTest(unittest.TestCase):
             request["output_shape"]["schema_version"],
             MODEL_SCHEMA_VERSION,
         )
-        instructions = "\n".join(request["instructions"])
-        self.assertIn("free-form or irregular scatter layout", instructions)
-        self.assertIn("links=[]", instructions)
-        self.assertIn("structure_templates=[]", instructions)
-        self.assertIn("no_connections=true", instructions)
-        self.assertIn("resource-tree text", instructions)
-        self.assertIn("inspect every pair separately", instructions)
-        self.assertIn("clearly absent connector", instructions)
-        self.assertIn("cropped, occluded, truncated", instructions)
-        self.assertIn("undecidable rather than absent", instructions)
 
     def test_accepts_compact_semantic_response(self):
         payload = {
@@ -142,92 +132,6 @@ class TopologyModelContractTest(unittest.TestCase):
         )
 
         self.assertEqual(result, payload)
-
-    def test_rejects_no_connections_with_positive_links(self):
-        payload = {
-            "schema_version": MODEL_SCHEMA_VERSION,
-            "nodes": [{"id": "A"}, {"id": "B"}],
-            "links": [
-                {
-                    "source": "A",
-                    "target": "B",
-                    "type": "topology_link",
-                }
-            ],
-            "no_connections": True,
-        }
-
-        with self.assertRaisesRegex(
-            TopologyModelResponseError, "inconsistent with non-empty links"
-        ):
-            TopologyModelContract.parse_response_bytes(json.dumps(payload).encode())
-
-    def test_rejects_no_connections_with_star_template(self):
-        payload = {
-            "schema_version": MODEL_SCHEMA_VERSION,
-            "nodes": [{"id": "AGG-003"}, {"id": "ACC-010"}],
-            "links": [],
-            "structure_templates": [
-                {
-                    "template_id": "star-1",
-                    "type": "star",
-                    "center": "AGG-003",
-                    "leaves": ["ACC-010"],
-                }
-            ],
-            "no_connections": True,
-        }
-
-        with self.assertRaisesRegex(
-            TopologyModelResponseError, "inconsistent with a star"
-        ):
-            TopologyModelContract.parse_response_bytes(json.dumps(payload).encode())
-
-    def test_rejects_same_pair_in_positive_and_negative_edges(self):
-        payload = {
-            "schema_version": MODEL_SCHEMA_VERSION,
-            "nodes": [{"id": "GW-001"}, {"id": "CORE-001"}],
-            "links": [{"source": "GW001", "target": "CORE-001"}],
-            "negative_edges": [
-                {
-                    "source": "core001",
-                    "target": "gw-001",
-                    "reason": "connector appears absent",
-                }
-            ],
-        }
-
-        with self.assertRaisesRegex(
-            TopologyModelResponseError, "both a positive and negative edge"
-        ):
-            TopologyModelContract.parse_response_bytes(json.dumps(payload).encode())
-
-    def test_rejects_star_pair_also_marked_negative(self):
-        payload = {
-            "schema_version": MODEL_SCHEMA_VERSION,
-            "nodes": [{"id": "AGG-003"}, {"id": "ACC-010"}],
-            "links": [],
-            "structure_templates": [
-                {
-                    "template_id": "star-1",
-                    "type": "star",
-                    "center": "AGG-003",
-                    "leaves": ["ACC-010"],
-                }
-            ],
-            "negative_edges": [
-                {
-                    "source": "ACC010",
-                    "target": "AGG003",
-                    "reason": "connector appears absent",
-                }
-            ],
-        }
-
-        with self.assertRaisesRegex(
-            TopologyModelResponseError, "both a positive and negative edge"
-        ):
-            TopologyModelContract.parse_response_bytes(json.dumps(payload).encode())
 
     def test_accepts_one_json_code_fence_without_surrounding_prose(self):
         payload = {

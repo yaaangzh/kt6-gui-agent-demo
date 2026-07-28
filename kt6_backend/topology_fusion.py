@@ -16,17 +16,7 @@ FUSION_SCHEMA_VERSION = "kt6.topology-fusion.v2"
 DISPLAY_SCHEMA_VERSION = "kt6.topology-display.v1"
 DEFAULT_MODEL_CONFIDENCE = 0.5
 STRONG_NEGATIVE_CONFIDENCE = 0.85
-STRONG_CV_DIRECT_CONFIDENCE = 0.8
-
-_DIRECT_PIXEL_LINK_EVIDENCE = frozenset(
-    {
-        "connected_pixel_path",
-        "multi_angle_pixel_connector",
-        "orthogonal_pixel_connector",
-        "pixel_corridor_connector",
-        "pixel_path",
-    }
-)
+WEAK_CV_LINK_CONFIDENCE = 0.8
 
 _RESERVED_ATTRIBUTE_KEYS = frozenset(
     {
@@ -137,13 +127,8 @@ def fuse_topology_payloads(
                 else DEFAULT_MODEL_CONFIDENCE
             )
             attributes = _safe_attributes(model_link.get("attributes", {}))
-            model_directness = str(
-                attributes.get("directness", "")
-            ).strip().casefold()
             unresolved_status = (
-                "path_equivalent"
-                if model_directness == "path_equivalent"
-                else "structurally_derived"
+                "structurally_derived"
                 if attributes.get("derivation_status") == "structurally_derived"
                 else "model_only"
             )
@@ -154,7 +139,6 @@ def fuse_topology_payloads(
                     "evidence_sources": ["multimodal_model"],
                     "geometry_status": "unresolved_endpoint",
                     "resolution_reason": "model_endpoint_has_no_cv_geometry",
-                    "interaction_eligible": False,
                     "confidence_basis": (
                         "model_reported"
                         if model_link.get("confidence") is not None
@@ -162,13 +146,6 @@ def fuse_topology_payloads(
                     ),
                 }
             )
-            if model_directness == "path_equivalent":
-                attributes.update(
-                    {
-                        "equivalence_kind": "model_reported_indirect_relation",
-                        "render_as_direct": False,
-                    }
-                )
             unresolved_links.append(
                 {
                     "relation_id": (
@@ -214,7 +191,7 @@ def fuse_topology_payloads(
         semantic_model_links=semantic_model_links,
         model_nodes_by_semantic_id=model_nodes_by_semantic_id,
         negative_evidence=resolved_negative_evidence,
-        model_matched_cv_ids={str(cv_id) for cv_id in model_to_cv.values()},
+        matched_cv_ids={str(item["business_id"]) for item in result_objects},
         model_layers_by_cv_id=model_layers_by_cv_id,
     )
     unlocated_objects = _infer_unlocated_geometry(
@@ -325,8 +302,7 @@ def fuse_topology_payloads(
             "confirmed_link_count": link_statuses.get("confirmed", 0),
             "cv_only_link_count": link_statuses.get("cv_only", 0),
             "model_only_link_count": link_statuses.get("model_only", 0),
-            "path_equivalent_link_count": link_statuses.get("path_equivalent", 0)
-            + unresolved_statuses.get("path_equivalent", 0),
+            "path_equivalent_link_count": link_statuses.get("path_equivalent", 0),
             "structurally_derived_link_count": link_statuses.get(
                 "structurally_derived", 0
             )
@@ -1029,27 +1005,9 @@ def _normalize_model_payload(
         }
         and str(name).strip().lower() not in _RESERVED_ATTRIBUTE_KEYS
     }
-    deduplicated_links = _deduplicate_model_links(links)
-    positive_pairs = {
-        _undirected_pair(str(link["source"]), str(link["target"]))
-        for link in deduplicated_links
-    }
-    negative_pairs = {
-        _undirected_pair(str(item["source"]), str(item["target"]))
-        for item in negative_evidence.get("pairs", [])
-    }
-    if topology.get("no_connections") is True and deduplicated_links:
-        raise TopologyFusionError(
-            "model no_connections=true is inconsistent with positive links"
-        )
-    if positive_pairs & negative_pairs:
-        raise TopologyFusionError(
-            "model contains the same pair as both a positive and negative edge"
-        )
-
     return (
         nodes,
-        deduplicated_links,
+        _deduplicate_model_links(links),
         metadata,
         structure_templates,
         negative_evidence,
@@ -1169,7 +1127,7 @@ def _fuse_links(
     semantic_model_links: list[dict[str, Any]],
     model_nodes_by_semantic_id: Mapping[str, Mapping[str, Any]],
     negative_evidence: Mapping[str, Any],
-    model_matched_cv_ids: set[str],
+    matched_cv_ids: set[str],
     model_layers_by_cv_id: Mapping[str, str],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     cv_by_pair: dict[tuple[str, str], dict[str, Any]] = {}
@@ -1211,11 +1169,7 @@ def _fuse_links(
                 "reason": "model_declares_endpoint_has_no_connections",
                 "confidence": None,
             }
-        if (
-            reject_all
-            and pair[0] in model_matched_cv_ids
-            and pair[1] in model_matched_cv_ids
-        ):
+        if reject_all and pair[0] in matched_cv_ids and pair[1] in matched_cv_ids:
             return {
                 "kind": "global_no_connections",
                 "reason": "model_explicitly_declares_no_connections",
@@ -1242,7 +1196,7 @@ def _fuse_links(
                 negative.get("kind") == "explicit_pair"
                 and negative_confidence is not None
                 and negative_confidence >= STRONG_NEGATIVE_CONFIDENCE
-                and not _has_strong_direct_pixel_evidence(cv_link)
+                and cv_confidence < WEAK_CV_LINK_CONFIDENCE
             )
             if hard_rejection:
                 attributes = _safe_attributes(cv_link.get("attributes", {}))
@@ -1255,7 +1209,6 @@ def _fuse_links(
                         "rejection_reason": str(negative["reason"]),
                         "negative_evidence_kind": str(negative["kind"]),
                         "negative_evidence_confidence": negative_confidence,
-                        "interaction_eligible": False,
                     }
                 )
                 rejected.append(
@@ -1278,20 +1231,16 @@ def _fuse_links(
             target = str(model_link["target"])
             relation_type = _preferred_relation_type(cv_link, model_link)
             confidence = float(cv_link["confidence"])
-            model_attributes = _safe_attributes(model_link.get("attributes", {}))
-            model_path_equivalent = (
-                str(model_attributes.get("directness", "")).strip().casefold()
-                == "path_equivalent"
-            )
-            has_conflict = negative is not None or model_path_equivalent
             attributes = _safe_attributes(cv_link.get("attributes", {}))
             attributes.update(
                 {
-                    "fusion_status": "conflict" if has_conflict else "confirmed",
-                    "relation_state": "disputed" if has_conflict else "accepted",
+                    "fusion_status": "conflict" if negative else "confirmed",
+                    "relation_state": "disputed" if negative else "accepted",
                     "evidence_sources": ["local_cv", "multimodal_model"],
                     "cv_confidence": confidence,
-                    "model_attributes": model_attributes,
+                    "model_attributes": _safe_attributes(
+                        model_link.get("attributes", {})
+                    ),
                     "derivation_status": str(
                         model_link.get("attributes", {}).get(
                             "derivation_status", "model_reported"
@@ -1299,15 +1248,6 @@ def _fuse_links(
                     ),
                 }
             )
-            if model_path_equivalent:
-                attributes.update(
-                    {
-                        "conflict_reason": "model_reports_indirect_relation_for_cv_direct_pair",
-                        "equivalence_kind": "model_reported_indirect_relation",
-                        "interaction_eligible": False,
-                        "render_as_direct": False,
-                    }
-                )
             if negative:
                 attributes.update(
                     {
@@ -1316,7 +1256,6 @@ def _fuse_links(
                         ),
                         "negative_evidence_reason": str(negative["reason"]),
                         "negative_evidence_kind": str(negative["kind"]),
-                        "interaction_eligible": False,
                     }
                 )
                 negative_confidence = _optional_confidence(
@@ -1342,7 +1281,6 @@ def _fuse_links(
                         "conflict_reason": "model_negative_evidence_disputes_cv_link",
                         "negative_evidence_reason": str(negative["reason"]),
                         "negative_evidence_kind": str(negative["kind"]),
-                        "interaction_eligible": False,
                     }
                 )
                 negative_confidence = _optional_confidence(
@@ -1400,10 +1338,6 @@ def _fuse_links(
                 else DEFAULT_MODEL_CONFIDENCE
             )
             attributes = _safe_attributes(model_link.get("attributes", {}))
-            model_path_equivalent = (
-                str(attributes.get("directness", "")).strip().casefold()
-                == "path_equivalent"
-            )
             cv_path = _find_graph_path(
                 cv_adjacency,
                 source,
@@ -1415,7 +1349,7 @@ def _fuse_links(
             )
             fusion_status = (
                 "path_equivalent"
-                if model_path_equivalent or cv_path is not None
+                if cv_path is not None
                 else "structurally_derived"
                 if structurally_derived
                 else "model_only"
@@ -1437,15 +1371,7 @@ def _fuse_links(
                     ),
                 }
             )
-            if model_path_equivalent:
-                attributes.update(
-                    {
-                        "equivalence_kind": "model_reported_indirect_relation",
-                        "interaction_eligible": False,
-                        "render_as_direct": False,
-                    }
-                )
-            elif cv_path is not None:
+            if cv_path is not None:
                 attributes.update(
                     {
                         "equivalence_kind": "model_direct_cv_pixel_path",
@@ -1463,25 +1389,6 @@ def _fuse_links(
             }
         )
     return fused, rejected
-
-
-def _has_strong_direct_pixel_evidence(link: Mapping[str, Any]) -> bool:
-    """Return whether a CV edge is backed by a direct, traceable pixel path."""
-
-    try:
-        confidence = float(link.get("confidence", 0.0))
-    except (TypeError, ValueError):
-        return False
-    if confidence < STRONG_CV_DIRECT_CONFIDENCE:
-        return False
-    attributes = link.get("attributes", {})
-    if not isinstance(attributes, Mapping):
-        return False
-    directness = str(attributes.get("directness", "direct")).strip().casefold()
-    if directness not in {"", "direct"}:
-        return False
-    evidence = str(attributes.get("evidence", "")).strip().casefold()
-    return evidence in _DIRECT_PIXEL_LINK_EVIDENCE
 
 
 def _graph_adjacency(links: list[dict[str, Any]]) -> dict[str, set[str]]:

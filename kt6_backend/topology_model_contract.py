@@ -151,11 +151,6 @@ class TopologyModelContract:
                 "Call Read once for every exact frames[].local_path and do not read any other path.",
                 "Inspect the image pixels and use CV candidates only as fallible hints.",
                 "Return visible node semantics, hierarchy, connections, structure templates, and explicit rejections of incorrect CV links.",
-                "Treat a free-form or irregular scatter layout as a valid physical topology; spatial rows, columns, and proximity alone do not imply hierarchy or connections.",
-                "If the topology Canvas has no visible connectors, still return every clearly readable Canvas node with links=[], structure_templates=[], and no_connections=true.",
-                "When supplied CV links are present, inspect every pair separately even if no_connections=true; put each clearly absent connector in negative_edges, and omit only pairs that cannot be decided from pixels.",
-                "A connector that may be cropped, occluded, truncated at the image boundary, or routed through an off-canvas or hidden intermediate node is undecidable rather than absent; do not put that pair in negative_edges.",
-                "Do not promote navigation, toolbar, search, footer, or resource-tree text to topology nodes unless the same label is visibly rendered as a node inside the main topology Canvas.",
                 "Use exact visible business identifiers. Align harmless punctuation differences such as GW001 and GW-001 without inventing devices.",
                 "Do not return bbox, center, canvas coordinates, OCR evidence, provenance, Markdown, or commentary.",
                 "Only put a pair in negative_edges when a supplied CV link is clearly contradicted by the image.",
@@ -257,51 +252,7 @@ class TopologyModelContract:
         no_connections = payload.get("no_connections")
         if no_connections is not None and not isinstance(no_connections, bool):
             raise TopologyModelResponseError("no_connections must be a boolean")
-        if no_connections is True and payload["links"]:
-            raise TopologyModelResponseError(
-                "no_connections=true is inconsistent with non-empty links"
-            )
-        if no_connections is True and any(
-            template.get("type") == "star"
-            for template in payload.get("structure_templates", [])
-        ):
-            raise TopologyModelResponseError(
-                "no_connections=true is inconsistent with a star structure template"
-            )
-        cls._validate_relation_consistency(payload)
         return payload
-
-    @classmethod
-    def _validate_relation_consistency(cls, payload: Mapping[str, Any]) -> None:
-        positive_pairs = {
-            cls._identifier_pair(link["source"], link["target"])
-            for link in payload["links"]
-        }
-        for template in payload.get("structure_templates", []):
-            if template.get("type") != "star":
-                continue
-            center = template["center"]
-            positive_pairs.update(
-                cls._identifier_pair(center, leaf)
-                for leaf in template["leaves"]
-            )
-
-        negative_pairs = {
-            cls._identifier_pair(edge["source"], edge["target"])
-            for edge in payload.get("negative_edges", [])
-        }
-        if positive_pairs & negative_pairs:
-            raise TopologyModelResponseError(
-                "the same node pair cannot be both a positive and negative edge"
-            )
-
-    @staticmethod
-    def _identifier_pair(source: str, target: str) -> tuple[str, str]:
-        def key(value: str) -> str:
-            return re.sub(r"[\W_]+", "", value.casefold())
-
-        source_key, target_key = sorted((key(source), key(target)))
-        return source_key, target_key
 
     @classmethod
     def _decode_unique_model_json(cls, value: str) -> Any:
