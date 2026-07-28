@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
-from .codeagent_canvas_vision import CodeAgentVisionError
+from .codeagent_canvas_vision import (
+    CodeAgentVisionError,
+    CodeAgentVisionResponseError,
+)
 from .local_cv_canvas_vision import (
     LocalVisionDependencyError,
     LocalVisionRecognitionError,
@@ -21,6 +26,97 @@ from .topology_model_cli import (
     generate_model_artifact,
 )
 
+_DEGRADABLE_MODEL_ERROR_CODES = frozenset(
+    {
+        "ambiguous_model_response",
+        "final_step_incomplete",
+        "invalid_model_response",
+        "missing_final_text",
+        "step_incomplete",
+    }
+)
+
+
+def _can_degrade_to_local_cv(exc: CodeAgentVisionError) -> bool:
+    return (
+        isinstance(exc, CodeAgentVisionResponseError)
+        and exc.category == "model_response"
+        and exc.retryable
+        and exc.error_code in _DEGRADABLE_MODEL_ERROR_CODES
+    )
+
+
+def _model_error_payload(exc: CodeAgentVisionError) -> dict[str, Any]:
+    return {
+        "error": str(exc),
+        "error_type": type(exc).__name__,
+        "error_code": exc.error_code,
+        "category": exc.category,
+        "retryable": exc.retryable,
+    }
+
+
+def _local_cv_fallback(
+    cv_result: dict[str, Any],
+    *,
+    model_error: dict[str, Any],
+) -> dict[str, Any]:
+    fused = fuse_topology_payloads(
+        cv_result,
+        {"topology": {"nodes": [], "edges": []}},
+    )
+    summary = fused.get("summary")
+    if not isinstance(summary, dict):
+        raise TopologyFusionError("fusion summary must be an object")
+
+    result = fused.get("result")
+    result_objects = result.get("objects", []) if isinstance(result, dict) else []
+    if (
+        not isinstance(result_objects, list)
+        or not result_objects
+        or summary.get("cv_object_count", 0) < 1
+        or summary.get("grounded_object_count", 0) < 1
+    ):
+        raise TopologyFusionError(
+            "cannot degrade to local CV without grounded topology objects"
+        )
+    result_links = result.get("links", []) if isinstance(result, dict) else []
+    if not isinstance(result_links, list):
+        raise TopologyFusionError("fusion result links must be a list")
+    for graph_name in (
+        "result",
+        "grounded_graph",
+        "display_graph",
+        "semantic_graph",
+    ):
+        graph = fused.get(graph_name)
+        links = graph.get("links", []) if isinstance(graph, dict) else []
+        if not isinstance(links, list):
+            raise TopologyFusionError(f"{graph_name} links must be a list")
+        for link in links:
+            if not isinstance(link, dict):
+                raise TopologyFusionError(f"{graph_name} link must be an object")
+            attributes = link.setdefault("attributes", {})
+            if not isinstance(attributes, dict):
+                raise TopologyFusionError(
+                    f"{graph_name} link attributes must be an object"
+                )
+            attributes["relation_state"] = "disputed"
+            attributes["degradation_reason"] = "model_stage_failed"
+            attributes["interaction_eligible"] = False
+    fused["disputed_links"] = copy.deepcopy(result_links)
+    summary["accepted_link_count"] = 0
+    summary["disputed_link_count"] = len(result_links)
+    summary["degraded_to"] = "local_cv"
+    summary["model_error_code"] = model_error.get("error_code")
+    summary["model_error_category"] = model_error.get("category")
+    fused["degradation"] = {
+        "degraded_to": "local_cv",
+        "reason": "model_stage_failed",
+        "model_error": dict(model_error),
+    }
+    return fused
+
 
 def run_pipeline(
     image_path: Path,
@@ -35,18 +131,26 @@ def run_pipeline(
     max_attempts: int = DEFAULT_MODEL_MAX_ATTEMPTS,
     workdir: Path | None = None,
     reuse_cv: bool = False,
-) -> dict[str, Path]:
+) -> dict[str, Path | None]:
     output_dir.mkdir(parents=True, exist_ok=True)
     cv_path = output_dir / "cv-result.json"
     model_path = output_dir / "model-result.json"
     events_path = output_dir / "codeagent-events.jsonl"
     stderr_path = output_dir / "codeagent-stderr.log"
     fused_path = output_dir / "fused-result.json"
+    model_error_path = output_dir / "model-error.json"
 
     stale_paths = (
-        (model_path, events_path, stderr_path, fused_path)
+        (model_path, events_path, stderr_path, fused_path, model_error_path)
         if reuse_cv
-        else (cv_path, model_path, events_path, stderr_path, fused_path)
+        else (
+            cv_path,
+            model_path,
+            events_path,
+            stderr_path,
+            fused_path,
+            model_error_path,
+        )
     )
     for stale_path in stale_paths:
         try:
@@ -68,21 +172,38 @@ def run_pipeline(
             source_id=source_id,
             output_path=cv_path,
         )
-    model_result = generate_model_artifact(
-        image_path,
-        source_id=source_id,
-        output_path=model_path,
-        events_path=events_path,
-        stderr_path=stderr_path,
-        cv_path=cv_path,
-        executable=executable,
-        agent=agent,
-        permission_mode=permission_mode,
-        timeout_seconds=timeout_seconds,
-        idle_timeout_seconds=idle_timeout_seconds,
-        max_attempts=max_attempts,
-        workdir=workdir,
-    )
+    try:
+        model_result = generate_model_artifact(
+            image_path,
+            source_id=source_id,
+            output_path=model_path,
+            events_path=events_path,
+            stderr_path=stderr_path,
+            cv_path=cv_path,
+            executable=executable,
+            agent=agent,
+            permission_mode=permission_mode,
+            timeout_seconds=timeout_seconds,
+            idle_timeout_seconds=idle_timeout_seconds,
+            max_attempts=max_attempts,
+            workdir=workdir,
+        )
+    except CodeAgentVisionError as exc:
+        if not _can_degrade_to_local_cv(exc):
+            raise
+        model_error = _model_error_payload(exc)
+        write_json(model_error_path, model_error)
+        write_json(
+            fused_path,
+            _local_cv_fallback(cv_result, model_error=model_error),
+        )
+        return {
+            "cv": cv_path,
+            "events": events_path if events_path.is_file() else None,
+            "stderr": stderr_path if stderr_path.is_file() else None,
+            "fused": fused_path,
+            "model_error": model_error_path,
+        }
     write_json(fused_path, fuse_topology_payloads(cv_result, model_result))
     return {
         "cv": cv_path,
@@ -157,14 +278,23 @@ def main(argv: list[str] | None = None) -> int:
             workdir=args.workdir,
             reuse_cv=args.reuse_cv,
         )
+        degraded = "model_error" in paths
+        path_payload = {
+            name: str(path.resolve()) if path is not None else None
+            for name, path in paths.items()
+        }
+        if degraded:
+            path_payload["model"] = None
         print(
             json.dumps(
                 {
-                    "status": "ok",
-                    **{
-                        name: str(path.resolve())
-                        for name, path in paths.items()
-                    },
+                    "status": "degraded" if degraded else "ok",
+                    **(
+                        {"degraded_to": "local_cv"}
+                        if degraded
+                        else {}
+                    ),
+                    **path_payload,
                 },
                 ensure_ascii=False,
                 indent=2,

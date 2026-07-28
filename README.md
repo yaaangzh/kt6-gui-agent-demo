@@ -26,7 +26,7 @@ CodeAgentCLI 的 Windows 启动方式、真实图片验证结论、已知限制�
 | 拓扑变化检测 | 节点、位置、链路增删及链路语义属性变化检测；关键变化触发重规划 |
 | 运行记忆 | SQLite 持久化任务、事件、检查点、场景和业务处理结果 |
 | KT5 接入基础 | 感知拓扑与生成拓扑共用统一 Scene Graph 契约 |
-| 自动化测试 | 当前 249 项通过，42 项因缺少可选 RapidOCR/OpenCV 依赖而跳过 |
+| 自动化测试 | 当前共执行 262 项：220 项通过，42 项因缺少可选 RapidOCR/OpenCV 依赖而跳过 |
 
 ## 业务场景
 
@@ -140,8 +140,10 @@ python -m kt6_backend.topology_image_cli .\topology.png `
 ```
 
 若要避免 CodeAgent 推理时间占用 HTTP 请求，可使用分阶段单图流程。它会先生成
-本地 CV 文件，再独立调用 CodeAgent 生成模型文件，最后离线融合；模型阶段失败时，
-已完成的 CV 文件仍会保留：
+本地 CV 文件，再独立调用 CodeAgent 生成模型文件，最后离线融合。Local CV 已成功
+且模型阶段在有限重试后仍以白名单内的可恢复错误结束时，CLI 会明确返回
+`status=degraded`，保留模型诊断，并用 Local CV 生成 `fused-result.json`，不会
+丢弃已经识别出的像素节点。
 
 ```powershell
 python -m kt6_backend.topology_hybrid_cli .\topology.png `
@@ -192,6 +194,14 @@ KT6 会
 末尾 `result.result` 只是说明文字或无效文本，解析器会恢复该有效候选；多个不同
 的有效协议对象仍按歧义响应拒绝，不会猜测选择。
 
+无规律散点布局也是合法的物理拓扑。模型不得根据节点的行列、距离或网格外观臆造
+层级和连接；主画布没有可见连线时仍应返回全部清晰可读的画布节点，并使用
+`links=[]`、`structure_templates=[]` 和 `no_connections=true`。若 CV 提供了候选
+链路，模型仍必须逐对检查：只有像素上明确不存在的连接才写入 `negative_edges`，
+无法确认的配对必须省略，不能用全局布尔值代替逐边证据。连接可能被裁剪、遮挡、
+截断于画面边界，或经过画外/隐藏中间节点时，必须视为“无法确认”，不能作为负边。
+导航栏、工具栏、搜索框、状态栏及左侧资源树文本不能单独作为主画布节点证据。
+
 融合结果同时提供三种视图：`result`/`grounded_graph` 只保留具有可靠像素落地的
 节点和链路，继续用于现有页面感知；`display_graph` 额外包含具有推断渲染坐标的
 模型节点及其 `display_only` 链路，但统一标记为不可交互；`semantic_graph` 保留
@@ -207,9 +217,12 @@ KT6 会
 且不可点击。
 
 模型负证据使用独立的 `relation_state=accepted|disputed|rejected`。全局
-`no_connections`、缺少置信度的负边、弱负证据或高置信 CV 像素链路只会进入
-`disputed`，不会静默删除；只有高置信的明确边级负证据与较弱 CV 链路同时满足
-阈值时才进入 `rejected_links`。
+`no_connections` 只会把模型实际覆盖端点的 CV 链路标为 `disputed`，不会整图
+静默删除；缺少置信度或较弱的逐边负证据也保持 `disputed`。高置信、明确的
+pair-level 负证据可以拒绝仅由方向探测等启发式证据生成的 CV 误线；若 CV 同时具有
+足够置信度和可追踪的直接像素路径，则保留为 `disputed` 供复核，不能仅靠阈值删除。
+同一节点对同时出现在正边和负边中属于协议矛盾，会 fail-closed。争议、拒绝、间接
+及未落地链路均显式标为 `interaction_eligible=false`。
 
 模型阶段失败后，可复用 CV 文件只重试模型识别与融合：
 
@@ -225,7 +238,7 @@ python -m kt6_backend.topology_hybrid_cli .\topology.png `
 `--permission-mode` 仅接受 `dontAsk`（默认）或 `bypassPermissions`。后者只建议
 在隔离测试环境中显式使用，不会在代码中写死。
 
-成功后目录包含：
+正常成功（`status=ok`）后目录包含：
 
 ```text
 cv-result.json             本地 RapidOCR/OpenCV 原始结果
@@ -235,6 +248,18 @@ codeagent-stderr.log       CodeAgent 启动与错误诊断
 *.attempt-1.*              首次失败尝试的 events/stderr（发生重试时）
 fused-result.json          两份结果的离线融合结果
 ```
+
+允许降级的范围采用明确白名单，仅包含可恢复的模型响应问题：
+`ambiguous_model_response`、`invalid_model_response`、`missing_final_text`、
+`step_incomplete` 和 `final_step_incomplete`。这些错误在有限重试后仍失败时，不会
+伪造 `model-result.json`；目录会额外生成 `model-error.json`，并由 Local CV 单独
+生成 `fused-result.json`。
+
+只有融合后至少存在一个 Local CV 像素落地节点时，终端才以退出码 `0` 返回
+`status=degraded`、`degraded_to=local_cv` 和 `model=null`。未经模型确认的 CV 链路
+统一标记为 `relation_state=disputed`、`interaction_eligible=false`。缺少 Read
+证明、Read 后空闲或总预算耗尽、进程异常退出、transport/pipe 失败，以及启动、
+权限、路径、文件清理或完整性错误都不会降级，仍返回失败退出码。
 
 端到端成功时终端 JSON 的 `status` 为 `ok`，退出码为 `0`，并且上述五个文件
 全部生成。建议进一步确认融合计数：
@@ -253,6 +278,13 @@ $f.summary | Format-List
 可展示语义、完整语义和冲突保留情况。`exact_coordinate_mapping_count`、
 `compact_coordinate_mapping_count`、`unmatched_model_coordinate_count` 和
 `cv_only_coordinate_count` 用于审计节点与坐标是否真正对齐。
+
+若 `status=degraded`，则应确认 `cv_object_count > 0`、`fused_object_count > 0`、
+`model_object_count = 0`，并检查 `summary.model_error_code`、`model-error.json`
+以及 `disputed_links`。这是把降级产物视为“可供人工复核”的最低质量门槛，不是
+CLI 当前退出码之外的语义准确率保证；若计数不满足，或真实图片尚未按人工真值复核，
+不得把退出码 `0` 记作识别通过。对依赖角色、层级、厂商、型号或间接关系的拓扑，
+`status=degraded` 本身不能通过语义质量验收。
 
 也可以逐步执行，以便单独重试模型或调整融合算法而不重复运行 CV：
 
@@ -459,8 +491,8 @@ tests/                         自动化测试
 python -m unittest discover -s tests
 ```
 
-当前结果为 249 项通过、42 项跳过。跳过项来自当前开发环境缺少可选
-RapidOCR/OpenCV 运行依赖，不是测试失败。覆盖范围包括意图路由、缺参澄清、
+当前共执行 262 项：220 项通过、42 项跳过。跳过项来自当前开发环境缺少可选
+RapidOCR/OpenCV 运行依赖，不是失败。覆盖范围包括意图路由、缺参澄清、
 动作授权、Playbook 预检、步骤注册、资源锁、执行后置条件、运行记忆、页面采集
 失败回退、DOM/ARIA `ui_tree`、文本拓扑重建、本地 RapidOCR/OpenCV、密集星型、
 图标与偏移标签、分层主干、紧凑交叉线、容器外框、密集纹理、OCR 标签遮挡、

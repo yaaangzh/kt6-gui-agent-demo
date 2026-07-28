@@ -163,6 +163,9 @@ class TopologyFusionTest(unittest.TestCase):
             fused["unresolved_links"][0]["attributes"]["geometry_status"],
             "unresolved_endpoint",
         )
+        self.assertFalse(
+            fused["unresolved_links"][0]["attributes"]["interaction_eligible"]
+        )
         mappings = {
             item["semantic_node_id"]: item
             for item in fused["node_coordinate_mappings"]
@@ -547,6 +550,7 @@ class TopologyFusionTest(unittest.TestCase):
         self.assertEqual(fused["summary"]["disputed_link_count"], 1)
         self.assertEqual(fused["summary"]["rejected_link_count"], 0)
         self.assertEqual(len(fused["disputed_links"]), 1)
+        self.assertFalse(disputed["attributes"]["interaction_eligible"])
 
         model["no_connections"] = False
         model["negative_edges"] = [
@@ -570,11 +574,34 @@ class TopologyFusionTest(unittest.TestCase):
         cv["links"][0]["confidence"] = 0.95
         model["negative_edges"][0]["confidence"] = 0.99
         fused = fuse_topology_payloads(cv, model)
-        self.assertEqual(len(fused["result"]["links"]), 1)
+        self.assertEqual(fused["result"]["links"], [])
+        self.assertEqual(fused["summary"]["rejected_link_count"], 1)
+        self.assertFalse(
+            fused["rejected_links"][0]["attributes"]["interaction_eligible"]
+        )
+
+        cv["links"][0]["attributes"] = {
+            "evidence": "connected_pixel_path",
+            "directness": "direct",
+        }
+        fused = fuse_topology_payloads(cv, model)
+        self.assertEqual(fused["summary"]["rejected_link_count"], 0)
+        self.assertEqual(fused["summary"]["disputed_link_count"], 1)
         self.assertEqual(
             fused["result"]["links"][0]["attributes"]["relation_state"],
             "disputed",
         )
+        self.assertFalse(
+            fused["result"]["links"][0]["attributes"]["interaction_eligible"]
+        )
+
+        cv["links"][0]["attributes"] = {
+            "evidence": "directional_probe_component",
+            "directness": "direct",
+        }
+        fused = fuse_topology_payloads(cv, model)
+        self.assertEqual(fused["result"]["links"], [])
+        self.assertEqual(fused["summary"]["rejected_link_count"], 1)
 
         cv["links"][0]["confidence"] = 0.75
         del model["negative_edges"][0]["confidence"]
@@ -590,12 +617,350 @@ class TopologyFusionTest(unittest.TestCase):
 
         model["links"] = [{"source": "A", "target": "B", "confidence": 0.92}]
         model["negative_edges"][0]["confidence"] = 0.99
-        fused = fuse_topology_payloads(cv, model)
+        with self.assertRaisesRegex(
+            TopologyFusionError, "both a positive and negative edge"
+        ):
+            fuse_topology_payloads(cv, model)
+
+        model["negative_edges"] = []
+        model["no_connections"] = True
+        with self.assertRaisesRegex(
+            TopologyFusionError, "no_connections=true is inconsistent"
+        ):
+            fuse_topology_payloads(cv, model)
+
+    def test_scatter_pair_review_rejects_only_explicit_false_links(self):
+        identifiers = ("A", "B", "C", "D")
+        cv = {
+            "objects": [
+                {
+                    "business_id": identifier,
+                    "type": "device",
+                    "label": identifier,
+                    "canvas_id": "scatter",
+                    "bbox": [10 + index * 40, 20, 20, 20],
+                    "confidence": 0.95,
+                }
+                for index, identifier in enumerate(identifiers)
+            ],
+            "links": [
+                {
+                    "source": source,
+                    "target": target,
+                    "type": "topology_link",
+                    "confidence": 0.95,
+                    "attributes": {
+                        "evidence": "directional_probe_component",
+                        "directness": "direct",
+                    },
+                }
+                for source, target in (("A", "B"), ("B", "C"), ("C", "D"))
+            ],
+        }
+        model = {
+            "nodes": [{"id": identifier} for identifier in identifiers],
+            "links": [],
+            "no_connections": True,
+            "confidence": 0.99,
+            "negative_edges": [
+                {
+                    "source": source,
+                    "target": target,
+                    "reason": "no connector pixels between this pair",
+                    "confidence": 0.97,
+                }
+                for source, target in (("A", "B"), ("B", "C"))
+            ],
+        }
+
+        partial = fuse_topology_payloads(cv, model)
+
+        self.assertEqual(partial["summary"]["rejected_link_count"], 2)
+        self.assertEqual(partial["summary"]["disputed_link_count"], 1)
+        self.assertEqual(len(partial["result"]["links"]), 1)
+        remaining = partial["result"]["links"][0]
         self.assertEqual(
-            fused["result"]["links"][0]["attributes"]["relation_state"],
-            "disputed",
+            remaining["attributes"]["negative_evidence_kind"],
+            "global_no_connections",
         )
-        self.assertEqual(fused["summary"]["rejected_link_count"], 0)
+        self.assertFalse(remaining["attributes"]["interaction_eligible"])
+        self.assertTrue(
+            all(
+                not item["attributes"]["interaction_eligible"]
+                for item in partial["rejected_links"]
+            )
+        )
+
+        model["negative_edges"].append(
+            {
+                "source": "C",
+                "target": "D",
+                "reason": "no connector pixels between this pair",
+                "confidence": 0.97,
+            }
+        )
+        complete = fuse_topology_payloads(cv, model)
+
+        self.assertEqual(complete["summary"]["rejected_link_count"], 3)
+        self.assertEqual(complete["summary"]["disputed_link_count"], 0)
+        self.assertEqual(complete["result"]["links"], [])
+        self.assertEqual(complete["display_graph"]["links"], [])
+        self.assertEqual(complete["semantic_graph"]["links"], [])
+
+    def test_enterprise_topology_keeps_agg_semantics_and_ap007_indirect(self):
+        semantic_pairs = (
+            ("GW-001", "CORE-001"),
+            ("CORE-001", "AGG-003"),
+            ("AGG-003", "ACC-010"),
+            ("ACC-010", "AP-022"),
+            ("ACC-010", "AP-029"),
+            ("ACC-010", "AP-048"),
+            ("AGG-003", "ACC-017"),
+            ("ACC-017", "AP-050"),
+            ("AGG-003", "ACC-022"),
+            ("ACC-022", "AP-006"),
+            ("AGG-003", "ACC-006"),
+            ("ACC-006", "AP-013"),
+            ("ACC-006", "AP-043"),
+            ("AGG-003", "ACC-012"),
+            ("ACC-012", "AP-034"),
+            ("ACC-012", "AP-061"),
+            ("AGG-003", "ACC-015"),
+            ("ACC-015", "AP-026"),
+            ("ACC-015", "AP-039"),
+            ("ACC-015", "AP-053"),
+            ("AGG-003", "AP-007"),
+        )
+        identifiers = tuple(
+            dict.fromkeys(identifier for pair in semantic_pairs for identifier in pair)
+        )
+        self.assertEqual((len(identifiers), len(semantic_pairs)), (22, 21))
+
+        def node_type(identifier):
+            if identifier == "GW-001":
+                return "gateway"
+            if identifier == "CORE-001":
+                return "core_switch"
+            if identifier == "AGG-003":
+                return "aggregation_firewall"
+            if identifier.startswith("ACC-"):
+                return "access_switch"
+            return "ap"
+
+        grounded_identifiers = tuple(
+            identifier for identifier in identifiers if identifier != "AGG-003"
+        )
+        grounded_pairs = tuple(
+            pair for pair in semantic_pairs if "AGG-003" not in pair
+        )
+        cv = {
+            "objects": [
+                {
+                    "business_id": identifier,
+                    "type": node_type(identifier),
+                    "label": identifier,
+                    "canvas_id": "enterprise-topology",
+                    "bbox": [
+                        20 + (index % 7) * 110,
+                        20 + (index // 7) * 90,
+                        76,
+                        28,
+                    ],
+                    "confidence": 0.94,
+                }
+                for index, identifier in enumerate(grounded_identifiers)
+            ],
+            "links": [
+                {
+                    "source": source,
+                    "target": target,
+                    "type": "topology_link",
+                    "confidence": 0.91,
+                    "attributes": {
+                        "evidence": "connected_pixel_path",
+                        "directness": "direct",
+                    },
+                }
+                for source, target in grounded_pairs
+            ]
+            + [
+                {
+                    "source": "CORE-001",
+                    "target": "AP-007",
+                    "type": "topology_link",
+                    "confidence": 0.76,
+                    "attributes": {
+                        "evidence": "directional_probe_component",
+                        "directness": "direct",
+                    },
+                }
+            ],
+        }
+        model_nodes = [
+            {"id": identifier, "type": node_type(identifier)}
+            for identifier in identifiers
+        ]
+        model_nodes_by_id = {item["id"]: item for item in model_nodes}
+        model_nodes_by_id["GW-001"]["vendor"] = "ZTE"
+        model_nodes_by_id["CORE-001"]["vendor"] = "Huawei"
+        model_nodes_by_id["AGG-003"].update(
+            {"vendor": "Huawei", "model": "USG6391E"}
+        )
+        model = {
+            "nodes": model_nodes,
+            "links": [
+                {
+                    "source": source,
+                    "target": target,
+                    "type": "topology_link",
+                    "confidence": 0.96,
+                    "directness": (
+                        "path_equivalent"
+                        if frozenset((source, target))
+                        == frozenset(("AGG-003", "AP-007"))
+                        else "direct"
+                    ),
+                }
+                for source, target in semantic_pairs
+            ],
+            "negative_edges": [
+                {
+                    "source": "CORE-001",
+                    "target": "AP-007",
+                    "reason": "no direct connector; AP-007 is downstream of AGG-003",
+                    "confidence": 0.98,
+                }
+            ],
+            "no_connections": False,
+        }
+
+        fused = fuse_topology_payloads(cv, model)
+
+        self.assertEqual(fused["summary"]["semantic_object_count"], 22)
+        self.assertEqual(fused["summary"]["semantic_link_count"], 21)
+        self.assertEqual(fused["summary"]["path_equivalent_link_count"], 1)
+        self.assertEqual(fused["summary"]["unresolved_model_link_count"], 8)
+        self.assertEqual(fused["summary"]["rejected_link_count"], 1)
+        self.assertEqual(len(fused["result"]["objects"]), 21)
+        self.assertEqual(len(fused["result"]["links"]), 13)
+
+        semantic_pairs_by_id = {
+            frozenset((item["source"], item["target"])): item
+            for item in fused["semantic_graph"]["links"]
+        }
+        self.assertEqual(len(semantic_pairs_by_id), 21)
+        agg_neighbors = {
+            next(iter(pair - {"AGG-003"}))
+            for pair in semantic_pairs_by_id
+            if "AGG-003" in pair
+        }
+        self.assertEqual(
+            agg_neighbors,
+            {
+                "CORE-001",
+                "ACC-010",
+                "ACC-017",
+                "ACC-022",
+                "ACC-006",
+                "ACC-012",
+                "ACC-015",
+                "AP-007",
+            },
+        )
+        indirect = semantic_pairs_by_id[frozenset(("AGG-003", "AP-007"))]
+        self.assertEqual(indirect["attributes"]["directness"], "path_equivalent")
+        self.assertEqual(
+            indirect["attributes"]["fusion_status"], "path_equivalent"
+        )
+        self.assertEqual(
+            indirect["attributes"]["equivalence_kind"],
+            "model_reported_indirect_relation",
+        )
+        self.assertFalse(indirect["attributes"]["render_as_direct"])
+        self.assertEqual(
+            indirect["attributes"]["geometry_status"], "unresolved_endpoint"
+        )
+        self.assertFalse(indirect["attributes"]["interaction_eligible"])
+        self.assertFalse(
+            any(
+                "AP-007" in {item["source"], item["target"]}
+                for item in fused["result"]["links"]
+            )
+        )
+
+        rejected = fused["rejected_links"][0]
+        self.assertEqual(
+            frozenset((rejected["source"], rejected["target"])),
+            frozenset(("CORE-001", "AP-007")),
+        )
+        self.assertFalse(rejected["attributes"]["interaction_eligible"])
+        agg = next(
+            item
+            for item in fused["unlocated_objects"]
+            if item["business_id"] == "AGG-003"
+        )
+        self.assertEqual(agg["attributes"]["vendor"], "Huawei")
+        self.assertEqual(agg["attributes"]["model"], "USG6391E")
+
+    def test_model_reported_indirect_pair_is_not_a_direct_interactive_link(self):
+        cv = {
+            "objects": [
+                {
+                    "business_id": "A",
+                    "type": "device",
+                    "label": "A",
+                    "canvas_id": "c1",
+                    "bbox": [10, 10, 20, 20],
+                    "confidence": 0.9,
+                },
+                {
+                    "business_id": "B",
+                    "type": "device",
+                    "label": "B",
+                    "canvas_id": "c1",
+                    "bbox": [80, 10, 20, 20],
+                    "confidence": 0.9,
+                },
+            ],
+            "links": [],
+        }
+        model = {
+            "nodes": [{"id": "A"}, {"id": "B"}],
+            "links": [
+                {
+                    "source": "A",
+                    "target": "B",
+                    "confidence": 0.93,
+                    "directness": "path_equivalent",
+                }
+            ],
+        }
+
+        fused = fuse_topology_payloads(cv, model)
+        link = fused["result"]["links"][0]
+        self.assertEqual(link["attributes"]["fusion_status"], "path_equivalent")
+        self.assertEqual(link["attributes"]["relation_state"], "accepted")
+        self.assertEqual(
+            link["attributes"]["equivalence_kind"],
+            "model_reported_indirect_relation",
+        )
+        self.assertFalse(link["attributes"]["interaction_eligible"])
+        self.assertFalse(link["attributes"]["render_as_direct"])
+
+        cv["links"] = [
+            {
+                "source": "A",
+                "target": "B",
+                "type": "topology_link",
+                "confidence": 0.91,
+                "attributes": {"evidence": "connected_pixel_path"},
+            }
+        ]
+        fused = fuse_topology_payloads(cv, model)
+        link = fused["result"]["links"][0]
+        self.assertEqual(link["attributes"]["fusion_status"], "conflict")
+        self.assertEqual(link["attributes"]["relation_state"], "disputed")
+        self.assertFalse(link["attributes"]["render_as_direct"])
 
     def test_negative_reference_can_resolve_unique_cv_alias_without_model_node(self):
         cv = {
