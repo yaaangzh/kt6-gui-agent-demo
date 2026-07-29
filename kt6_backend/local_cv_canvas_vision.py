@@ -3956,11 +3956,13 @@ class LocalCVTopologyVisionAdapter:
     """Recognize a single topology image without an Agent or external service."""
 
     adapter_id = "local-cv-ocr"
-    adapter_version = "1.4"
+    adapter_version = "1.5"
     supports_actionable_grounding = False
 
     DEFAULT_MIN_OCR_CONFIDENCE = 0.65
     DEFAULT_MAX_IMAGE_PIXELS = 20_000_000
+    OCR_TEXT_ANCHOR_SCHEMA_VERSION = "kt6.local-ocr-text-anchors.v1"
+    MAX_OCR_TEXT_ANCHORS = 1000
     _SERIAL_GATE = threading.BoundedSemaphore(value=1)
     _LEGACY_DEVICE_PATTERN = re.compile(
         r"(?<![A-Za-z0-9_])"
@@ -4126,9 +4128,6 @@ class LocalCVTopologyVisionAdapter:
         with self._SERIAL_GATE:
             spans = self._backend.recognize_text(frame)
             occurrences = self._device_occurrences(spans, frame.width, frame.height)
-            if not occurrences:
-                return None
-
             table_top, table_bottom = self._section_bounds(spans, frame.height)
             occurrences = tuple(
                 self._with_region(item, table_top=table_top, table_bottom=table_bottom)
@@ -4181,8 +4180,65 @@ class LocalCVTopologyVisionAdapter:
                 "line_segment_count": evidence.line_segment_count,
                 "budget_exhausted": evidence.connector_scan_budget_exhausted,
             },
+            "ocr_text_anchors": self._ocr_text_anchors(
+                spans,
+                frame_width=frame.width,
+                frame_height=frame.height,
+                canvas_id=frame.canvas_id,
+            ),
         }
         return parsed
+
+    def _ocr_text_anchors(
+        self,
+        spans: Sequence[OCRSpan],
+        *,
+        frame_width: int,
+        frame_height: int,
+        canvas_id: str,
+    ) -> dict[str, Any]:
+        """Retain bounded OCR geometry for later exact model-ID grounding."""
+
+        anchors: list[dict[str, Any]] = []
+        seen: set[tuple[str, int, int, int, int]] = set()
+        eligible_count = 0
+        for span in spans:
+            if span.confidence < self.min_ocr_confidence:
+                continue
+            text = unicodedata.normalize("NFKC", span.text).strip()
+            if (
+                not text
+                or len(text) > 300
+                or any(ord(character) < 32 for character in text)
+            ):
+                continue
+            bbox = self._clamp_box(span.bbox, frame_width, frame_height)
+            key = (
+                text.casefold(),
+                int(round(bbox[0])),
+                int(round(bbox[1])),
+                int(round(bbox[2])),
+                int(round(bbox[3])),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            eligible_count += 1
+            if len(anchors) >= self.MAX_OCR_TEXT_ANCHORS:
+                continue
+            anchors.append(
+                {
+                    "text": text,
+                    "canvas_id": canvas_id,
+                    "bbox": [round(value, 3) for value in bbox],
+                    "confidence": round(span.confidence, 4),
+                }
+            )
+        return {
+            "schema_version": self.OCR_TEXT_ANCHOR_SCHEMA_VERSION,
+            "items": anchors,
+            "truncated": eligible_count > len(anchors),
+        }
 
     def _device_occurrences(
         self,

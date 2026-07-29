@@ -101,6 +101,53 @@ def _scatter_cv_result() -> dict:
     }
 
 
+def _empty_nce_anchor_cv_result() -> dict:
+    return {
+        "confidence": 0.0,
+        "objects": [],
+        "links": [],
+        "co_channel_relations": [],
+        "no_connections": False,
+        "diagnostics": {
+            "producer": "local_cv_ocr",
+            "connector_scan": {
+                "status": "not_applicable",
+                "pixel_count": 0,
+                "component_count": 0,
+                "line_segment_count": 0,
+                "budget_exhausted": False,
+            },
+            "ocr_text_anchors": {
+                "schema_version": "kt6.local-ocr-text-anchors.v1",
+                "truncated": False,
+                "items": [
+                    {
+                        "text": "CSG1",
+                        "canvas_id": "uploaded_topology",
+                        "bbox": [0.0, 0.0, 0.4, 0.4],
+                        "confidence": 0.97,
+                    },
+                    {
+                        "text": "PTN7900E-12-01",
+                        "canvas_id": "uploaded_topology",
+                        "bbox": [0.5, 0.0, 0.4, 0.4],
+                        "confidence": 0.96,
+                    },
+                ],
+            },
+        },
+    }
+
+
+def _nce_model_result() -> dict:
+    result = _linked_model_result()
+    result["nodes"][0]["id"] = "CSG1"
+    result["nodes"][1]["id"] = "PTN7900E-12-01"
+    result["links"][0]["source"] = "CSG1"
+    result["links"][0]["target"] = "PTN7900E-12-01"
+    return result
+
+
 def _model_result() -> dict:
     return {
         "schema_version": MODEL_SCHEMA_VERSION,
@@ -162,10 +209,10 @@ def _linked_model_result() -> dict:
 
 class FakeCVAdapter:
     adapter_id = "local-cv-ocr"
-    adapter_version = "1.4"
+    adapter_version = "1.5"
 
     def __init__(self, result=None):
-        self.result = result or _cv_result()
+        self.result = _cv_result() if result is None else result
 
     def recognize(self, *, page, frames):
         self.page = page
@@ -559,6 +606,85 @@ class TopologyArtifactCLITest(unittest.TestCase):
         self.assertEqual(fused["routing"]["result_status"], "insufficient")
         self.assertEqual(fused["routing"]["execution_status"], "model_completed")
         self.assertFalse(fused["routing"]["requirement_satisfied"])
+
+    def test_empty_cv_uses_model_and_grounds_nce_nodes_from_ocr_anchors(self):
+        output_dir = self.root / "nce-empty-cv"
+
+        def fake_cv(
+            image_path, *, source_id, output_path, metadata_output_path
+        ):
+            return generate_cv_artifact(
+                image_path,
+                source_id=source_id,
+                output_path=output_path,
+                metadata_output_path=metadata_output_path,
+                adapter=FakeCVAdapter(_empty_nce_anchor_cv_result()),
+            )
+
+        def fake_model(
+            image_path,
+            *,
+            output_path,
+            events_path,
+            stderr_path,
+            **_kwargs,
+        ):
+            result = _nce_model_result()
+            output_path.write_text(
+                json.dumps(result),
+                encoding="utf-8",
+            )
+            events_path.write_text(
+                '{"type":"result"}\n',
+                encoding="utf-8",
+            )
+            stderr_path.write_text("", encoding="utf-8")
+            return result
+
+        with patch(
+            "kt6_backend.topology_hybrid_cli.generate_cv_artifact",
+            side_effect=fake_cv,
+        ), patch(
+            "kt6_backend.topology_hybrid_cli.generate_model_artifact",
+            side_effect=fake_model,
+        ):
+            paths = run_pipeline(
+                self.image_path,
+                source_id="nce-empty-cv",
+                output_dir=output_dir,
+            )
+
+        routing = json.loads(
+            paths["routing"].read_text(encoding="utf-8")
+        )
+        fused = json.loads(paths["fused"].read_text(encoding="utf-8"))
+        self.assertEqual(routing["decision"], "model_assist")
+        self.assertEqual(routing["execution_status"], "model_completed")
+        self.assertTrue(routing["requirement_satisfied"])
+        self.assertEqual(
+            fused["summary"]["ocr_anchor_grounded_object_count"],
+            2,
+        )
+        self.assertEqual(fused["summary"]["grounded_object_count"], 2)
+        self.assertEqual(fused["summary"]["grounded_link_count"], 1)
+        self.assertEqual(len(fused["result"]["objects"]), 2)
+        self.assertEqual(fused["unlocated_objects"], [])
+        self.assertIn(
+            "object_identity",
+            routing["satisfied_capabilities"],
+        )
+        self.assertIn(
+            "analysis_only_image_geometry",
+            routing["satisfied_capabilities"],
+        )
+        self.assertIn(
+            "verified_connectivity",
+            routing["satisfied_capabilities"],
+        )
+        self.assertEqual(
+            routing["missing_capabilities"],
+            ["actionable_canvas_binding"],
+        )
 
     def test_model_failure_is_persisted_in_routing_artifact(self):
         output_dir = self.root / "model-failed"

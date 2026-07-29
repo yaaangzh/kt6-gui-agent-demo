@@ -17,6 +17,9 @@ DISPLAY_SCHEMA_VERSION = "kt6.topology-display.v1"
 DEFAULT_MODEL_CONFIDENCE = 0.5
 STRONG_NEGATIVE_CONFIDENCE = 0.85
 WEAK_CV_LINK_CONFIDENCE = 0.8
+OCR_TEXT_ANCHOR_SCHEMA_VERSION = "kt6.local-ocr-text-anchors.v1"
+MAX_OCR_TEXT_ANCHORS = 1000
+MIN_OCR_TEXT_GROUNDING_CONFIDENCE = 0.75
 
 _RESERVED_ATTRIBUTE_KEYS = frozenset(
     {
@@ -50,6 +53,7 @@ def fuse_topology_payloads(
     """
 
     cv_objects, cv_links, canvas_id = _normalize_cv_payload(cv_payload)
+    direct_cv_object_count = len(cv_objects)
     (
         model_nodes,
         model_links,
@@ -57,6 +61,16 @@ def fuse_topology_payloads(
         structure_templates,
         negative_evidence,
     ) = _normalize_model_payload(model_payload)
+    ocr_text_anchors = _normalize_ocr_text_anchors(
+        cv_payload,
+        default_canvas_id=canvas_id,
+    )
+    ocr_anchor_objects = _ground_model_nodes_with_ocr_anchors(
+        model_nodes,
+        cv_objects=cv_objects,
+        anchors=ocr_text_anchors,
+    )
+    cv_objects.extend(ocr_anchor_objects)
     cv_index = _CVIdentifierIndex(cv_objects)
     (
         model_to_cv,
@@ -256,7 +270,8 @@ def fuse_topology_payloads(
     return {
         "schema_version": FUSION_SCHEMA_VERSION,
         "summary": {
-            "cv_object_count": len(cv_objects),
+            "cv_object_count": direct_cv_object_count,
+            "ocr_anchor_grounded_object_count": len(ocr_anchor_objects),
             "model_object_count": len(model_nodes),
             "fused_object_count": len(result_objects),
             "grounded_object_count": len(result_objects),
@@ -583,6 +598,160 @@ def _normalize_cv_payload(
             }
         )
     return objects, links, canvas_id
+
+
+def _normalize_ocr_text_anchors(
+    payload: Mapping[str, Any],
+    *,
+    default_canvas_id: str,
+) -> list[dict[str, Any]]:
+    diagnostics = payload.get("diagnostics")
+    if not isinstance(diagnostics, Mapping):
+        return []
+    if diagnostics.get("producer") != "local_cv_ocr":
+        return []
+    container = diagnostics.get("ocr_text_anchors")
+    if container is None:
+        return []
+    if not isinstance(container, Mapping):
+        raise TopologyFusionError(
+            "CV diagnostics.ocr_text_anchors must be an object"
+        )
+    if container.get("schema_version") != OCR_TEXT_ANCHOR_SCHEMA_VERSION:
+        raise TopologyFusionError(
+            "CV OCR text anchor schema is missing or unsupported"
+        )
+    truncated = container.get("truncated", False)
+    if not isinstance(truncated, bool):
+        raise TopologyFusionError(
+            "CV OCR text anchors truncated flag must be boolean"
+        )
+    raw_items = container.get("items")
+    if not isinstance(raw_items, list):
+        raise TopologyFusionError("CV OCR text anchors items must be a list")
+    if len(raw_items) > MAX_OCR_TEXT_ANCHORS:
+        raise TopologyFusionError("CV OCR text anchors exceed the safe limit")
+
+    anchors: list[dict[str, Any]] = []
+    for index, raw_item in enumerate(raw_items):
+        context = f"CV OCR text anchor {index}"
+        if not isinstance(raw_item, Mapping):
+            raise TopologyFusionError(f"{context} must be an object")
+        unknown = set(raw_item) - {
+            "text",
+            "canvas_id",
+            "bbox",
+            "confidence",
+        }
+        if unknown:
+            raise TopologyFusionError(
+                f"{context} contains unsupported field {sorted(unknown)[0]}"
+            )
+        raw_text = raw_item.get("text")
+        if not isinstance(raw_text, str):
+            raise TopologyFusionError(f"{context}.text must be a string")
+        text = unicodedata.normalize("NFKC", raw_text).strip()
+        if (
+            not text
+            or len(text) > 300
+            or any(ord(character) < 32 for character in text)
+        ):
+            raise TopologyFusionError(f"{context}.text is invalid")
+        confidence = _optional_confidence(raw_item.get("confidence"))
+        if confidence is None:
+            raise TopologyFusionError(f"{context}.confidence is invalid")
+        anchors.append(
+            {
+                "text": text,
+                "canvas_id": _text(
+                    raw_item.get("canvas_id"),
+                    default_canvas_id,
+                    200,
+                ),
+                "bbox": _bbox(raw_item.get("bbox"), context),
+                "confidence": confidence,
+            }
+        )
+    return anchors
+
+
+def _ground_model_nodes_with_ocr_anchors(
+    model_nodes: Mapping[str, Mapping[str, Any]],
+    *,
+    cv_objects: list[dict[str, Any]],
+    anchors: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Promote only unique, exact OCR/model identifier matches to geometry."""
+
+    if not model_nodes or not anchors:
+        return []
+    cv_index = _CVIdentifierIndex(cv_objects)
+    existing_matches, _methods, _reasons = _match_model_nodes_to_cv(
+        model_nodes,
+        cv_index,
+    )
+    exact_buckets: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    compact_buckets: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for index, anchor in enumerate(anchors):
+        text = str(anchor["text"])
+        if (
+            float(anchor["confidence"]) < MIN_OCR_TEXT_GROUNDING_CONFIDENCE
+            or _identifier_like_ocr_text(text) is False
+        ):
+            continue
+        exact_buckets.setdefault(_exact_identifier_key(text), []).append(
+            (index, anchor)
+        )
+        compact_buckets.setdefault(_compact_identifier_key(text), []).append(
+            (index, anchor)
+        )
+
+    claimed_anchor_indexes: set[int] = set()
+    grounded: list[dict[str, Any]] = []
+    for model_id in sorted(model_nodes, key=_identifier_sort_key):
+        if model_id in existing_matches:
+            continue
+        match_method = "ocr_text_exact"
+        candidates = exact_buckets.get(_exact_identifier_key(model_id), [])
+        if len(candidates) != 1:
+            match_method = "ocr_text_compact_unique"
+            candidates = compact_buckets.get(
+                _compact_identifier_key(model_id),
+                [],
+            )
+        available = [
+            item for item in candidates if item[0] not in claimed_anchor_indexes
+        ]
+        if len(candidates) != 1 or len(available) != 1:
+            continue
+        anchor_index, anchor = available[0]
+        claimed_anchor_indexes.add(anchor_index)
+        grounded.append(
+            {
+                "business_id": model_id,
+                "type": "network_device",
+                "label": model_id,
+                "canvas_id": anchor["canvas_id"],
+                "bbox": copy.deepcopy(anchor["bbox"]),
+                "confidence": anchor["confidence"],
+                "attributes": {
+                    "recognizer": "rapidocr",
+                    "source_region": "model_identifier_anchor",
+                    "ocr_text": anchor["text"],
+                    "ocr_confidence": anchor["confidence"],
+                    "ocr_anchor_only": True,
+                    "ocr_anchor_match_method": match_method,
+                },
+            }
+        )
+    return grounded
+
+
+def _identifier_like_ocr_text(value: str) -> bool:
+    return bool(
+        re.fullmatch(r"[A-Za-z][A-Za-z0-9_.:/-]{1,199}", value)
+        and any(character.isdigit() for character in value)
+    )
 
 
 def _normalize_model_payload(
@@ -1099,10 +1268,17 @@ def _fuse_object(
     result["canvas_id"] = _text(result.get("canvas_id"), default_canvas_id, 200)
     attributes = _safe_attributes(result.get("attributes", {}))
     attributes["cv_confidence"] = result["confidence"]
-    attributes["geometry_status"] = "cv_grounded"
+    ocr_anchor_only = attributes.get("ocr_anchor_only") is True
+    attributes["geometry_status"] = (
+        "ocr_text_grounded" if ocr_anchor_only else "cv_grounded"
+    )
+    if ocr_anchor_only:
+        attributes["interaction_eligible"] = False
     if model_match is None:
         attributes["fusion_status"] = "cv_only"
-        attributes["evidence_sources"] = ["local_cv"]
+        attributes["evidence_sources"] = [
+            "local_cv_ocr_anchor" if ocr_anchor_only else "local_cv"
+        ]
     else:
         model_id, model_node = model_match
         model_semantics = _safe_attributes(model_node)
@@ -1113,7 +1289,14 @@ def _fuse_object(
         if model_label and not str(result.get("label", "")).strip():
             result["label"] = model_label
         attributes["fusion_status"] = "confirmed"
-        attributes["evidence_sources"] = ["local_cv", "multimodal_model"]
+        attributes["evidence_sources"] = [
+            (
+                "local_cv_ocr_anchor"
+                if ocr_anchor_only
+                else "local_cv"
+            ),
+            "multimodal_model",
+        ]
         attributes["model_business_id"] = model_id
         attributes["model_semantics"] = model_semantics
     result["attributes"] = attributes

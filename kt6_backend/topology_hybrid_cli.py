@@ -289,6 +289,7 @@ def _finalize_model_routing(
 
     semantic_object_count = _summary_count(summary, "semantic_object_count")
     semantic_link_count = _summary_count(summary, "semantic_link_count")
+    grounded_object_count = _summary_count(summary, "grounded_object_count")
     grounded_link_count = _summary_count(summary, "grounded_link_count")
     semantic_node_count = sum(
         1
@@ -322,6 +323,47 @@ def _finalize_model_routing(
     if not isinstance(reason_codes, list):
         raise TopologyArtifactCLIError("routing reason_codes must be a list")
     reason_codes = list(reason_codes)
+    raw_satisfied = finalized.get("satisfied_capabilities", [])
+    raw_missing = finalized.get("missing_capabilities", [])
+    if not isinstance(raw_satisfied, list) or not isinstance(raw_missing, list):
+        raise TopologyArtifactCLIError(
+            "routing capabilities must be lists"
+        )
+    satisfied_capabilities = [
+        str(item) for item in raw_satisfied if str(item).strip()
+    ]
+    missing_capabilities = [
+        str(item) for item in raw_missing if str(item).strip()
+    ]
+
+    def update_capability(name: str, available: bool) -> None:
+        if available:
+            if name not in satisfied_capabilities:
+                satisfied_capabilities.append(name)
+            missing_capabilities[:] = [
+                item for item in missing_capabilities if item != name
+            ]
+        else:
+            if name not in missing_capabilities:
+                missing_capabilities.append(name)
+            satisfied_capabilities[:] = [
+                item for item in satisfied_capabilities if item != name
+            ]
+
+    update_capability("object_identity", semantic_object_count > 0)
+    update_capability(
+        "analysis_only_image_geometry",
+        grounded_object_count > 0,
+    )
+    update_capability(
+        "verified_connectivity",
+        grounded_link_count > 0,
+    )
+    if profile == "semantic_enrichment":
+        update_capability(
+            "semantic_enrichment",
+            semantic_node_count > 0,
+        )
     reason_codes.extend(
         [
             "model_stage_completed",
@@ -341,11 +383,16 @@ def _finalize_model_routing(
             "model_invoked": True,
             "execution_status": "model_completed",
             "reason_codes": list(dict.fromkeys(reason_codes)),
+            "satisfied_capabilities": list(
+                dict.fromkeys(satisfied_capabilities)
+            ),
+            "missing_capabilities": list(dict.fromkeys(missing_capabilities)),
             "post_model_metrics": {
                 "model_object_count": len(nodes),
                 "model_link_count": len(links),
                 "semantic_object_count": semantic_object_count,
                 "semantic_link_count": semantic_link_count,
+                "grounded_object_count": grounded_object_count,
                 "grounded_link_count": grounded_link_count,
                 "semantic_enriched_node_count": semantic_node_count,
             },

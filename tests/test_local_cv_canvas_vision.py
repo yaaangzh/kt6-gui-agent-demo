@@ -520,7 +520,7 @@ class LocalCVTopologyVisionAdapterTest(unittest.TestCase):
             ["CORE-001"],
         )
 
-    def test_returns_none_when_ocr_finds_no_accepted_identifier(self):
+    def test_returns_empty_result_with_ocr_anchors_when_no_identifier_matches(self):
         backend = FakeLocalImageBackend(
             spans=(
                 OCRSpan("设备详情", 0.99, (10.0, 20.0, 70.0, 12.0)),
@@ -531,9 +531,45 @@ class LocalCVTopologyVisionAdapterTest(unittest.TestCase):
 
         result = adapter.recognize(page=self.page(), frames=(self.frame(),))
 
-        self.assertIsNone(result)
+        self.assertEqual(result["objects"], [])
+        self.assertEqual(result["links"], [])
+        anchors = result["diagnostics"]["ocr_text_anchors"]
+        self.assertEqual(
+            anchors["schema_version"],
+            "kt6.local-ocr-text-anchors.v1",
+        )
+        self.assertFalse(anchors["truncated"])
+        self.assertEqual(
+            [item["text"] for item in anchors["items"]],
+            ["设备详情"],
+        )
         self.assertEqual(len(backend.recognize_calls), 1)
-        self.assertEqual(backend.connector_calls, [])
+        self.assertEqual(len(backend.connector_calls), 1)
+        self.assertEqual(backend.connector_calls[0]["diagram_nodes"], {})
+
+    def test_retains_unknown_nce_identifiers_as_bounded_text_anchors(self):
+        backend = FakeLocalImageBackend(
+            spans=(
+                OCRSpan("CSG1", 0.97, (10.0, 20.0, 50.0, 12.0)),
+                OCRSpan(
+                    "PTN7900E-12-01",
+                    0.96,
+                    (80.0, 20.0, 130.0, 12.0),
+                ),
+                OCRSpan("MW", 0.95, (220.0, 20.0, 24.0, 12.0)),
+            )
+        )
+        adapter = LocalCVTopologyVisionAdapter(backend=backend)
+
+        result = adapter.recognize(page=self.page(), frames=(self.frame(),))
+
+        self.assertEqual(result["objects"], [])
+        anchors = result["diagnostics"]["ocr_text_anchors"]["items"]
+        self.assertEqual(
+            [item["text"] for item in anchors],
+            ["CSG1", "PTN7900E-12-01", "MW"],
+        )
+        self.assertEqual(anchors[1]["bbox"], [80.0, 20.0, 130.0, 12.0])
 
     def test_rejects_multiple_frames_before_local_inference(self):
         second_path = self.root / "second.png"
@@ -622,7 +658,7 @@ class LocalCVTopologyVisionAdapterTest(unittest.TestCase):
         self.assertTrue(scene["pixel_verified"])
         self.assertFalse(scene["actionable_grounding"])
         self.assertEqual(scene["provenance"]["adapter_id"], "local-cv-ocr")
-        self.assertEqual(scene["provenance"]["adapter_version"], "1.4")
+        self.assertEqual(scene["provenance"]["adapter_version"], "1.5")
         self.assertFalse(
             scene["provenance"]["adapter_supports_actionable_grounding"]
         )

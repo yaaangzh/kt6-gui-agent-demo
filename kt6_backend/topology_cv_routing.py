@@ -5,6 +5,7 @@ import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from .local_cv_canvas_vision import LocalCVTopologyVisionAdapter
 from .topology_vision_contract import TopologyVisionContract
 
 
@@ -80,8 +81,9 @@ def assess_cv_result(
     if not isinstance(provenance, Mapping):
         raise TopologyCVRoutingError("trusted_provenance must be an object")
     trusted_adapter = (
-        provenance.get("adapter_id") == "local-cv-ocr"
-        and provenance.get("adapter_version") == "1.4"
+        provenance.get("adapter_id") == LocalCVTopologyVisionAdapter.adapter_id
+        and provenance.get("adapter_version")
+        == LocalCVTopologyVisionAdapter.adapter_version
     )
     raw_no_connections = cv_payload.get("no_connections", False)
     if not isinstance(raw_no_connections, bool):
@@ -297,9 +299,14 @@ def assess_cv_result(
 
     effective_profile = profile
     if scene_type == "unusable":
-        decision = "insufficient"
+        effective_profile = (
+            "visible_topology" if profile == "auto" else profile
+        )
+        decision = "model_assist"
         requirement_satisfied = False
-        reason_codes = scene_reasons
+        reason_codes = scene_reasons + [
+            "cv_empty_requires_model_fallback"
+        ]
     elif profile == "auto":
         if scene_type == "scatter_nodes":
             effective_profile = "nodes_only"
@@ -391,6 +398,14 @@ def assess_cv_result(
         missing_capabilities.append("verified_connectivity")
     if object_count:
         missing_capabilities.append("actionable_canvas_binding")
+    else:
+        missing_capabilities.extend(
+            [
+                "object_identity",
+                "analysis_only_image_geometry",
+                "actionable_canvas_binding",
+            ]
+        )
     if profile == "semantic_enrichment":
         missing_capabilities.append("semantic_enrichment")
 

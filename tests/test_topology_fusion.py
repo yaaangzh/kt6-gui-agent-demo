@@ -815,6 +815,133 @@ class TopologyFusionTest(unittest.TestCase):
             fused["summary"]["semantic_link_count"],
         )
 
+    def test_unique_ocr_text_anchors_ground_model_only_nce_nodes(self):
+        cv = {
+            "objects": [],
+            "links": [],
+            "diagnostics": {
+                "producer": "local_cv_ocr",
+                "ocr_text_anchors": {
+                    "schema_version": "kt6.local-ocr-text-anchors.v1",
+                    "truncated": False,
+                    "items": [
+                        {
+                            "text": "CSG1",
+                            "canvas_id": "nce-turn-3",
+                            "bbox": [40, 60, 50, 14],
+                            "confidence": 0.97,
+                        },
+                        {
+                            "text": "PTN7900E-12-01",
+                            "canvas_id": "nce-turn-3",
+                            "bbox": [180, 60, 140, 14],
+                            "confidence": 0.96,
+                        },
+                    ],
+                },
+            },
+        }
+        model = {
+            "nodes": [
+                {
+                    "id": "CSG1",
+                    "type": "gateway",
+                    "confidence": 0.95,
+                },
+                {
+                    "id": "PTN7900E-12-01",
+                    "type": "transport_device",
+                    "confidence": 0.94,
+                },
+            ],
+            "links": [
+                {
+                    "source": "CSG1",
+                    "target": "PTN7900E-12-01",
+                    "confidence": 0.92,
+                }
+            ],
+        }
+
+        fused = fuse_topology_payloads(cv, model)
+
+        self.assertEqual(fused["summary"]["cv_object_count"], 0)
+        self.assertEqual(
+            fused["summary"]["ocr_anchor_grounded_object_count"],
+            2,
+        )
+        self.assertEqual(fused["summary"]["grounded_object_count"], 2)
+        self.assertEqual(fused["summary"]["grounded_link_count"], 1)
+        self.assertEqual(fused["unlocated_objects"], [])
+        objects = {
+            item["business_id"]: item
+            for item in fused["result"]["objects"]
+        }
+        self.assertEqual(
+            objects["CSG1"]["attributes"]["geometry_status"],
+            "ocr_text_grounded",
+        )
+        self.assertEqual(
+            objects["PTN7900E-12-01"]["bbox"],
+            [180.0, 60.0, 140.0, 14.0],
+        )
+        self.assertFalse(
+            objects["CSG1"]["attributes"]["interaction_eligible"]
+        )
+        self.assertEqual(
+            objects["CSG1"]["attributes"]["evidence_sources"],
+            ["local_cv_ocr_anchor", "multimodal_model"],
+        )
+
+    def test_ambiguous_or_generic_ocr_text_does_not_create_geometry(self):
+        cv = {
+            "objects": [],
+            "links": [],
+            "diagnostics": {
+                "producer": "local_cv_ocr",
+                "ocr_text_anchors": {
+                    "schema_version": "kt6.local-ocr-text-anchors.v1",
+                    "truncated": False,
+                    "items": [
+                        {
+                            "text": "CSG1",
+                            "canvas_id": "c1",
+                            "bbox": [10, 10, 40, 12],
+                            "confidence": 0.96,
+                        },
+                        {
+                            "text": "CSG1",
+                            "canvas_id": "c1",
+                            "bbox": [110, 10, 40, 12],
+                            "confidence": 0.95,
+                        },
+                        {
+                            "text": "MW",
+                            "canvas_id": "c1",
+                            "bbox": [210, 10, 24, 12],
+                            "confidence": 0.98,
+                        },
+                    ],
+                },
+            },
+        }
+        model = {
+            "nodes": [{"id": "CSG1"}, {"id": "MW"}],
+            "links": [],
+        }
+
+        fused = fuse_topology_payloads(cv, model)
+
+        self.assertEqual(fused["result"]["objects"], [])
+        self.assertEqual(
+            fused["summary"]["ocr_anchor_grounded_object_count"],
+            0,
+        )
+        self.assertEqual(
+            {item["business_id"] for item in fused["unlocated_objects"]},
+            {"CSG1", "MW"},
+        )
+
     def test_model_pixel_geometry_and_explicit_star_enter_analysis_result(self):
         cv = {
             "objects": [

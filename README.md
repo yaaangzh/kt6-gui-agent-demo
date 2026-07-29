@@ -158,6 +158,13 @@ python -m kt6_backend.topology_hybrid_cli .\topology.png `
 - 规则拓扑图：RapidOCR/OpenCV 输出节点和有明确像素证据的连接。
 - 复杂、低置信度图片：调用 CodeAgent 补充识别。
 
+当已知设备 pattern 一个也没匹配到时，CV 仍会保存有置信度和像素框的受限
+OCR 文字锚点，并让 `auto` 路由调用模型。模型返回的设备 ID 只有与唯一的完整
+OCR 文字匹配时才会进入 `result.objects`，并标记为 `ocr_text_grounded`；
+重复文字、低置信文字以及 `MW` 这类不含数字的通用标签继续保留在
+`unlocated_objects`。OCR 文字框只用于分析，`interaction_eligible` 固定为
+`false`。
+
 只有需要强制指定结果范围时才使用 `--requested-profile`：
 
 - `nodes_only`：只要求节点 ID 与分析用图像坐标。高质量散点图可直接走 CV；

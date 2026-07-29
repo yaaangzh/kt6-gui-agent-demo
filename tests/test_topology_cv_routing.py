@@ -17,7 +17,7 @@ from kt6_backend.topology_vision_contract import (
 
 TRUSTED_PROVENANCE = {
     "adapter_id": "local-cv-ocr",
-    "adapter_version": "1.4",
+    "adapter_version": "1.5",
 }
 
 
@@ -286,11 +286,18 @@ class TopologyCVRoutingTest(unittest.TestCase):
         self.assertEqual(partial["decision"], "model_assist")
         self.assertEqual(partial["scene_type"], "complex_topology")
 
-    def test_empty_cv_is_insufficient(self):
-        routing = _assess(_payload(0), "nodes_only")
+    def test_empty_cv_falls_back_to_model(self):
+        automatic = _assess(_payload(0), "auto")
+        nodes = _assess(_payload(0), "nodes_only")
 
-        self.assertEqual(routing["scene_type"], "unusable")
-        self.assertEqual(routing["decision"], "insufficient")
+        self.assertEqual(automatic["scene_type"], "unusable")
+        self.assertEqual(automatic["decision"], "model_assist")
+        self.assertEqual(automatic["effective_profile"], "visible_topology")
+        self.assertIn(
+            "cv_empty_requires_model_fallback",
+            automatic["reason_codes"],
+        )
+        self.assertEqual(nodes["decision"], "model_assist")
 
     def test_rejects_duplicate_business_ids(self):
         payload = _payload(2)
