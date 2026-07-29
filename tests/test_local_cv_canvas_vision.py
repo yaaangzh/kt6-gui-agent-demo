@@ -148,6 +148,10 @@ class LocalCVTopologyVisionAdapterTest(unittest.TestCase):
             detected["attributes"]["relation_excluded_reason"],
             "uncertain_text_over_continuous_connector",
         )
+        self.assertEqual(result["diagnostics"]["producer"], "local_cv_ocr")
+        self.assertEqual(
+            result["diagnostics"]["connector_scan"]["status"], "unknown"
+        )
         self.assertEqual(len(backend.recognize_calls), 1)
         self.assertEqual(backend.recognize_calls[0].raw, self.raw)
         self.assertEqual(set(backend.connector_calls[0]["diagram_nodes"]), {"GW-001"})
@@ -618,7 +622,7 @@ class LocalCVTopologyVisionAdapterTest(unittest.TestCase):
         self.assertTrue(scene["pixel_verified"])
         self.assertFalse(scene["actionable_grounding"])
         self.assertEqual(scene["provenance"]["adapter_id"], "local-cv-ocr")
-        self.assertEqual(scene["provenance"]["adapter_version"], "1.3")
+        self.assertEqual(scene["provenance"]["adapter_version"], "1.4")
         self.assertFalse(
             scene["provenance"]["adapter_supports_actionable_grounding"]
         )

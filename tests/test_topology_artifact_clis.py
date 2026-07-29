@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from kt6_backend.codeagent_canvas_vision import (
     CodeAgentCanvasVisionAdapter,
+    CodeAgentVisionError,
     CodeAgentProcessResult,
 )
 from kt6_backend.topology_cv_cli import generate_cv_artifact
@@ -52,6 +53,54 @@ def _cv_result() -> dict:
     }
 
 
+def _scatter_cv_result() -> dict:
+    objects = [
+        {
+            "business_id": f"AP-{index:03d}",
+            "type": "access_point",
+            "label": f"AP-{index:03d}",
+            "canvas_id": "uploaded_topology",
+            "bbox": [0, 0, 1, 1],
+            "confidence": 0.93,
+            "attributes": {
+                "recognizer": "rapidocr",
+                "source_region": "diagram",
+            },
+        }
+        for index in range(1, 21)
+    ]
+    return {
+        "schema_version": RESPONSE_SCHEMA_VERSION,
+        "confidence": 0.91,
+        "objects": objects,
+        "links": [
+            {
+                "relation_id": "local-line:AP-001:AP-002",
+                "source": "AP-001",
+                "target": "AP-002",
+                "type": "topology_link",
+                "confidence": 0.8,
+                "attributes": {
+                    "evidence": "legacy_layered_pixel_component",
+                    "direction": "undirected",
+                    "directed": False,
+                },
+            }
+        ],
+        "co_channel_relations": [],
+        "diagnostics": {
+            "producer": "local_cv_ocr",
+            "connector_scan": {
+                "status": "complete",
+                "pixel_count": 80,
+                "component_count": 1,
+                "line_segment_count": 1,
+                "budget_exhausted": False,
+            },
+        },
+    }
+
+
 def _model_result() -> dict:
     return {
         "schema_version": MODEL_SCHEMA_VERSION,
@@ -73,11 +122,55 @@ def _model_result() -> dict:
     }
 
 
+def _linked_model_result() -> dict:
+    return {
+        "schema_version": MODEL_SCHEMA_VERSION,
+        "confidence": 0.94,
+        "nodes": [
+            {
+                "id": "AP-001",
+                "type": "access_point",
+                "label": "AP-001",
+                "role": "leaf",
+                "confidence": 0.94,
+            },
+            {
+                "id": "AP-002",
+                "type": "access_point",
+                "label": "AP-002",
+                "role": "leaf",
+                "confidence": 0.94,
+            },
+        ],
+        "links": [
+            {
+                "source": "AP-001",
+                "target": "AP-002",
+                "type": "topology_link",
+                "confidence": 0.94,
+                "attributes": {
+                    "direction": "undirected",
+                    "directed": False,
+                },
+            }
+        ],
+        "structure_templates": [],
+        "negative_edges": [],
+        "no_connections": False,
+    }
+
+
 class FakeCVAdapter:
+    adapter_id = "local-cv-ocr"
+    adapter_version = "1.4"
+
+    def __init__(self, result=None):
+        self.result = result or _cv_result()
+
     def recognize(self, *, page, frames):
         self.page = page
         self.frames = frames
-        return _cv_result()
+        return self.result
 
 
 class SuccessfulModelRunner:
@@ -400,13 +493,21 @@ class TopologyArtifactCLITest(unittest.TestCase):
         self.assertEqual(model_args.max_attempts, DEFAULT_MODEL_MAX_ATTEMPTS)
         self.assertEqual(hybrid_args.idle_timeout, 0)
         self.assertEqual(hybrid_args.max_attempts, 1)
+        self.assertEqual(hybrid_args.requested_profile, "auto")
+
     def test_pipeline_keeps_all_artifacts(self):
         output_dir = self.root / "artifacts"
 
-        def fake_cv(image_path, *, source_id, output_path):
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_text(json.dumps(_cv_result()), encoding="utf-8")
-            return _cv_result()
+        def fake_cv(
+            image_path, *, source_id, output_path, metadata_output_path
+        ):
+            return generate_cv_artifact(
+                image_path,
+                source_id=source_id,
+                output_path=output_path,
+                metadata_output_path=metadata_output_path,
+                adapter=FakeCVAdapter(),
+            )
 
         def fake_model(
             image_path,
@@ -439,12 +540,123 @@ class TopologyArtifactCLITest(unittest.TestCase):
 
         self.assertEqual(
             set(paths),
-            {"cv", "model", "events", "stderr", "fused"},
+            {
+                "cv",
+                "cv_metadata",
+                "routing",
+                "model",
+                "events",
+                "stderr",
+                "fused",
+            },
         )
         for path in paths.values():
+            self.assertIsNotNone(path)
             self.assertTrue(path.is_file(), path)
         fused = json.loads(paths["fused"].read_text(encoding="utf-8"))
         self.assertEqual(fused["summary"]["confirmed_object_count"], 1)
+        self.assertEqual(fused["routing"]["decision"], "model_assist")
+        self.assertEqual(fused["routing"]["result_status"], "insufficient")
+        self.assertEqual(fused["routing"]["execution_status"], "model_completed")
+        self.assertFalse(fused["routing"]["requirement_satisfied"])
+
+    def test_model_failure_is_persisted_in_routing_artifact(self):
+        output_dir = self.root / "model-failed"
+
+        def fake_cv(
+            image_path, *, source_id, output_path, metadata_output_path
+        ):
+            return generate_cv_artifact(
+                image_path,
+                source_id=source_id,
+                output_path=output_path,
+                metadata_output_path=metadata_output_path,
+                adapter=FakeCVAdapter(_scatter_cv_result()),
+            )
+
+        model_error = CodeAgentVisionError(
+            "model unavailable",
+            error_code="transport_failure",
+            category="transport",
+            retryable=True,
+        )
+        with patch(
+            "kt6_backend.topology_hybrid_cli.generate_cv_artifact",
+            side_effect=fake_cv,
+        ), patch(
+            "kt6_backend.topology_hybrid_cli.generate_model_artifact",
+            side_effect=model_error,
+        ):
+            with self.assertRaises(CodeAgentVisionError):
+                run_pipeline(
+                    self.image_path,
+                    source_id="model-failed",
+                    output_dir=output_dir,
+                    requested_profile="visible_topology",
+                )
+
+        routing = json.loads(
+            (output_dir / "routing-result.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(routing["execution_status"], "model_failed")
+        self.assertEqual(routing["result_status"], "failed")
+        self.assertFalse(routing["requirement_satisfied"])
+        self.assertEqual(routing["failure"]["stage"], "model")
+        self.assertEqual(routing["failure"]["error_code"], "transport_failure")
+        self.assertTrue(routing["failure"]["retryable"])
+
+    def test_model_assist_finalizes_a_grounded_visible_topology(self):
+        output_dir = self.root / "model-finalized"
+
+        def fake_cv(
+            image_path, *, source_id, output_path, metadata_output_path
+        ):
+            return generate_cv_artifact(
+                image_path,
+                source_id=source_id,
+                output_path=output_path,
+                metadata_output_path=metadata_output_path,
+                adapter=FakeCVAdapter(_scatter_cv_result()),
+            )
+
+        def fake_model(
+            image_path,
+            *,
+            output_path,
+            events_path,
+            stderr_path,
+            **_kwargs,
+        ):
+            result = _linked_model_result()
+            output_path.write_text(json.dumps(result), encoding="utf-8")
+            events_path.write_text('{"type":"result"}\n', encoding="utf-8")
+            stderr_path.write_text("", encoding="utf-8")
+            return result
+
+        with patch(
+            "kt6_backend.topology_hybrid_cli.generate_cv_artifact",
+            side_effect=fake_cv,
+        ), patch(
+            "kt6_backend.topology_hybrid_cli.generate_model_artifact",
+            side_effect=fake_model,
+        ):
+            paths = run_pipeline(
+                self.image_path,
+                source_id="model-finalized",
+                output_dir=output_dir,
+                requested_profile="visible_topology",
+            )
+
+        routing = json.loads(paths["routing"].read_text(encoding="utf-8"))
+        fused = json.loads(paths["fused"].read_text(encoding="utf-8"))
+        self.assertTrue(routing["requirement_satisfied"])
+        self.assertEqual(routing["result_status"], "complete")
+        self.assertEqual(routing["execution_status"], "model_completed")
+        self.assertGreater(
+            routing["post_model_metrics"]["grounded_link_count"],
+            0,
+        )
+        self.assertEqual(fused["routing"], routing)
 
     def test_standalone_adapter_allows_longer_timeout_than_http_path(self):
         adapter = CodeAgentCanvasVisionAdapter(
@@ -459,7 +671,14 @@ class TopologyArtifactCLITest(unittest.TestCase):
         output_dir = self.root / "retry"
         output_dir.mkdir()
         cv_path = output_dir / "cv-result.json"
-        cv_path.write_text(json.dumps(_cv_result()), encoding="utf-8")
+        metadata_path = output_dir / "cv-metadata.json"
+        generate_cv_artifact(
+            self.image_path,
+            source_id="pipeline-v1",
+            output_path=cv_path,
+            metadata_output_path=metadata_path,
+            adapter=FakeCVAdapter(),
+        )
 
         def fake_model(
             image_path,
@@ -495,6 +714,119 @@ class TopologyArtifactCLITest(unittest.TestCase):
             _cv_result(),
         )
         self.assertTrue(paths["fused"].is_file())
+
+    def test_auto_scatter_skips_model_and_keeps_weak_link_as_disputed(self):
+        output_dir = self.root / "cv-only"
+        output_dir.mkdir()
+        generate_cv_artifact(
+            self.image_path,
+            source_id="scatter-v1",
+            output_path=output_dir / "cv-result.json",
+            metadata_output_path=output_dir / "cv-metadata.json",
+            adapter=FakeCVAdapter(_scatter_cv_result()),
+        )
+        stale_paths = [
+            output_dir / "model-result.json",
+            output_dir / "codeagent-events.jsonl",
+            output_dir / "codeagent-stderr.log",
+            output_dir / "codeagent-events.attempt-1.jsonl",
+            output_dir / "codeagent-stderr.attempt-1.log",
+        ]
+        for stale_path in stale_paths:
+            stale_path.write_text("stale", encoding="utf-8")
+
+        with patch(
+            "kt6_backend.topology_hybrid_cli.generate_model_artifact"
+        ) as model_generator:
+            paths = run_pipeline(
+                self.image_path,
+                source_id="scatter-v1",
+                output_dir=output_dir,
+                reuse_cv=True,
+            )
+
+        model_generator.assert_not_called()
+        self.assertIsNone(paths["model"])
+        self.assertIsNone(paths["events"])
+        self.assertIsNone(paths["stderr"])
+        self.assertTrue(all(not path.exists() for path in stale_paths))
+        routing = json.loads(paths["routing"].read_text(encoding="utf-8"))
+        fused = json.loads(paths["fused"].read_text(encoding="utf-8"))
+        self.assertEqual(routing["decision"], "cv_only")
+        self.assertEqual(routing["scene_type"], "scatter_nodes")
+        self.assertEqual(routing["requested_profile"], "auto")
+        self.assertEqual(routing["effective_profile"], "nodes_only")
+        self.assertEqual(fused["result"]["links"], [])
+        self.assertEqual(len(fused["disputed_links"]), 1)
+        self.assertFalse(
+            fused["disputed_links"][0]["attributes"]["interaction_eligible"]
+        )
+
+    def test_reuse_cv_rejects_a_different_image_hash(self):
+        output_dir = self.root / "hash-mismatch"
+        output_dir.mkdir()
+        generate_cv_artifact(
+            self.image_path,
+            source_id="same-source",
+            output_path=output_dir / "cv-result.json",
+            metadata_output_path=output_dir / "cv-metadata.json",
+            adapter=FakeCVAdapter(),
+        )
+        old_fused = output_dir / "fused-result.json"
+        old_model = output_dir / "model-result.json"
+        old_fused.write_text("old fused", encoding="utf-8")
+        old_model.write_text("old model", encoding="utf-8")
+        self.image_path.write_bytes(ONE_PIXEL_PNG + b"changed")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "does not match the current image",
+        ):
+            run_pipeline(
+                self.image_path,
+                source_id="same-source",
+                output_dir=output_dir,
+                reuse_cv=True,
+            )
+
+        self.assertEqual(old_fused.read_text(encoding="utf-8"), "old fused")
+        self.assertEqual(old_model.read_text(encoding="utf-8"), "old model")
+
+    def test_reuse_cv_rejects_a_tampered_cv_artifact(self):
+        output_dir = self.root / "cv-hash-mismatch"
+        output_dir.mkdir()
+        cv_path = output_dir / "cv-result.json"
+        generate_cv_artifact(
+            self.image_path,
+            source_id="same-source",
+            output_path=cv_path,
+            metadata_output_path=output_dir / "cv-metadata.json",
+            adapter=FakeCVAdapter(),
+        )
+        cv_path.write_text(json.dumps(_scatter_cv_result()), encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "payload hash"):
+            run_pipeline(
+                self.image_path,
+                source_id="same-source",
+                output_dir=output_dir,
+                reuse_cv=True,
+            )
+
+    def test_pipeline_rejects_input_path_collision_without_deleting_image(self):
+        output_dir = self.root / "collision"
+        output_dir.mkdir()
+        colliding_image = output_dir / "fused-result.json"
+        colliding_image.write_bytes(ONE_PIXEL_PNG)
+
+        with self.assertRaisesRegex(ValueError, "artifact paths must be distinct"):
+            run_pipeline(
+                colliding_image,
+                source_id="collision",
+                output_dir=output_dir,
+            )
+
+        self.assertEqual(colliding_image.read_bytes(), ONE_PIXEL_PNG)
 
     def test_pipeline_rejects_reuse_when_cv_artifact_is_missing(self):
         with self.assertRaisesRegex(ValueError, "missing CV artifact"):

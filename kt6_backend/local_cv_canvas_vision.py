@@ -71,6 +71,11 @@ class CVTopologyEvidence:
     node_boxes: Mapping[str, Box] = field(default_factory=dict)
     connectors: tuple[DetectedConnector, ...] = ()
     pass_through_nodes: frozenset[str] = frozenset()
+    connector_scan_status: str = "unknown"
+    connector_pixel_count: int = 0
+    connector_component_count: int = 0
+    line_segment_count: int = 0
+    connector_scan_budget_exhausted: bool = False
 
 
 class LocalImageBackend(Protocol):
@@ -133,7 +138,9 @@ class RapidOCROpenCVBackend:
         diagram_bottom: float,
     ) -> CVTopologyEvidence:
         if len(diagram_nodes) < 2:
-            return CVTopologyEvidence()
+            return CVTopologyEvidence(
+                connector_scan_status="not_applicable",
+            )
 
         cv2 = self._cv2
         np = self._np
@@ -238,8 +245,27 @@ class RapidOCROpenCVBackend:
             diagram_nodes=diagram_nodes,
             anchor_boxes=anchor_boxes,
         )
-        if not bool(np.any(line_mask)):
-            return CVTopologyEvidence()
+        connector_scan_status = (
+            "partial"
+            if len(segments) >= self.MAX_LINE_SEGMENTS
+            else "complete"
+        )
+        connector_pixel_count = int(np.count_nonzero(line_mask))
+        connector_component_count = (
+            int(cv2.connectedComponents(line_mask, connectivity=8)[0]) - 1
+            if connector_pixel_count
+            else 0
+        )
+        if connector_pixel_count == 0:
+            return CVTopologyEvidence(
+                node_boxes=node_boxes,
+                pass_through_nodes=pass_through_nodes,
+                connector_scan_status=connector_scan_status,
+                connector_pixel_count=connector_pixel_count,
+                connector_component_count=connector_component_count,
+                line_segment_count=len(segments),
+                connector_scan_budget_exhausted=connector_scan_status == "partial",
+            )
 
         relation_nodes = {
             business_id: occurrence
@@ -254,6 +280,11 @@ class RapidOCROpenCVBackend:
             return CVTopologyEvidence(
                 node_boxes=node_boxes,
                 pass_through_nodes=pass_through_nodes,
+                connector_scan_status=connector_scan_status,
+                connector_pixel_count=connector_pixel_count,
+                connector_component_count=connector_component_count,
+                line_segment_count=len(segments),
+                connector_scan_budget_exhausted=connector_scan_status == "partial",
             )
 
         candidates: dict[
@@ -605,6 +636,11 @@ class RapidOCROpenCVBackend:
             node_boxes=node_boxes,
             connectors=tuple(connectors),
             pass_through_nodes=pass_through_nodes,
+            connector_scan_status=connector_scan_status,
+            connector_pixel_count=connector_pixel_count,
+            connector_component_count=connector_component_count,
+            line_segment_count=len(segments),
+            connector_scan_budget_exhausted=connector_scan_status == "partial",
         )
 
     def _directional_probe_component_pairs(
@@ -3920,7 +3956,7 @@ class LocalCVTopologyVisionAdapter:
     """Recognize a single topology image without an Agent or external service."""
 
     adapter_id = "local-cv-ocr"
-    adapter_version = "1.3"
+    adapter_version = "1.4"
     supports_actionable_grounding = False
 
     DEFAULT_MIN_OCR_CONFIDENCE = 0.65
@@ -4132,7 +4168,21 @@ class LocalCVTopologyVisionAdapter:
             sort_keys=True,
             allow_nan=False,
         ).encode("utf-8")
-        return self._contract.parse_response_bytes(encoded, prepared.frame_dimensions)
+        parsed = self._contract.parse_response_bytes(
+            encoded,
+            prepared.frame_dimensions,
+        )
+        parsed["diagnostics"] = {
+            "producer": "local_cv_ocr",
+            "connector_scan": {
+                "status": evidence.connector_scan_status,
+                "pixel_count": evidence.connector_pixel_count,
+                "component_count": evidence.connector_component_count,
+                "line_segment_count": evidence.line_segment_count,
+                "budget_exhausted": evidence.connector_scan_budget_exhausted,
+            },
+        }
+        return parsed
 
     def _device_occurrences(
         self,

@@ -139,9 +139,10 @@ python -m kt6_backend.topology_image_cli .\topology.png `
   --timeout 120
 ```
 
-若要避免 CodeAgent 推理时间占用 HTTP 请求，可使用分阶段单图流程。它会先生成
-本地 CV 文件，再独立调用 CodeAgent 生成模型文件，最后离线融合；模型阶段失败时，
-已完成的 CV 文件仍会保留：
+若要避免 CodeAgent 推理时间占用 HTTP 请求，可使用自适应单图流程。它先运行
+RapidOCR/OpenCV，再根据图片证据和任务档位生成路由决策：CV 已满足需求时直接
+融合，只有证据不足或需要语义补充时才调用 CodeAgent。模型阶段失败时，已完成的
+CV、元数据和路由文件仍会保留：
 
 ```powershell
 python -m kt6_backend.topology_hybrid_cli .\topology.png `
@@ -151,7 +152,33 @@ python -m kt6_backend.topology_hybrid_cli .\topology.png `
   --permission-mode dontAsk
 ```
 
-CodeAgent 阶段会实时追加原始 `codeagent-events.jsonl` 和
+默认的 `auto` 模式会根据图片本身选择识别路线，不需要用户指定图片类型：
+
+- 散点图：RapidOCR/OpenCV 只输出节点，连接保持未知，不调用大模型猜测。
+- 规则拓扑图：RapidOCR/OpenCV 输出节点和有明确像素证据的连接。
+- 复杂、低置信度图片：调用 CodeAgent 补充识别。
+
+只有需要强制指定结果范围时才使用 `--requested-profile`：
+
+- `nodes_only`：只要求节点 ID 与分析用图像坐标。高质量散点图可直接走 CV；
+  所有连接候选都不会进入该档位的 grounded 结果，而是保存在
+  `disputed_links` 供审计。图像坐标不授予设备操作绑定。
+- `visible_topology`：要求当前图片中可见的节点和连接。只有全部连接均为
+  清晰直接像素证据、无弱边、无穿越候选且连接数量不过密时才跳过模型。
+- `semantic_enrichment`：要求厂商、型号、角色或层级语义，始终调用模型。
+- `connectivity_query`：要求回答可见连接关系。若扫描完整但没有连接证据，返回
+  `insufficient_evidence`（退出码 `4`），不会让模型猜测画外或隐藏连接。
+
+例如，明确强制只提取节点：
+
+```powershell
+python -m kt6_backend.topology_hybrid_cli .\topology.png `
+  --source-id scatter-nodes-v1 `
+  --out-dir .\runtime_data\scatter-nodes-v1 `
+  --requested-profile nodes_only
+```
+
+实际进入 CodeAgent 阶段时会实时追加原始 `codeagent-events.jsonl` 和
 `codeagent-stderr.log`，终端不会展开事件中的图片 Base64。暂存图片位于
 CodeAgent 工作目录内部，因此不再为每次随机目录传递 `--add-dir`。每 10 秒
 输出的心跳会显示最后一个完整事件、stdout/stderr 字节数和无输出时长；连续
@@ -212,6 +239,9 @@ KT6 会
 阈值时才进入 `rejected_links`。
 
 模型阶段失败后，可复用 CV 文件只重试模型识别与融合：
+`--reuse-cv` 同时要求已有 `cv-metadata.json`，并会核对当前图片 SHA-256、
+宽高、`source-id`、CV 适配器版本和 `cv-result.json` 内容哈希；旧版本、被修改
+的 CV 结果或另一张图片生成的 CV 文件都会拒绝复用。校验失败不会先删除旧结果。
 
 ```powershell
 python -m kt6_backend.topology_hybrid_cli .\topology.png `
@@ -229,20 +259,29 @@ python -m kt6_backend.topology_hybrid_cli .\topology.png `
 
 ```text
 cv-result.json             本地 RapidOCR/OpenCV 原始结果
-model-result.json          CodeAgent 精简语义模型结果
-codeagent-events.jsonl     CodeAgent 原始 stream-json 事件
-codeagent-stderr.log       CodeAgent 启动与错误诊断
-*.attempt-1.*              首次失败尝试的 events/stderr（发生重试时）
-fused-result.json          两份结果的离线融合结果
+cv-metadata.json           图片/CV 结果哈希、尺寸、source-id 与适配器版本
+routing-result.json        场景分类、任务档位、质量指标与路由原因
+fused-result.json          最终融合结果（始终生成）
+model-result.json          CodeAgent 语义结果（仅 model_assist）
+codeagent-events.jsonl     CodeAgent 事件（仅 model_assist）
+codeagent-stderr.log       CodeAgent 诊断（仅 model_assist）
+*.attempt-1.*              模型重试日志（仅发生重试时）
 ```
 
-端到端成功时终端 JSON 的 `status` 为 `ok`，退出码为 `0`，并且上述五个文件
-全部生成。建议进一步确认融合计数：
+`routing-result.json` 的 `decision` 为 `cv_only`、`model_assist` 或
+`insufficient`，它表示执行路线而不是最终成功状态。最终只有
+`requirement_satisfied=true` 时终端才返回 `status=ok` 和退出码 `0`；
+CV-only 输出中的 `model/events/stderr` 为 `null`，并会清理旧模型日志。
+模型完成但仍缺少所需连接/语义时同样返回 `status=insufficient_evidence`
+和退出码 `4`。建议进一步确认路由原因和融合计数：
 
 ```powershell
+$r = Get-Content .\runtime_data\hybrid-file-v1\routing-result.json `
+  -Raw -Encoding UTF8 | ConvertFrom-Json
 $f = Get-Content .\runtime_data\hybrid-file-v1\fused-result.json `
   -Raw -Encoding UTF8 | ConvertFrom-Json
 
+$r | Format-List
 $f.summary | Format-List
 ```
 
@@ -259,7 +298,8 @@ $f.summary | Format-List
 ```powershell
 python -m kt6_backend.topology_cv_cli .\topology.png `
   --source-id hybrid-file-v1 `
-  --out .\cv-result.json
+  --out .\cv-result.json `
+  --metadata-out .\cv-metadata.json
 
 python -m kt6_backend.topology_model_cli .\topology.png `
   --source-id hybrid-file-v1 `
