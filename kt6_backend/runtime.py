@@ -321,6 +321,7 @@ class KT6Runtime:
             task,
             topology=topology,
             ui_perception=topology["ui_perception"],
+            dom_action_bindings=topology.get("dom_action_bindings", {}),
             perception_meta=perception_meta,
             scene_ref={
                 "scene_key": perception_meta.get("scene_key"),

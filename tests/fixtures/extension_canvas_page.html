@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>纯 Canvas 页面</title>
+  </head>
+  <body>
+    <canvas id="network-topology" width="640" height="360"></canvas>
+    <script>
+      const canvas = document.querySelector("#network-topology");
+      canvas.style.width = "640px";
+      canvas.style.height = "360px";
+      const context = canvas.getContext("2d");
+      context.fillStyle = "#102a43";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.fillStyle = "#ffffff";
+      context.font = "24px sans-serif";
+      context.fillText("CORE-001", 250, 180);
+    </script>
+    <script src="/browser_extension/content-collector.js"></script>
+    <pre id="collector-output" hidden></pre>
+    <script>
+      document.querySelector("#collector-output").textContent =
+        JSON.stringify(window.__KT6_EXTENSION_CAPTURE__);
+    </script>
+  </body>
+</html>

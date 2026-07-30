@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>KT6 页面感知</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <h1>KT6 页面感知</h1>
+      <p>语义优先采集当前页面的业务对象、可操作元素、关键文本和 Canvas。</p>
+      <button id="capture" type="button">采集当前页面</button>
+      <div id="status" class="status" aria-live="polite">等待采集</div>
+
+      <section id="result" hidden>
+        <div class="metrics">
+          <div class="metric capture-id">
+            <span>Capture ID</span>
+            <strong data-metric="capture-id">-</strong>
+          </div>
+          <div class="metric">
+            <span>页面帧</span>
+            <strong data-metric="frames">-</strong>
+          </div>
+          <div class="metric">
+            <span>扫描</span>
+            <strong data-metric="scanned">-</strong>
+          </div>
+          <div class="metric">
+            <span>候选</span>
+            <strong data-metric="candidates">-</strong>
+          </div>
+          <div class="metric">
+            <span>提交</span>
+            <strong data-metric="submitted">-</strong>
+          </div>
+          <div class="metric">
+            <span>可操作</span>
+            <strong data-metric="actionable">-</strong>
+          </div>
+          <div class="metric">
+            <span>Canvas</span>
+            <strong data-metric="canvas">-</strong>
+          </div>
+          <div class="metric">
+            <span>截断</span>
+            <strong data-metric="truncated">-</strong>
+          </div>
+        </div>
+        <h2>识别到的关键元素</h2>
+        <div id="element-preview" class="element-preview"></div>
+      </section>
+    </main>
+    <script src="popup-v2.js"></script>
+  </body>
+</html>

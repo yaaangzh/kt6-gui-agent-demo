@@ -265,6 +265,37 @@ class PagePerceptionTest(unittest.TestCase):
         self.assertEqual(dom_candidate["object_count"], 1)
         self.assertEqual(dom_candidate["elements"][0]["label"], "不规则 canvas 网络拓扑画布")
 
+    def test_dom_actions_remain_available_when_canvas_needs_vision(self):
+        payload = live_capture_payload()
+        payload["adapter_scene"] = None
+        payload["dom"] = {
+            "elements": [
+                {
+                    "ref": "frame:0:#resource-menu",
+                    "selector": "#resource-menu",
+                    "tag": "button",
+                    "role": "button",
+                    "label": "资源管理",
+                    "bbox": [20, 20, 120, 40],
+                    "actionable": True,
+                    "frame_id": "0",
+                    "frame_url": "https://nce.example/portal",
+                    "document_id": "document-main",
+                }
+            ]
+        }
+
+        capture = self.service.ingest(payload)
+        topology = self.service.get_topology(capture["capture_id"])
+
+        self.assertEqual(capture["summary"]["selected_mode"], "canvas_screenshot_capture")
+        binding = capture["dom_action_bindings"]["frame:0:#resource-menu"]
+        self.assertEqual(binding["dom_ref"], "#resource-menu")
+        self.assertEqual(
+            topology["dom_action_bindings"],
+            capture["dom_action_bindings"],
+        )
+
     def test_dom_scene_builds_browser_hierarchy_without_topology_relations(self):
         payload = live_capture_payload()
         payload["adapter_scene"] = None
@@ -323,6 +354,63 @@ class PagePerceptionTest(unittest.TestCase):
         self.assertEqual(stored[2]["parent_ref"], "#panel")
         self.assertEqual(stored[2]["depth"], 2)
         self.assertEqual(stored[2]["document_order"], 1)
+
+    def test_browser_extension_dom_preserves_frame_selector_and_action_binding(self):
+        payload = live_capture_payload()
+        payload["adapter_scene"] = None
+        payload["canvases"] = []
+        payload["dom"] = {
+            "elements": [
+                {
+                    "ref": "frame:7:@capture:1",
+                    "selector": "div[aria-label=\"Network Digital Map\"]",
+                    "parent_ref": "",
+                    "depth": 4,
+                    "document_order": 0,
+                    "tag": "div",
+                    "role": "button",
+                    "label": "Network Digital Map",
+                    "aria_label": "Network Digital Map",
+                    "bbox": [300, 200, 180, 96],
+                    "disabled": False,
+                    "checked": False,
+                    "actionable": True,
+                    "frame_id": "7",
+                    "frame_url": "https://nce.example/portal",
+                    "document_id": "document-7",
+                }
+            ]
+        }
+
+        capture = self.service.ingest(payload)
+        topology = self.service.get_topology(capture["capture_id"])
+        result = self.service.get_result(capture["capture_id"])
+        scene = capture["scene"]
+
+        self.assertEqual(capture["summary"]["selected_mode"], "live_dom_snapshot")
+        self.assertEqual(capture["summary"]["dom_actionable_element_count"], 1)
+        self.assertEqual(scene["elements"][0]["frame_id"], "7")
+        self.assertEqual(
+            scene["elements"][0]["selector"],
+            "div[aria-label=\"Network Digital Map\"]",
+        )
+        self.assertEqual(
+            scene["ui_tree"]["roots"],
+            ["frame:7:@capture:1"],
+        )
+        binding = scene["dom_action_bindings"]["frame:7:@capture:1"]
+        self.assertEqual(binding["frame_id"], "7")
+        self.assertEqual(binding["document_id"], "document-7")
+        self.assertEqual(
+            result["perception"]["dom_action_bindings"],
+            scene["dom_action_bindings"],
+        )
+        self.assertEqual(
+            capture["dom_action_bindings"],
+            scene["dom_action_bindings"],
+        )
+        self.assertEqual(topology["dom_action_bindings"], scene["dom_action_bindings"])
+        self.assertFalse(scene["actionable_grounding"])
 
     def test_dom_hierarchy_records_bad_refs_without_losing_nodes(self):
         payload = live_capture_payload()

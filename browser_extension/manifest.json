@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "KT6 Page Perception Capture",
+  "version": "0.2.0",
+  "description": "Capture DOM/ARIA and Canvas evidence from the active page for the local KT6 service.",
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:8787/*",
+    "http://localhost:8787/*"
+  ],
+  "action": {
+    "default_title": "Capture page for KT6",
+    "default_popup": "popup.html"
+  }
+}

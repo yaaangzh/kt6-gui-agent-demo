@@ -22,11 +22,12 @@ CodeAgentCLI 的 Windows 启动方式、真实图片验证结论、已知限制�
 | 执行安全 | `solution_id`、场景版本、资源锁、执行前 checkpoint 与动作后置条件校验 |
 | 步骤扩展 | 按诊断/动作 phase 和 step ID 注册处理器，校验步骤 type、state 与必填字段 |
 | 页面感知 | DOM/ARIA、Canvas 截图、渲染器 Scene、拓扑文本重建及 Local CV/HTTP/CodeAgent CanvasVision Adapter |
+| 在线页面采集 | Chrome/Edge 扩展 v0.2，语义优先采集 DOM/ARIA、iframe、稳定选择器和 Canvas |
 | 感知缓存 | Scene Graph 缓存、`scene_revision`、`HIT/MISS/INCREMENTAL` |
 | 拓扑变化检测 | 节点、位置、链路增删及链路语义属性变化检测；关键变化触发重规划 |
 | 运行记忆 | SQLite 持久化任务、事件、检查点、场景和业务处理结果 |
 | KT5 接入基础 | 感知拓扑与生成拓扑共用统一 Scene Graph 契约 |
-| 自动化测试 | 当前 249 项通过，42 项因缺少可选 RapidOCR/OpenCV 依赖而跳过 |
+| 自动化测试 | 当前 283 项通过，42 项因缺少可选 RapidOCR/OpenCV 依赖而跳过 |
 
 ## 业务场景
 
@@ -117,6 +118,24 @@ flowchart LR
 | Canvas Renderer Adapter | 可以读取图引擎、Store、接口或渲染前 `nodes/edges` 的 Canvas | 当前 Demo 已使用 |
 | Topology Text Recognizer | 人工 ASCII 或外部 OCR 已转写出的结构化拓扑文本 | 已完成首个严格样例 |
 | Canvas Vision Adapter | 只能获得截图、图片、远程桌面或封闭 Canvas | 本地 RapidOCR/OpenCV、HTTP 服务与 CodeAgent read-tool 三种驱动、严格协议和 pixels-only CLI 已完成 |
+
+### 在线页面 DOM 采集
+
+仓库中的 `browser_extension/` 是无法修改目标页面源码时的采集桥梁。扩展在用户
+点击按钮后读取当前 HTTP(S) 页面以及浏览器允许访问的 iframe，再把结果提交给 KT6。
+先运行 `python -m kt6_backend.app`，再到 Chrome 的 `chrome://extensions` 或 Edge
+的 `edge://extensions` 打开开发者模式，加载本仓库的 `browser_extension` 目录。
+扩展更新后必须在扩展管理页点击刷新，再回到目标页面重新采集。
+
+扩展 v0.2 使用语义优先采集：优先保留业务 ID、按钮、菜单、表格、树、标题和可点击
+卡片，过滤可点击父元素内部继承 `cursor:pointer` 的重复图标与文本。没有交互控件时
+会回退采集标题和短正文；弹窗显示扫描、候选、提交、可操作、Canvas、截断和 iframe
+数量，并预览关键元素、业务 ID 与 CSS 选择器，不再只返回一个 DOM 总数。
+
+浏览器内部页面、内置 PDF 阅读器和未授予访问权限的跨域 iframe 不在采集范围内。
+后端会把带稳定选择器的可操作元素记录到 `dom_action_bindings`，但普通 DOM 绑定目前
+只用于页面理解和后续定位，不自动取得设备操作权限；产生业务副作用仍需要
+`data-business-id` 等业务绑定、执行前重校验和现有 Runtime 门禁。
 
 当前 Canvas 截图由浏览器实时采集，但 Demo 中的节点语义主要来自 `window.__KT6_PAGE_ADAPTER__` 暴露的渲染器数据，其底层业务拓扑仍为 Mock。遇到只有像素、没有内部语义的 Canvas 时，后端会明确返回 `requires_vision_model=true`，不会伪造节点绑定；若 `toDataURL()` 失败，则保留采集错误并回退可用 DOM，也不会虚报已有视觉输入。
 
@@ -332,7 +351,7 @@ python -m kt6_backend.topology_fusion_cli `
 融合。HTTP 感知接口仍维持 300 秒上限；复杂图片超过 900 秒的离线任务上限拆分
 尚未实现。
 
-Browser Use 后续可以作为浏览器会话、DOM 获取、截图和通用 GUI 操作底座，但其内置视觉不能单独替代拓扑感知：稳定的节点/链路重建、业务 ID 绑定、跨帧对象一致性和拓扑版本判断仍需要 Renderer Adapter 或专用 Canvas Vision Adapter。
+当前浏览器扩展已经提供显式触发的 DOM/ARIA 与 Canvas 采集。Browser Use 后续可以作为浏览器会话和通用 GUI 执行底座，但其内置视觉不能单独替代拓扑感知：稳定的节点/链路重建、业务 ID 绑定、跨帧对象一致性和拓扑版本判断仍需要 Renderer Adapter 或专用 Canvas Vision Adapter。
 
 ## Scene 缓存与拓扑变化
 
@@ -500,6 +519,7 @@ kt6_backend/
 
 playbooks/                     诊断和动作任务链
 data/                          Mock 业务数据
+browser_extension/             Chrome/Edge 在线页面语义采集扩展 v0.2
 demo/                          LUI-GUI Web 界面
 tests/                         自动化测试
 ```
@@ -510,10 +530,11 @@ tests/                         自动化测试
 python -m unittest discover -s tests
 ```
 
-当前结果为 249 项通过、42 项跳过。跳过项来自当前开发环境缺少可选
+当前结果为 283 项通过、42 项跳过。跳过项来自当前开发环境缺少可选
 RapidOCR/OpenCV 运行依赖，不是测试失败。覆盖范围包括意图路由、缺参澄清、
-动作授权、Playbook 预检、步骤注册、资源锁、执行后置条件、运行记忆、页面采集
-失败回退、DOM/ARIA `ui_tree`、文本拓扑重建、本地 RapidOCR/OpenCV、密集星型、
+动作授权、Playbook 预检、步骤注册、资源锁、执行后置条件、运行记忆、在线扩展
+语义采集、普通文本回退、复杂页面截断、Canvas 回退、页面采集失败回退、
+DOM/ARIA `ui_tree`、文本拓扑重建、本地 RapidOCR/OpenCV、密集星型、
 图标与偏移标签、分层主干、紧凑交叉线、容器外框、密集纹理、OCR 标签遮挡、
 500 节点候选预算、缩放虚线与黑底彩色加权图、HTTP/CodeAgent Vision、Read
 像素证据、重复 Read、截止线成功事件、精简模型协议、前置/尾随模型说明、

@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>纯文本帮助页面</title>
+  </head>
+  <body>
+    <main>
+      <h1>网络维护说明</h1>
+      <p>这个页面没有按钮和业务对象，采集器应回退识别标题与关键正文。</p>
+      <p>维护窗口为每周日凌晨两点。</p>
+    </main>
+    <script src="/browser_extension/content-collector.js"></script>
+    <pre id="collector-output" hidden></pre>
+    <script>
+      document.querySelector("#collector-output").textContent =
+        JSON.stringify(window.__KT6_EXTENSION_CAPTURE__);
+    </script>
+  </body>
+</html>

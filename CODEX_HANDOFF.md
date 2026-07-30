@@ -27,6 +27,11 @@ cv-result.json + model-result.json
 当前不以单一算法达到 100% 准确率为目标。CV 提供坐标、OCR 置信度和像素连线，
 模型提供语义、层级、连接和结构判断，最后通过确定性算法互补融合。
 
+同时已经增加在线页面 DOM 路线。由于当前仓库没有 FEBS/NCE 前端源码，暂不做
+嵌入式 SDK 集成；现阶段使用 Chrome/Edge 扩展 v0.2，由用户显式采集普通
+HTTP(S) 页面中的 DOM/ARIA、iframe 上下文、稳定选择器和 Canvas 像素，再提交
+给本机 KT6。扩展只负责页面感知和定位候选，不直接执行点击或业务动作。
+
 用户已明确：先把链路打通，真实图片准确率、批量评测、复杂图片超长 timeout
 和更深层模型优化之后再处理。
 
@@ -36,11 +41,13 @@ cv-result.json + model-result.json
 
 ```text
 开发目录：D:\yangzehui\FreeStyleCopilot
-测试目录：D:\04project\FreeStyle_Copilot_KT6_demo
+测试目录（另一台测试机）：D:\04project\FreeStyle_Copilot_KT6_demo
 GitHub：git@github.com:yaaangzh/kt6-gui-agent-demo.git
 分支：main
-已推送融合基线：41583d6；当前最新提交以 `git log` 为准
+已推送最新提交：d68ef18 增强在线页面DOM语义采集扩展
 ```
+
+当前开发机未挂载 `D:\04project`，不要把测试目录不存在误判为代码问题。
 
 包含本文和 README 更新的实际最新提交应以以下命令为准：
 
@@ -50,6 +57,8 @@ git log -1 --oneline --decorate
 
 注意事项：
 
+- 当前网络下 GitHub SSH 22 端口不可用，`d68ef18` 已通过 HTTPS 推送并核验远端。
+- 本轮 README/交接文档修改是否已提交，必须以 `git status` 和 `git log` 为准。
 - `review.md` 是用户的未跟踪文件，不得加入提交。
 - 用户说“提交”时，默认同时 commit 和 push，除非明确要求仅本地提交。
 - 当前工作直接更新 `main`，没有使用 PR。
@@ -71,6 +80,12 @@ kt6_backend/topology_hybrid_cli.py
 kt6_backend/topology_fusion.py
 kt6_backend/topology_fusion_cli.py
 kt6_backend/codeagent_canvas_vision.py
+kt6_backend/page_perception.py
+kt6_backend/runtime.py
+browser_extension/manifest.json
+browser_extension/content-collector.js
+browser_extension/popup-v2.js
+browser_extension/popup.html
 ```
 
 测试文件：
@@ -80,6 +95,11 @@ tests/test_codeagent_canvas_vision.py
 tests/test_topology_model_contract.py
 tests/test_topology_artifact_clis.py
 tests/test_topology_fusion.py
+tests/test_page_perception.py
+tests/test_browser_extension_assets.py
+tests/fixtures/extension_plain_page.html
+tests/fixtures/extension_complex_page.html
+tests/fixtures/extension_canvas_page.html
 ```
 
 当前代码已包含：
@@ -102,6 +122,52 @@ tests/test_topology_fusion.py
 - 图片 Read 完成后默认 300 秒无 stdout 会终止停滞进程并在剩余预算内重试。
 - 首次失败 events/stderr 归档为 `*.attempt-1.*`，不会被下一次尝试覆盖。
 - CLI 错误 JSON 包含 `error_code`、`category` 和 `retryable`。
+- 扩展按业务语义优先采集元素，并限制每个 frame 最多提交 220 个候选。
+- 扩展过滤继承 `cursor:pointer` 产生的按钮子节点重复，同时保留普通文本页回退。
+- 扩展采集 iframe/document 上下文、稳定 selector、业务 ID、ARIA 和 Canvas 像素。
+- 弹窗展示扫描数、候选数、提交数、可操作数、Canvas 数、截断状态和关键元素预览。
+- 后端保留 `selector`、`source_ref`、`frame_id`、`frame_url`、`document_id` 和
+  `actionable`，并生成 `dom_action_bindings`。
+- 即使最终视觉路线选择 Canvas，DOM 动作绑定仍会在顶层结果和 Runtime 中保留。
+- disabled 元素不会成为交互候选；普通 DOM 绑定也不会自动升级为可执行业务动作。
+- 扩展权限保持为 `activeTab` + `scripting`，没有申请 `<all_urls>`。
+
+### 3.1 在线页面 DOM 扩展 v0.2
+
+启动本机后端：
+
+```powershell
+python -m kt6_backend.app
+```
+
+在 Chrome 的 `chrome://extensions` 或 Edge 的 `edge://extensions` 中打开开发者
+模式，选择“加载已解压的扩展程序”，加载：
+
+```text
+D:\yangzehui\FreeStyleCopilot\browser_extension
+```
+
+代码更新后必须在扩展管理页点击“重新加载”。随后打开一个普通 HTTP(S) 页面，
+点击扩展中的“采集当前页面”。正常结果应同时看到采集统计和关键元素预览，而不是
+只有固定的 `DOM: 600`。
+
+结果解释：
+
+- `truncated: true` 表示候选超过预算且已明确截断，不等于采集失败。
+- 纯 Canvas 页面允许 `DOM: 0`，但应有 `Canvas > 0` 且包含像素证据。
+- 普通文本页即使没有按钮，也应通过标题/正文回退产生少量 DOM 候选。
+- 扩展不会执行点击；后续真实动作仍需业务资产绑定、重新校验和授权。
+
+查看后端最近一次页面采集：
+
+```powershell
+Invoke-RestMethod `
+  -Uri 'http://127.0.0.1:8787/api/perception/captures?limit=1' |
+  ConvertTo-Json -Depth 10
+```
+
+当前没有 FEBS/NCE 前端源码，因此不能把本扩展描述成“已经嵌入目标系统”。拿到
+源码后可复用相同采集协议改成页面内 SDK。
 
 ## 4. CodeAgentCLI 运行事实
 
@@ -277,7 +343,7 @@ pair-level 负证据与低于阈值的 CV 链路组合会真正 rejected；全�
 开发环境最后一次结果：
 
 ```text
-249 项通过
+283 项通过
 42 项跳过
 ```
 
@@ -298,7 +364,15 @@ python -m unittest `
   tests.test_topology_artifact_clis
 ```
 
-当前定向结果应为 49 项通过。
+定向测试数量会随回归用例增长，以命令实际输出为准。
+
+页面感知与扩展定向命令：
+
+```powershell
+python -m unittest `
+  tests.test_browser_extension_assets `
+  tests.test_page_perception
+```
 
 ### 7.2 测试环境端到端命令
 
@@ -433,6 +507,18 @@ python -m kt6_backend.topology_hybrid_cli `
 - 只有 CV 或渲染器提供的可验证几何信息可以参与真实定位。
 - 当前 Demo 业务语义、指标和设备动作仍有 Mock 边界。
 
+### 9.5 在线 DOM 扩展
+
+- 只支持普通 HTTP(S) 页面；不能采集 `chrome://`、浏览器扩展商店、内部 PDF 或
+  `file://` 页面。
+- `activeTab` 权限下，跨域 iframe 的脚本注入可能受页面和浏览器安全策略限制。
+- closed Shadow DOM 无法从外部扩展读取。
+- 纯 Canvas 的业务对象没有原生 DOM 节点，需要继续走 Canvas/视觉识别。
+- 当前尚未用真实 FEBS/NCE 在线页面完成扩展验证，不能把通用网页测试结果等同于
+  目标系统已经适配。
+- `dom_action_bindings` 是观察和定位证据；只有完成真实业务绑定后，
+  `actionable_grounding` 才能为真。
+
 ## 10. 近期已解决问题
 
 ```text
@@ -480,19 +566,35 @@ result/success 在截止线仍报 timeout
 
 图片 Read 完成后长时间无 stdout，直到 900 秒才失败
 → 离线 CLI 默认 300 秒图后 idle watchdog，并在共享总预算内有限重试
+
+任意网页采集固定显示 DOM 600，无法判断采集了什么
+→ 改成语义优先候选、每 frame 220 上限、显式截断统计和关键元素预览
+
+一个按钮因子节点继承 cursor:pointer 被重复采集
+→ 过滤已有可操作祖先的非语义子节点，同时保留真正独立的交互元素
+
+纯文本页面没有可操作控件时采集为空
+→ 增加标题和正文文本回退，不再把“无按钮”等同于“无页面语义”
+
+纯 Canvas 页面 DOM 为零
+→ 保留 Canvas 像素证据并交给视觉路线，DOM 为零不再自动判定失败
 ```
 
 ## 11. 后续建议
 
 按当前用户优先级排序：
 
-1. 在测试环境同步当前修改，依次复测 `1.png`、`2.png`、`3.png`，确认自动重试、
+1. 在真实 NCE 在线页面重新加载扩展 v0.2 并采集，记录统计、预览和后端
+   `dom_action_bindings`，优先验证菜单、卡片、表格、树和 iframe。
+2. 若要把“关闭 AP1”落到真实点击，先实现 DOM 候选到设备资产的业务绑定和
+   执行前重新校验，不要直接用 selector 自动点击。
+3. 在测试环境同步当前修改，依次复测 `1.png`、`2.png`、`3.png`，确认自动重试、
    grounded/display/semantic 计数、disputed/rejected 状态及坐标映射。
-2. 建立三张真实图片的人工节点/链路真值，不再用“链接越多越好”判断准确率。
-3. 后续再拆分 HTTP timeout 和超过 900 秒的离线任务总预算。
-4. 增加正式 events 恢复 CLI，避免成功结果因后处理失败而重新调用模型。
-5. 建立多图片黄金数据集，统计节点、连接、层级、厂商和型号准确率。
-6. 需要 GLM 直连或多模型路由时，再抽象 `TopologyModelHarness`；当前无需引入
+4. 建立三张真实图片的人工节点/链路真值，不再用“链接越多越好”判断准确率。
+5. 后续再拆分 HTTP timeout 和超过 900 秒的离线任务总预算。
+6. 增加正式 events 恢复 CLI，避免成功结果因后处理失败而重新调用模型。
+7. 建立多图片黄金数据集，统计节点、连接、层级、厂商和型号准确率。
+8. 需要 GLM 直连或多模型路由时，再抽象 `TopologyModelHarness`；当前无需引入
    大型 Harness 框架。
 
 ## 12. 新 Codex 接手检查清单
@@ -509,6 +611,9 @@ python -m unittest discover -s tests
 然后确认：
 
 - `review.md` 是否仍为未跟踪文件。
+- 扩展 `manifest.json` 是否为 v0.2，并在浏览器扩展管理页完成重新加载。
+- 目标系统源码目前并不在仓库中，不要误称已经完成 FEBS/NCE 页面内嵌集成。
+- 文档变更前的远端最新代码提交为 `d68ef18`，后续以 `git log` 为准。
 - `main` 是否与 `origin/main` 一致。
 - 测试环境最新失败属于 CV、CodeAgent transport、模型协议还是融合阶段。
 - 不要在没有真实事件证据时继续放宽协议。

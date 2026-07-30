@@ -195,6 +195,7 @@ class PagePerceptionService:
             },
             "scene": selected,
             "business_object_bindings": selected["business_object_bindings"],
+            "dom_action_bindings": dom_scene["dom_action_bindings"],
             "decision": self._decision(dom_scene, canvas_scene, text_scene, selected),
         }
 
@@ -211,6 +212,11 @@ class PagePerceptionService:
         )
         summary = {
             "dom_element_count": len(dom["elements"]),
+            "dom_actionable_element_count": sum(
+                1
+                for item in dom["elements"]
+                if item.get("actionable") and not item.get("disabled")
+            ),
             "canvas_count": len(canvases),
             "canvas_screenshot_count": sum(1 for canvas in canvases if canvas.get("screenshot_path")),
             "adapter_scene_available": adapter_scene is not None,
@@ -265,6 +271,7 @@ class PagePerceptionService:
         topology["ui_perception_candidates"] = perception["candidates"]
         topology["ui_perception"] = perception["scene"]
         topology["perception_decision"] = perception["decision"]
+        topology["dom_action_bindings"] = copy.deepcopy(perception.get("dom_action_bindings", {}))
         topology["perception_meta"] = result["meta"]
         topology["topology_changes"] = result["changes"]
         return topology
@@ -277,6 +284,9 @@ class PagePerceptionService:
             "perception_meta": copy.deepcopy(record["result"]["meta"]),
             "topology_changes": copy.deepcopy(record["result"]["changes"]),
             "scene": copy.deepcopy(record["result"]["perception"]["scene"]),
+            "dom_action_bindings": copy.deepcopy(
+                record["result"]["perception"].get("dom_action_bindings", {})
+            ),
             "created_at": record["created_at"],
         }
 
@@ -313,7 +323,10 @@ class PagePerceptionService:
                 document_order = index
             elements.append(
                 {
-                    "ref": str(item.get("ref") or "")[:500],
+                    "ref": str(item.get("ref") or item.get("selector") or "")[:500],
+                    "selector": str(item.get("selector") or item.get("ref") or "")[
+                        :500
+                    ],
                     "parent_ref": str(item.get("parent_ref") or "")[:500],
                     "depth": depth,
                     "document_order": document_order,
@@ -327,6 +340,10 @@ class PagePerceptionService:
                     "bbox": [round(float(value), 2) for value in bbox],
                     "disabled": bool(item.get("disabled", False)),
                     "checked": bool(item.get("checked", False)),
+                    "actionable": bool(item.get("actionable", False)),
+                    "frame_id": str(item.get("frame_id", "0"))[:100],
+                    "frame_url": str(item.get("frame_url", ""))[:2048],
+                    "document_id": str(item.get("document_id", ""))[:200],
                 }
             )
         return {"elements": elements}
@@ -428,6 +445,7 @@ class PagePerceptionService:
     def _dom_scene(self, dom: dict[str, Any], page: dict[str, Any]) -> dict[str, Any]:
         elements = []
         bindings = {}
+        action_bindings = {}
         for index, item in enumerate(dom["elements"], start=1):
             x, y, width, height = item["bbox"]
             business_id = item.get("business_id") or None
@@ -438,7 +456,16 @@ class PagePerceptionService:
                 "business_id": business_id,
                 "type": item.get("business_type") or item.get("role") or item.get("tag") or "element",
                 "label": item.get("aria_label") or item.get("label") or item.get("placeholder") or element_id,
-                "selector": item.get("ref"),
+                "selector": item.get("selector"),
+                "source_ref": item.get("ref"),
+                "frame_id": item.get("frame_id", "0"),
+                "frame_url": item.get("frame_url", ""),
+                "document_id": item.get("document_id", ""),
+                "interaction_eligible": bool(
+                    item.get("actionable")
+                    and not item.get("disabled")
+                    and item.get("selector")
+                ),
                 "parent_ref": item.get("parent_ref", ""),
                 "depth": item.get("depth", 0),
                 "document_order": item.get("document_order", index - 1),
@@ -449,6 +476,7 @@ class PagePerceptionService:
                     "role": item.get("role"),
                     "disabled": item.get("disabled"),
                     "checked": item.get("checked"),
+                    "actionable": item.get("actionable"),
                 },
                 "confidence": confidence,
             }
@@ -456,7 +484,25 @@ class PagePerceptionService:
             if business_id:
                 bindings[business_id] = {
                     "element_id": element_id,
-                    "dom_ref": item.get("ref"),
+                    "dom_ref": item.get("selector"),
+                    "source_ref": item.get("ref"),
+                    "frame_id": item.get("frame_id", "0"),
+                    "frame_url": item.get("frame_url", ""),
+                    "document_id": item.get("document_id", ""),
+                    "confidence": confidence,
+                    "method": "live_dom_snapshot",
+                }
+            if (
+                item.get("actionable")
+                and not item.get("disabled")
+                and item.get("selector")
+            ):
+                action_bindings[str(item.get("ref") or element_id)] = {
+                    "element_id": element_id,
+                    "dom_ref": item.get("selector"),
+                    "frame_id": item.get("frame_id", "0"),
+                    "frame_url": item.get("frame_url", ""),
+                    "document_id": item.get("document_id", ""),
                     "confidence": confidence,
                     "method": "live_dom_snapshot",
                 }
@@ -473,6 +519,7 @@ class PagePerceptionService:
             "elements": elements,
             "ui_tree": ui_tree,
             "business_object_bindings": bindings,
+            "dom_action_bindings": action_bindings,
             "relations": [],
             "co_channel_relations": [],
             "relation_count": 0,
@@ -488,6 +535,7 @@ class PagePerceptionService:
             pixel_inference_performed=False,
             pixel_verified=False,
             actionable_grounding=bool(bindings),
+            dom_actionable_element_count=len(action_bindings),
         )
 
     def _dom_ui_tree(self, elements: list[dict[str, Any]]) -> dict[str, Any]:
@@ -515,7 +563,9 @@ class PagePerceptionService:
 
         for fallback_order, element in ordered:
             element_id = str(element.get("element_id", f"live_dom_{fallback_order + 1:04d}"))
-            source_ref = str(element.get("selector", "")).strip()
+            source_ref = str(
+                element.get("source_ref") or element.get("selector", "")
+            ).strip()
             document_order = int(element.get("document_order", fallback_order))
             if not source_ref:
                 node_ref = generated_ref(element_id)

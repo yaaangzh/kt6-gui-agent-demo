@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>复杂管理页面</title>
+    <style>
+      button,
+      .card {
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <nav aria-label="产品导航">
+      <button data-business-id="resource-management">
+        <span>资源管理</span>
+      </button>
+      <button data-business-id="business-monitoring">
+        <span>业务监控</span>
+      </button>
+    </nav>
+    <main>
+      <h1>工作台</h1>
+      <div
+        class="card"
+        role="button"
+        tabindex="0"
+        aria-label="Network Digital Map"
+      >
+        <strong>Network Digital Map</strong>
+        <small>打开网络数字地图</small>
+      </div>
+      <section id="large-menu" aria-label="批量菜单"></section>
+    </main>
+    <script>
+      const menu = document.querySelector("#large-menu");
+      for (let index = 1; index <= 260; index += 1) {
+        const button = document.createElement("button");
+        button.textContent = `菜单 ${index}`;
+        menu.append(button);
+      }
+    </script>
+    <script src="/browser_extension/content-collector.js"></script>
+    <pre id="collector-output" hidden></pre>
+    <script>
+      document.querySelector("#collector-output").textContent =
+        JSON.stringify(window.__KT6_EXTENSION_CAPTURE__);
+    </script>
+  </body>
+</html>
