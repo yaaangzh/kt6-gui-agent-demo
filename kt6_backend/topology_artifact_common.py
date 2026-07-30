@@ -72,7 +72,40 @@ def normalize_cv_context(payload: dict[str, Any]) -> dict[str, Any]:
         raise TopologyArtifactCLIError(
             "CV JSON objects/elements and links/relations must be lists"
         )
-    return {"objects": objects, "links": links}
+    context = {"objects": objects, "links": links}
+    ocr_text_anchors = _extract_local_ocr_text_anchors(payload, source)
+    if ocr_text_anchors:
+        context["ocr_text_anchors"] = ocr_text_anchors
+    return context
+
+
+def _extract_local_ocr_text_anchors(
+    payload: dict[str, Any],
+    source: dict[str, Any],
+) -> list[Any]:
+    """Forward only bounded anchors produced by the trusted local OCR schema."""
+
+    candidates = [source]
+    if source is not payload:
+        candidates.append(payload)
+    for candidate in candidates:
+        diagnostics = candidate.get("diagnostics")
+        if (
+            not isinstance(diagnostics, dict)
+            or diagnostics.get("producer") != "local_cv_ocr"
+        ):
+            continue
+        container = diagnostics.get("ocr_text_anchors")
+        if (
+            not isinstance(container, dict)
+            or container.get("schema_version")
+            != "kt6.local-ocr-text-anchors.v1"
+        ):
+            continue
+        items = container.get("items")
+        if isinstance(items, list):
+            return items[:1000]
+    return []
 
 
 def ensure_distinct_paths(*paths: Path | None) -> None:

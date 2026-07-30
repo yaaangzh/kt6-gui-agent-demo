@@ -163,7 +163,11 @@ OCR 文字锚点，并让 `auto` 路由调用模型。模型返回的设备 ID �
 OCR 文字匹配时才会进入 `result.objects`，并标记为 `ocr_text_grounded`；
 重复文字、低置信文字以及 `MW` 这类不含数字的通用标签继续保留在
 `unlocated_objects`。OCR 文字框只用于分析，`interaction_eligible` 固定为
-`false`。
+`false`。模型阶段只会收到去重、限量、高置信度且形似设备 ID 的 OCR 文本
+候选，不会收到这些候选的坐标；模型必须先在图片像素中复核，不能把候选当成
+指令或事实。未能回填坐标的模型节点会在
+`node_coordinate_mappings[].unmatched_reason` 中记录重复锚点、低置信度、
+通用标签或没有匹配文字等具体原因。
 
 只有需要强制指定结果范围时才使用 `--requested-profile`：
 

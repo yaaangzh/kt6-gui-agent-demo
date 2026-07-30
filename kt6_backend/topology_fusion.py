@@ -9,6 +9,7 @@ from collections.abc import Callable, Mapping
 from statistics import median
 from typing import Any
 
+from .topology_ocr_common import is_strict_ocr_identifier
 from .topology_vision_contract import RESPONSE_SCHEMA_VERSION, TopologyVisionContract
 
 
@@ -65,7 +66,10 @@ def fuse_topology_payloads(
         cv_payload,
         default_canvas_id=canvas_id,
     )
-    ocr_anchor_objects = _ground_model_nodes_with_ocr_anchors(
+    (
+        ocr_anchor_objects,
+        ocr_anchor_unmatched_reasons,
+    ) = _ground_model_nodes_with_ocr_anchors(
         model_nodes,
         cv_objects=cv_objects,
         anchors=ocr_text_anchors,
@@ -77,6 +81,9 @@ def fuse_topology_payloads(
         model_match_methods,
         model_unmatched_reasons,
     ) = _match_model_nodes_to_cv(model_nodes, cv_index)
+    for model_id, reason in ocr_anchor_unmatched_reasons.items():
+        if model_id not in model_to_cv:
+            model_unmatched_reasons[model_id] = reason
 
     model_matches = {
         cv_id: (model_id, copy.deepcopy(model_nodes[model_id]))
@@ -680,23 +687,31 @@ def _ground_model_nodes_with_ocr_anchors(
     *,
     cv_objects: list[dict[str, Any]],
     anchors: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """Promote only unique, exact OCR/model identifier matches to geometry."""
 
-    if not model_nodes or not anchors:
-        return []
     cv_index = _CVIdentifierIndex(cv_objects)
     existing_matches, _methods, _reasons = _match_model_nodes_to_cv(
         model_nodes,
         cv_index,
     )
+    if not model_nodes:
+        return [], {}
+    if not anchors:
+        return [], {}
+    raw_exact_buckets: dict[str, list[dict[str, Any]]] = {}
+    raw_compact_buckets: dict[str, list[dict[str, Any]]] = {}
     exact_buckets: dict[str, list[tuple[int, dict[str, Any]]]] = {}
     compact_buckets: dict[str, list[tuple[int, dict[str, Any]]]] = {}
     for index, anchor in enumerate(anchors):
         text = str(anchor["text"])
+        raw_exact_buckets.setdefault(_exact_identifier_key(text), []).append(anchor)
+        raw_compact_buckets.setdefault(_compact_identifier_key(text), []).append(
+            anchor
+        )
         if (
             float(anchor["confidence"]) < MIN_OCR_TEXT_GROUNDING_CONFIDENCE
-            or _identifier_like_ocr_text(text) is False
+            or not is_strict_ocr_identifier(text)
         ):
             continue
         exact_buckets.setdefault(_exact_identifier_key(text), []).append(
@@ -708,6 +723,7 @@ def _ground_model_nodes_with_ocr_anchors(
 
     claimed_anchor_indexes: set[int] = set()
     grounded: list[dict[str, Any]] = []
+    unmatched_reasons: dict[str, str] = {}
     for model_id in sorted(model_nodes, key=_identifier_sort_key):
         if model_id in existing_matches:
             continue
@@ -723,6 +739,29 @@ def _ground_model_nodes_with_ocr_anchors(
             item for item in candidates if item[0] not in claimed_anchor_indexes
         ]
         if len(candidates) != 1 or len(available) != 1:
+            raw_candidates = raw_exact_buckets.get(
+                _exact_identifier_key(model_id),
+                [],
+            )
+            if not raw_candidates:
+                raw_candidates = raw_compact_buckets.get(
+                    _compact_identifier_key(model_id),
+                    [],
+                )
+            if len(candidates) > 1:
+                reason = "ambiguous_ocr_text_anchor"
+            elif candidates and not available:
+                reason = "ocr_text_anchor_already_claimed"
+            elif raw_candidates and all(
+                float(item["confidence"]) < MIN_OCR_TEXT_GROUNDING_CONFIDENCE
+                for item in raw_candidates
+            ):
+                reason = "low_confidence_ocr_text_anchor"
+            elif raw_candidates:
+                reason = "non_identifier_ocr_text_anchor"
+            else:
+                reason = "no_ocr_text_anchor"
+            unmatched_reasons[model_id] = reason
             continue
         anchor_index, anchor = available[0]
         claimed_anchor_indexes.add(anchor_index)
@@ -744,14 +783,7 @@ def _ground_model_nodes_with_ocr_anchors(
                 },
             }
         )
-    return grounded
-
-
-def _identifier_like_ocr_text(value: str) -> bool:
-    return bool(
-        re.fullmatch(r"[A-Za-z][A-Za-z0-9_.:/-]{1,199}", value)
-        and any(character.isdigit() for character in value)
-    )
+    return grounded, unmatched_reasons
 
 
 def _normalize_model_payload(

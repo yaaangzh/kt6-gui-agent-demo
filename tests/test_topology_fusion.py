@@ -921,12 +921,18 @@ class TopologyFusionTest(unittest.TestCase):
                             "bbox": [210, 10, 24, 12],
                             "confidence": 0.98,
                         },
+                        {
+                            "text": "GW-009",
+                            "canvas_id": "c1",
+                            "bbox": [250, 10, 50, 12],
+                            "confidence": 0.5,
+                        },
                     ],
                 },
             },
         }
         model = {
-            "nodes": [{"id": "CSG1"}, {"id": "MW"}],
+            "nodes": [{"id": "CSG1"}, {"id": "MW"}, {"id": "GW-009"}, {"id": "EDGE9"}],
             "links": [],
         }
 
@@ -939,7 +945,27 @@ class TopologyFusionTest(unittest.TestCase):
         )
         self.assertEqual(
             {item["business_id"] for item in fused["unlocated_objects"]},
-            {"CSG1", "MW"},
+            {"CSG1", "MW", "GW-009", "EDGE9"},
+        )
+        mappings = {
+            item["semantic_node_id"]: item
+            for item in fused["node_coordinate_mappings"]
+        }
+        self.assertEqual(
+            mappings["CSG1"]["unmatched_reason"],
+            "ambiguous_ocr_text_anchor",
+        )
+        self.assertEqual(
+            mappings["MW"]["unmatched_reason"],
+            "non_identifier_ocr_text_anchor",
+        )
+        self.assertEqual(
+            mappings["GW-009"]["unmatched_reason"],
+            "low_confidence_ocr_text_anchor",
+        )
+        self.assertEqual(
+            mappings["EDGE9"]["unmatched_reason"],
+            "no_ocr_text_anchor",
         )
 
     def test_model_pixel_geometry_and_explicit_star_enter_analysis_result(self):

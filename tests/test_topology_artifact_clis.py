@@ -456,6 +456,35 @@ class TopologyArtifactCLITest(unittest.TestCase):
         self.assertEqual(args[permission_index + 1], "bypassPermissions")
         self.assertNotIn("--add-dir", args)
 
+    def test_model_artifact_receives_filtered_ocr_text_candidates(self):
+        cv_path = self.root / "cv-result.json"
+        cv_path.write_text(
+            json.dumps(_empty_nce_anchor_cv_result(), ensure_ascii=False),
+            encoding="utf-8",
+        )
+        runner = SuccessfulModelRunner()
+
+        generate_model_artifact(
+            self.image_path,
+            source_id="nce-ocr-context",
+            output_path=self.root / "model-result.json",
+            events_path=self.root / "codeagent-events.jsonl",
+            cv_path=cv_path,
+            executable=sys.executable,
+            timeout_seconds=30,
+            workdir=self.root,
+            runner=runner,
+        )
+
+        prompt = runner.call["stdin"].decode("utf-8")
+        _heading, request_text = prompt.split("\n", 1)
+        request = json.loads(request_text)
+        candidates = request["cv_observations"]["ocr_text_candidates"]
+        self.assertEqual(
+            [item["text"] for item in candidates],
+            ["CSG1", "PTN7900E-12-01"],
+        )
+
     def test_model_recovers_valid_assistant_candidate_before_invalid_result(self):
         output_path = self.root / "model-result.json"
         events_path = self.root / "codeagent-events.jsonl"
