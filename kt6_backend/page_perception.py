@@ -141,6 +141,8 @@ class SQLitePageCaptureStore:
 class PagePerceptionService:
     MAX_DOM_ELEMENTS = 1000
     MAX_CANVASES = 4
+    MAX_SVG_ELEMENT_TEXTS = 1000
+    MAX_SVG_ELEMENT_TEXT_LENGTH = 500
     MAX_SCREENSHOT_BYTES = 5 * 1024 * 1024
     MAX_TOPOLOGY_TEXT_CHARS = 100_000
     MIN_ACTIONABLE_VISION_CONFIDENCE = 0.8
@@ -165,6 +167,11 @@ class PagePerceptionService:
         page = self._normalize_page(payload.get("page", {}))
         dom = self._normalize_dom(payload.get("dom", {}))
         canvases = self._normalize_canvases(capture_id, payload.get("canvases", []))
+        svg_element_texts = (
+            self._normalize_svg_element_texts(payload.get("svg_element_texts"))
+            if "svg_element_texts" in payload
+            else None
+        )
         adapter_scene = self._normalize_adapter_scene(payload.get("adapter_scene"))
         topology_text = self._normalize_topology_text(payload.get("topology_text"))
         capture = {
@@ -176,27 +183,44 @@ class PagePerceptionService:
             "captured_at": payload.get("captured_at", time.time()),
         }
 
+        if svg_element_texts is not None:
+            capture["svg_element_texts"] = svg_element_texts
         dom_scene = self._dom_scene(dom, page)
         canvas_scene = self._canvas_scene(canvases, adapter_scene, page)
         text_scene = self._text_scene(topology_text, page, canvases)
         selected = self._select_scene(dom_scene, canvas_scene, text_scene)
+        evidence_decision = self._evidence_perception_decision(
+            dom["elements"],
+            canvases,
+        )
+        raw_scenes = {
+            "dom": dom_scene["input"],
+            "canvas": canvas_scene["input"],
+            "text": text_scene["input"],
+        }
+        if svg_element_texts is not None:
+            raw_scenes["svg_element_texts"] = copy.deepcopy(svg_element_texts)
         perception = {
             "strategy": "live_page_hybrid",
             "selected_mode": selected["mode"],
-            "raw_scenes": {
-                "dom": dom_scene["input"],
-                "canvas": canvas_scene["input"],
-                "text": text_scene["input"],
-            },
+            "raw_scenes": raw_scenes,
             "candidates": {
                 "dom": dom_scene,
                 "canvas": canvas_scene,
                 "text": text_scene,
             },
+            "canvas_perception": canvas_scene,
             "scene": selected,
             "business_object_bindings": selected["business_object_bindings"],
+            "dom_business_object_bindings": dom_scene["business_object_bindings"],
             "dom_action_bindings": dom_scene["dom_action_bindings"],
-            "decision": self._decision(dom_scene, canvas_scene, text_scene, selected),
+            "decision": self._decision(
+                dom_scene,
+                canvas_scene,
+                text_scene,
+                selected,
+                perception_decision=evidence_decision,
+            ),
         }
 
         template_hash = self._template_hash(capture, selected)
@@ -220,6 +244,7 @@ class PagePerceptionService:
             "canvas_count": len(canvases),
             "canvas_screenshot_count": sum(1 for canvas in canvases if canvas.get("screenshot_path")),
             "adapter_scene_available": adapter_scene is not None,
+            "perception_decision": evidence_decision,
             "topology_text_available": topology_text is not None,
             "selected_mode": result["perception"]["scene"]["mode"],
             "requires_vision_model": result["perception"]["scene"].get("requires_vision_model", False),
@@ -248,6 +273,20 @@ class PagePerceptionService:
         record = self.store.get(capture_id)
         return copy.deepcopy(record["result"]) if record else None
 
+    def get_action_snapshot(self, capture_id: str) -> dict[str, Any] | None:
+        """Return immutable evidence for asset/action preflight validation."""
+        record = self.store.get(capture_id)
+        if not record:
+            return None
+        return {
+            "capture_id": capture_id,
+            "page": copy.deepcopy(record["capture"]["page"]),
+            "dom": copy.deepcopy(record["capture"]["dom"]),
+            "created_at": float(record["created_at"]),
+            "content_hash": record["result"]["meta"]["content_hash"],
+            "scene_revision": record["result"]["meta"]["scene_revision"],
+        }
+
     def get_topology(self, capture_id: str) -> dict[str, Any] | None:
         record = self.store.get(capture_id)
         if not record:
@@ -270,6 +309,10 @@ class PagePerceptionService:
         topology["raw_scenes"] = perception["raw_scenes"]
         topology["ui_perception_candidates"] = perception["candidates"]
         topology["ui_perception"] = perception["scene"]
+        topology["canvas_perception"] = copy.deepcopy(perception["canvas_perception"])
+        topology["dom_business_object_bindings"] = copy.deepcopy(
+            perception.get("dom_business_object_bindings", {})
+        )
         topology["perception_decision"] = perception["decision"]
         topology["dom_action_bindings"] = copy.deepcopy(perception.get("dom_action_bindings", {}))
         topology["perception_meta"] = result["meta"]
@@ -284,6 +327,12 @@ class PagePerceptionService:
             "perception_meta": copy.deepcopy(record["result"]["meta"]),
             "topology_changes": copy.deepcopy(record["result"]["changes"]),
             "scene": copy.deepcopy(record["result"]["perception"]["scene"]),
+            "canvas_perception": copy.deepcopy(
+                record["result"]["perception"]["canvas_perception"]
+            ),
+            "dom_business_object_bindings": copy.deepcopy(
+                record["result"]["perception"].get("dom_business_object_bindings", {})
+            ),
             "dom_action_bindings": copy.deepcopy(
                 record["result"]["perception"].get("dom_action_bindings", {})
             ),
@@ -324,9 +373,7 @@ class PagePerceptionService:
             elements.append(
                 {
                     "ref": str(item.get("ref") or item.get("selector") or "")[:500],
-                    "selector": str(item.get("selector") or item.get("ref") or "")[
-                        :500
-                    ],
+                    "selector": str(item.get("selector") or "")[:500],
                     "parent_ref": str(item.get("parent_ref") or "")[:500],
                     "depth": depth,
                     "document_order": document_order,
@@ -337,6 +384,16 @@ class PagePerceptionService:
                     "placeholder": str(item.get("placeholder", ""))[:300],
                     "business_id": str(item.get("business_id", ""))[:200],
                     "business_type": str(item.get("business_type", ""))[:100],
+                    "asset_id": str(item.get("asset_id", ""))[:200],
+                    "management_ip": str(item.get("management_ip", ""))[:100],
+                    "serial_number": str(item.get("serial_number", ""))[:200],
+                    "site_id": str(item.get("site_id", ""))[:200],
+                    "asset_version": item.get("asset_version"),
+                    "action_id": str(item.get("action_id", ""))[:200],
+                    "owner_business_id": str(
+                        item.get("owner_business_id", "")
+                    )[:200],
+                    "test_id": str(item.get("test_id", ""))[:200],
                     "bbox": [round(float(value), 2) for value in bbox],
                     "disabled": bool(item.get("disabled", False)),
                     "checked": bool(item.get("checked", False)),
@@ -347,6 +404,48 @@ class PagePerceptionService:
                 }
             )
         return {"elements": elements}
+
+    def _normalize_svg_element_texts(self, value: Any) -> list[Any]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise ValueError("svg_element_texts must be a list")
+
+        normalized: list[Any] = []
+        for item in value[: self.MAX_SVG_ELEMENT_TEXTS]:
+            if isinstance(item, str):
+                text = item.strip()
+                if text:
+                    normalized.append(text[: self.MAX_SVG_ELEMENT_TEXT_LENGTH])
+                continue
+            if not isinstance(item, dict):
+                continue
+
+            text_value = item.get("text")
+            text = "" if text_value is None else str(text_value).strip()
+            if not text:
+                continue
+            evidence: dict[str, Any] = {
+                "text": text[: self.MAX_SVG_ELEMENT_TEXT_LENGTH],
+            }
+            bbox = item.get("bbox")
+            if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                try:
+                    values = [round(float(part), 2) for part in bbox]
+                except (TypeError, ValueError):
+                    values = []
+                if values and all(math.isfinite(part) for part in values):
+                    evidence["bbox"] = values
+            for field, limit in (
+                ("selector", 500),
+                ("frame_id", 100),
+                ("frame_url", 2048),
+                ("document_id", 200),
+            ):
+                if field in item and item[field] is not None:
+                    evidence[field] = str(item[field])[:limit]
+            normalized.append(evidence)
+        return normalized
 
     def _normalize_canvases(self, capture_id: str, canvases: list[dict[str, Any]]) -> list[dict[str, Any]]:
         normalized = []
@@ -359,6 +458,67 @@ class PagePerceptionService:
                 "client_height": round(float(item.get("client_height", 0)), 2),
                 "bbox": [round(float(value), 2) for value in item.get("bbox", [0, 0, 0, 0])],
             }
+            optional_text_fields = {
+                "source_kind": 100,
+                "source_type": 100,
+                "capture_method": 100,
+                "source_ref": 500,
+                "source_canvas_id": 200,
+                "frame_id": 100,
+                "frame_url": 2048,
+                "document_id": 200,
+                "region_selector": 500,
+                "capture_kind": 100,
+                "roi_status": 100,
+                "source_frame_id": 100,
+                "source_frame_url": 2048,
+                "visible_capture_error": 500,
+            }
+            for field, limit in optional_text_fields.items():
+                if field in item and item[field] is not None:
+                    canvas[field] = str(item[field])[:limit]
+            if "primitive_count" in item:
+                try:
+                    canvas["primitive_count"] = max(0, int(item["primitive_count"]))
+                except (TypeError, ValueError):
+                    canvas["primitive_count"] = 0
+            if "device_pixel_ratio" in item:
+                try:
+                    ratio = float(item["device_pixel_ratio"])
+                except (TypeError, ValueError):
+                    ratio = 1.0
+                canvas["device_pixel_ratio"] = (
+                    ratio if math.isfinite(ratio) and ratio > 0 else 1.0
+                )
+            if "visible_ratio" in item:
+                try:
+                    visible_ratio = float(item["visible_ratio"])
+                except (TypeError, ValueError):
+                    visible_ratio = 0.0
+                canvas["visible_ratio"] = (
+                    round(max(0.0, min(1.0, visible_ratio)), 4)
+                    if math.isfinite(visible_ratio)
+                    else 0.0
+                )
+            if "source_region" in item:
+                source_region = item["source_region"]
+                if isinstance(source_region, (dict, list)):
+                    canvas["source_region"] = copy.deepcopy(source_region)
+            if "source_pixel_region" in item:
+                pixel_region = item["source_pixel_region"]
+                if isinstance(pixel_region, (list, tuple)) and len(pixel_region) == 4:
+                    try:
+                        values = [int(part) for part in pixel_region]
+                    except (TypeError, ValueError):
+                        values = []
+                    if values and all(part >= 0 for part in values):
+                        canvas["source_pixel_region"] = values
+            if "coordinate_space" in item:
+                coordinate_space = item["coordinate_space"]
+                if isinstance(coordinate_space, str):
+                    canvas["coordinate_space"] = coordinate_space[:200]
+                elif isinstance(coordinate_space, dict):
+                    canvas["coordinate_space"] = copy.deepcopy(coordinate_space)
             capture_error = str(item.get("capture_error", "")).strip()
             if capture_error:
                 canvas["capture_error"] = capture_error[:500]
@@ -458,6 +618,13 @@ class PagePerceptionService:
                 "label": item.get("aria_label") or item.get("label") or item.get("placeholder") or element_id,
                 "selector": item.get("selector"),
                 "source_ref": item.get("ref"),
+                "asset_id": item.get("asset_id"),
+                "management_ip": item.get("management_ip"),
+                "serial_number": item.get("serial_number"),
+                "site_id": item.get("site_id"),
+                "asset_version": item.get("asset_version"),
+                "action_id": item.get("action_id"),
+                "owner_business_id": item.get("owner_business_id"),
                 "frame_id": item.get("frame_id", "0"),
                 "frame_url": item.get("frame_url", ""),
                 "document_id": item.get("document_id", ""),
@@ -482,7 +649,7 @@ class PagePerceptionService:
             }
             elements.append(element)
             if business_id:
-                bindings[business_id] = {
+                observed = {
                     "element_id": element_id,
                     "dom_ref": item.get("selector"),
                     "source_ref": item.get("ref"),
@@ -491,7 +658,27 @@ class PagePerceptionService:
                     "document_id": item.get("document_id", ""),
                     "confidence": confidence,
                     "method": "live_dom_snapshot",
+                    "binding_status": "observed",
+                    "safe_for_execution": False,
                 }
+                if business_id in bindings:
+                    existing = bindings[business_id]
+                    candidates = existing.setdefault(
+                        "candidates",
+                        [
+                            {
+                                key: existing.get(key)
+                                for key in (
+                                    "element_id", "dom_ref", "source_ref",
+                                    "frame_id", "frame_url", "document_id",
+                                )
+                            }
+                        ],
+                    )
+                    candidates.append(observed)
+                    existing["binding_status"] = "ambiguous"
+                else:
+                    bindings[business_id] = observed
             if (
                 item.get("actionable")
                 and not item.get("disabled")
@@ -505,6 +692,14 @@ class PagePerceptionService:
                     "document_id": item.get("document_id", ""),
                     "confidence": confidence,
                     "method": "live_dom_snapshot",
+                    "label": item.get("aria_label") or item.get("label"),
+                    "role": item.get("role"),
+                    "parent_ref": item.get("parent_ref"),
+                    "disabled": item.get("disabled"),
+                    "action_id": item.get("action_id"),
+                    "owner_business_id": item.get("owner_business_id"),
+                    "binding_status": "observed",
+                    "safe_for_execution": False,
                 }
         ui_tree = self._dom_ui_tree(elements)
         scene = {
@@ -520,6 +715,11 @@ class PagePerceptionService:
             "ui_tree": ui_tree,
             "business_object_bindings": bindings,
             "dom_action_bindings": action_bindings,
+            "execution_grounding": {
+                "status": "unverified",
+                "safe_for_execution": False,
+                "reason": "asset_and_action_preflight_required",
+            },
             "relations": [],
             "co_channel_relations": [],
             "relation_count": 0,
@@ -534,7 +734,7 @@ class PagePerceptionService:
             semantic_source="browser_dom",
             pixel_inference_performed=False,
             pixel_verified=False,
-            actionable_grounding=bool(bindings),
+            actionable_grounding=False,
             dom_actionable_element_count=len(action_bindings),
         )
 
@@ -918,6 +1118,32 @@ class PagePerceptionService:
                     client_width=float(canvas.get("client_width", 0)),
                     client_height=float(canvas.get("client_height", 0)),
                     bbox=tuple(float(value) for value in bbox),
+                    source_kind=str(canvas.get("source_kind", "")),
+                    source_type=str(canvas.get("source_type", "")),
+                    capture_method=str(canvas.get("capture_method", "")),
+                    source_ref=str(canvas.get("source_ref", "")),
+                    source_canvas_id=str(canvas.get("source_canvas_id", "")),
+                    frame_id=str(canvas.get("frame_id", "")),
+                    frame_url=str(canvas.get("frame_url", "")),
+                    document_id=str(canvas.get("document_id", "")),
+                    region_selector=str(canvas.get("region_selector", "")),
+                    primitive_count=int(canvas.get("primitive_count", 0)),
+                    device_pixel_ratio=float(canvas.get("device_pixel_ratio", 1)),
+                    coordinate_space=copy.deepcopy(
+                        canvas.get("coordinate_space")
+                    ),
+                    capture_kind=str(canvas.get("capture_kind", "")),
+                    roi_status=str(canvas.get("roi_status", "")),
+                    source_region=copy.deepcopy(canvas.get("source_region")),
+                    source_pixel_region=copy.deepcopy(
+                        canvas.get("source_pixel_region")
+                    ),
+                    source_frame_id=str(canvas.get("source_frame_id", "")),
+                    source_frame_url=str(canvas.get("source_frame_url", "")),
+                    visible_ratio=float(canvas.get("visible_ratio", 0)),
+                    visible_capture_error=str(
+                        canvas.get("visible_capture_error", "")
+                    ),
                 )
             )
         return tuple(frames)
@@ -944,6 +1170,30 @@ class PagePerceptionService:
         if len(objects) > self.MAX_DOM_ELEMENTS:
             raise ValueError("CanvasVisionAdapter returned too many objects")
 
+        source_allows_actionable_grounding = (
+            not any(
+                any(
+                    marker in f"{frame.source_kind} {frame.source_type}".lower()
+                    for marker in ("svg", "mixed")
+                )
+                for frame in frames
+            )
+            and not any(frame.visible_capture_error.strip() for frame in frames)
+            and all(
+                frame.roi_status.strip().lower() in {"", "verified"}
+                for frame in frames
+            )
+            and not any(
+                frame.capture_kind.strip().lower() == "visible_tab" for frame in frames
+            )
+            and not any(
+                any(
+                    marker in frame.capture_kind.strip().lower()
+                    for marker in ("full_page", "full_viewport", "whole_page")
+                )
+                for frame in frames
+            )
+        )
         elements = []
         bindings = {}
         object_ids = set()
@@ -1007,7 +1257,12 @@ class PagePerceptionService:
                 "canvas_ref": f"vision:{frame.canvas_id if frame else 'unresolved'}:{business_id}",
                 "confidence": confidence,
                 "method": "canvas_vision_adapter",
-                "actionable": grounded and len(frames) == 1 and adapter_supports_actions,
+                "actionable": (
+                    grounded
+                    and len(frames) == 1
+                    and adapter_supports_actions
+                    and source_allows_actionable_grounding
+                ),
             }
 
         relations = self._recognized_relations(recognized.get("links", recognized.get("relations", [])), object_ids)
@@ -1048,7 +1303,11 @@ class PagePerceptionService:
                 "识别置信度与业务对象标识仍需由具体适配器和测试数据校验",
                 "多 Canvas 场景仅用于分析；建立统一页面坐标变换前不可执行",
                 "视觉模型给出的业务 ID 默认只用于分析；需经生产资产库核验后才能执行",
-            ],
+            ] + (
+                ["SVG/混合区域或未验证 ROI 的栅格截图仅用于分析，不提供可执行对象绑定"]
+                if not source_allows_actionable_grounding
+                else []
+            ),
         }
         fusion_summary = recognized.get("fusion_summary")
         if isinstance(fusion_summary, dict):
@@ -1066,10 +1325,12 @@ class PagePerceptionService:
                 and all_objects_grounded
                 and len(frames) == 1
                 and adapter_supports_actions
+                and source_allows_actionable_grounding
             ),
             adapter_id=adapter_id[:200],
             adapter_version=adapter_version[:100],
             adapter_supports_actionable_grounding=adapter_supports_actions,
+            source_allows_actionable_grounding=source_allows_actionable_grounding,
             screenshot_sha256=[frame.screenshot_sha256 for frame in frames],
         )
 
@@ -1310,10 +1571,10 @@ class PagePerceptionService:
     ) -> dict[str, Any]:
         if canvas_scene["mode"] == "canvas_renderer_adapter" and canvas_scene["object_count"]:
             return canvas_scene
-        if dom_scene["business_object_bindings"]:
-            return dom_scene
         if canvas_scene["mode"] == "canvas_vision_adapter" and canvas_scene["object_count"]:
             return canvas_scene
+        if dom_scene["business_object_bindings"]:
+            return dom_scene
         if text_scene["mode"] == "topology_text_reconstruction" and text_scene["object_count"]:
             return text_scene
         if canvas_scene.get("requires_vision_model"):
@@ -1322,12 +1583,32 @@ class PagePerceptionService:
             return dom_scene
         return canvas_scene
 
+    def _evidence_perception_decision(
+        self,
+        dom_elements: list[dict[str, Any]],
+        canvases: list[dict[str, Any]],
+    ) -> str:
+        has_dom = bool(dom_elements)
+        has_canvas_pixels = any(
+            bool(canvas.get("screenshot_path"))
+            for canvas in canvases
+        )
+        if has_dom and has_canvas_pixels:
+            return "dom_and_canvas"
+        if has_dom:
+            return "dom_only"
+        if has_canvas_pixels:
+            return "canvas_only"
+        return "empty"
+
     def _decision(
         self,
         dom_scene: dict[str, Any],
         canvas_scene: dict[str, Any],
         text_scene: dict[str, Any],
         selected: dict[str, Any],
+        *,
+        perception_decision: str,
     ) -> dict[str, Any]:
         if selected["mode"] == "canvas_renderer_adapter":
             if selected.get("pixel_capture_available"):
@@ -1348,6 +1629,7 @@ class PagePerceptionService:
         else:
             reason = "检测到 Canvas，但本次像素截图不可用，无法进行视觉语义识别"
         return {
+            "perception_decision": perception_decision,
             "reason": reason,
             "dom_element_count": dom_scene["object_count"],
             "canvas_count": len(canvas_scene["input"].get("canvases", [])),

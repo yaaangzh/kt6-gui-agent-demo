@@ -22,12 +22,13 @@ CodeAgentCLI 的 Windows 启动方式、真实图片验证结论、已知限制�
 | 执行安全 | `solution_id`、场景版本、资源锁、执行前 checkpoint 与动作后置条件校验 |
 | 步骤扩展 | 按诊断/动作 phase 和 step ID 注册处理器，校验步骤 type、state 与必填字段 |
 | 页面感知 | DOM/ARIA、Canvas 截图、渲染器 Scene、拓扑文本重建及 Local CV/HTTP/CodeAgent CanvasVision Adapter |
-| 在线页面采集 | Chrome/Edge 扩展 v0.2，语义优先采集 DOM/ARIA、iframe、稳定选择器和 Canvas |
+| 在线页面采集 | Chrome/Edge 扩展 v0.4，并行采集 DOM/ARIA 与 Canvas/SVG 可见区域截图，保留 iframe、来源和 ROI 证据 |
+| DOM 安全动作 | 权威资产解析、设备与控件双重绑定、新鲜页面复核、一次性令牌和 dry-run；真实点击尚未接入 |
 | 感知缓存 | Scene Graph 缓存、`scene_revision`、`HIT/MISS/INCREMENTAL` |
 | 拓扑变化检测 | 节点、位置、链路增删及链路语义属性变化检测；关键变化触发重规划 |
 | 运行记忆 | SQLite 持久化任务、事件、检查点、场景和业务处理结果 |
 | KT5 接入基础 | 感知拓扑与生成拓扑共用统一 Scene Graph 契约 |
-| 自动化测试 | 当前 283 项通过，42 项因缺少可选 RapidOCR/OpenCV 依赖而跳过 |
+| 自动化测试 | 当前 329 项通过，42 项因缺少可选 RapidOCR/OpenCV 依赖而跳过 |
 
 ## 业务场景
 
@@ -72,7 +73,7 @@ flowchart LR
     PR --> PB["诊断 / 动作 Playbook"]
     RT --> TR["Tool Registry"]
     TR --> BA["Business Adapter"]
-    FE --> CAP["DOM / Canvas Page Capture"]
+    FE --> CAP["DOM + Canvas/SVG Page Capture"]
     CAP --> SG["Scene Graph"]
     BA --> SG
     KT5["KT5 Topology Adapter"] -. "待接入" .-> SG
@@ -91,7 +92,7 @@ flowchart LR
 - **Playbook**：沉淀可配置、可执行、可审计的业务任务链。
 - **Runtime**：管理状态、上下文、事件、锁、检查点、授权与重规划。
 - **Tool Registry / Adapter**：隔离 Runtime 与具体业务查询、设备操作接口。
-- **Page Perception**：把 DOM、Canvas 或渲染器数据转换为统一 Scene Graph。
+- **Page Perception**：并行保留 DOM 操作证据和 Canvas/SVG 视觉证据，再转换为统一 Scene Graph。
 - **Frontend**：采集当前页面，消费 Runtime 事件并执行可视化原子操作。
 
 ## 页面感知现状
@@ -102,6 +103,8 @@ flowchart LR
 浏览器页面
 -> 采集 DOM / ARIA / 文本 / 元素边界
 -> canvas.toDataURL() 采集真实像素
+-> 检测大尺寸 SVG、Canvas、图形容器和嵌入区域
+-> captureVisibleTab() 单次截取可见页面，并按可信 bbox 裁剪视觉区域
 -> 可选 window.__KT6_PAGE_ADAPTER__ 导出渲染器 nodes / links
 -> 可选提交人工 ASCII 或外部 OCR 的结构化拓扑文本
 -> POST /api/perception/captures
@@ -115,11 +118,12 @@ flowchart LR
 | 路径 | 适用页面 | 当前状态 |
 |---|---|---|
 | DOM 感知 | 按钮、表格、表单等可访问 DOM/ARIA 的页面 | 已完成第一期 |
+| 浏览器视觉区域截图 | 在线页面中的 Canvas、SVG、WebGL 或组合渲染地图 | 扩展 v0.4 已接入；未验证整页回退固定 analysis-only |
 | Canvas Renderer Adapter | 可以读取图引擎、Store、接口或渲染前 `nodes/edges` 的 Canvas | 当前 Demo 已使用 |
 | Topology Text Recognizer | 人工 ASCII 或外部 OCR 已转写出的结构化拓扑文本 | 已完成首个严格样例 |
 | Canvas Vision Adapter | 只能获得截图、图片、远程桌面或封闭 Canvas | 本地 RapidOCR/OpenCV、HTTP 服务与 CodeAgent read-tool 三种驱动、严格协议和 pixels-only CLI 已完成 |
 
-### 在线页面 DOM 采集
+### 在线页面 DOM + 视觉分治采集
 
 仓库中的 `browser_extension/` 是无法修改目标页面源码时的采集桥梁。扩展在用户
 点击按钮后读取当前 HTTP(S) 页面以及浏览器允许访问的 iframe，再把结果提交给 KT6。
@@ -127,17 +131,63 @@ flowchart LR
 的 `edge://extensions` 打开开发者模式，加载本仓库的 `browser_extension` 目录。
 扩展更新后必须在扩展管理页点击刷新，再回到目标页面重新采集。
 
-扩展 v0.2 使用语义优先采集：优先保留业务 ID、按钮、菜单、表格、树、标题和可点击
-卡片，过滤可点击父元素内部继承 `cursor:pointer` 的重复图标与文本。没有交互控件时
-会回退采集标题和短正文；弹窗显示扫描、候选、提交、可操作、Canvas、截断和 iframe
-数量，并预览关键元素、业务 ID 与 CSS 选择器，不再只返回一个 DOM 总数。
+扩展 v0.4 使用 DOM 与视觉分治。DOM 路径优先保留业务 ID、资产 ID、管理 IP、
+序列号、站点、资产版本、动作 ID、控件归属、按钮、菜单、表格、树、标题和可点击
+卡片，并过滤可点击父元素内部继承 `cursor:pointer` 的重复图标与文本。没有交互控件
+时会回退采集标题和短正文；SVG `<text>` 与“数字 + 单位/比例”的统计卡片会作为
+非绑定文本证据保留。
+
+视觉路径检测可见且足够大的 Canvas、SVG、带拓扑/地图语义的图形容器、多图形聚合
+区域和嵌入区域。原生 Canvas 继续优先使用 `toDataURL()`；每次用户点击至多调用一次
+`captureVisibleTab()`，并且只向后端提交一个最高优先级视觉主帧，避免本地 CV 因
+多帧输入降级到慢模型。裁剪按截图实际像素尺寸与 viewport 比例计算，不直接假设
+DPR；PNG 超限时会尝试 WebP 和降采样。子 frame 无可靠坐标映射和整页视觉兜底都
+标记为 `unverified`，只能用于分析。
+
+弹窗会显示扫描、候选、提交、可操作、原生 Canvas、视觉区域、可见截图、视觉证据、
+`perception_decision`、截断和 iframe 数量，并预览关键元素、业务 ID 与 CSS 选择器。
 
 浏览器内部页面、内置 PDF 阅读器和未授予访问权限的跨域 iframe 不在采集范围内。
-后端会把带稳定选择器的可操作元素记录到 `dom_action_bindings`，但普通 DOM 绑定目前
-只用于页面理解和后续定位，不自动取得设备操作权限；产生业务副作用仍需要
-`data-business-id` 等业务绑定、执行前重校验和现有 Runtime 门禁。
+后端会把原始 DOM 元素和 `dom_action_bindings` 固定标记为 `observed` 和
+`safe_for_execution=false`。页面自报的 `business_id` 只是证据，不能代替资产库，
+也不会因为页面中存在同名设备或按钮就自动取得设备操作权限。
 
-当前 Canvas 截图由浏览器实时采集，但 Demo 中的节点语义主要来自 `window.__KT6_PAGE_ADAPTER__` 暴露的渲染器数据，其底层业务拓扑仍为 Mock。遇到只有像素、没有内部语义的 Canvas 时，后端会明确返回 `requires_vision_model=true`，不会伪造节点绑定；若 `toDataURL()` 失败，则保留采集错误并回退可用 DOM，也不会虚报已有视觉输入。
+### 设备资产绑定与执行前复核
+
+“关闭 AP1”使用独立的 fail-closed 链路：
+
+```text
+AP1 + 当前 page_capture_id
+-> AssetResolver 从资产库按资产 ID / 管理 IP / 序列号唯一解析
+   （仅有名称时必须同时提供站点/楼层范围）
+-> 校验顶层页面和 iframe origin 均在该资产允许列表
+-> 在同一 frame/document 内分别绑定设备主体与其拥有的动作控件
+-> 高风险动作必须有显式 data-kt6-action，不能只凭“关闭”文字猜测
+-> POST /api/dom-actions/prepare
+-> 用户确认准确的 asset_id + action_id，并重新采集页面
+-> POST /api/dom-actions/preflight
+-> 复核资产版本/状态、页面、frame、document、selector、控件归属和动作语义
+-> 签发 15 秒有效、只能消费一次的随机令牌
+-> POST /api/dom-actions/execute（当前只做 dry-run，不产生副作用）
+```
+
+任何同名、多候选、证据冲突、跨 frame/document、页面来源不可信、控件禁用、选择器
+缺失、资产版本变化、页面过期、确认目标不一致、权限不足、令牌过期或重放都会拒绝。
+`data/mock_assets.json` 和 `JSONAssetInventoryAdapter` 只是可运行的演示资产源；生产
+环境必须替换为经过认证的 NCE/FEBS 资产接口，并把 `permissions` 接到服务端认证
+会话。当前 HTTP 请求中的权限数组只用于验证 dry-run 流程，不是生产授权证明。
+
+当前 Canvas/SVG 视觉区域由浏览器实时截图；原生 Canvas 的 `toDataURL()` 仍作为
+不依赖标签页截图的像素回退。后端会把 DOM 元素送入 `dom_scene`，把视觉主帧送入
+`canvas_scene`，并通过 `perception_decision=dom_only|canvas_only|dom_and_canvas|empty`
+明确证据组合。识别成功的视觉拓扑可以成为主 Scene，同时
+`dom_business_object_bindings`、`dom_action_bindings` 和 `canvas_perception` 会并行
+保留，不再由其中一路遮住另一路。
+
+SVG 文本只进入 `svg_element_texts` 原始证据，不会自动变成业务对象或动作绑定。
+所有 `capture_kind=visible_tab` 的截图，包括看似精确的区域裁剪，都固定为
+analysis-only；只有后续资产绑定和执行前复核通过，DOM 控件才可能进入 dry-run
+安全链路。
 
 结构化拓扑文本现在可以重建节点、关系、视觉组、证据和冲突信息，但其 provenance 会被强制标记为非像素、不可执行。文本坐标不能用于 GUI 点击；Runtime 会拒绝 `actionable_grounding=false` 的动作。当前企业拓扑黄金样例稳定识别 22 个设备和 19 条明确关系，该口径由测试夹具和专项回归固定。
 
@@ -428,6 +478,11 @@ GET  /api/perception/captures?limit={n}
 GET  /api/perception/captures/{capture_id}
 GET  /api/perception/cache
 
+POST /api/dom-actions/prepare
+POST /api/dom-actions/preflight
+POST /api/dom-actions/execute
+GET  /api/dom-actions/audit
+
 POST /api/tasks
 GET  /api/tasks?limit={n}
 GET  /api/tasks/{task_id}
@@ -477,8 +532,11 @@ runtime_data/
 因此当前真实与模拟边界为：
 
 - Runtime 状态流转、事件、锁、checkpoint、持久化是真实实现。
-- DOM、Canvas 像素采集和 Scene 缓存是真实实现。
+- DOM、Canvas 像素采集、Scene 缓存、资产解析规则、双重绑定、执行前复核和一次性
+  dry-run 令牌是真实实现。
 - Demo 拓扑业务语义、指标、根因输入和设备动作结果仍是 Mock。
+- 当前资产数据来自 `data/mock_assets.json`，请求中的权限列表不是企业鉴权；
+  `dry_run=false` 会被明确拒绝，代码没有真实浏览器点击或设备关闭通道。
 - CanvasVision 本地 RapidOCR/OpenCV、HTTP 与 CodeAgent read-tool 接入已经具备，但真实图片准确率验证、企业鉴权、真实设备下发和生产级回滚尚未完成。
 
 接入真实系统时，应保留 Runtime 与 Playbook，替换 `kt6_backend/tools.py` 中的业务适配实现，并通过 `kt6_backend/tool_registry.py` 注册真实工具。
@@ -496,6 +554,9 @@ kt6_backend/
   tool_registry.py             工具注册表
   tools.py                     当前 Mock 业务适配器
   page_perception.py           实时页面采集、持久化和 Scene 规范化
+  asset_inventory.py           权威资产适配接口、JSON Demo Adapter 与唯一性解析
+  dom_action_binding.py        设备主体和所属 DOM 动作控件的双重绑定
+  safe_dom_actions.py          新鲜页面复核、一次性令牌、审计与 dry-run 门禁
   local_cv_canvas_vision.py    本地 RapidOCR/OpenCV 单图片视觉 Adapter
   codeagent_canvas_vision.py   本机 CodeAgent read-tool 视觉 Adapter
   http_canvas_vision.py        生产 HTTP 视觉 Adapter 与严格输入输出协议
@@ -519,7 +580,7 @@ kt6_backend/
 
 playbooks/                     诊断和动作任务链
 data/                          Mock 业务数据
-browser_extension/             Chrome/Edge 在线页面语义采集扩展 v0.2
+browser_extension/             Chrome/Edge DOM + Canvas/SVG 分治采集扩展 v0.4
 demo/                          LUI-GUI Web 界面
 tests/                         自动化测试
 ```
@@ -530,8 +591,10 @@ tests/                         自动化测试
 python -m unittest discover -s tests
 ```
 
-当前结果为 283 项通过、42 项跳过。跳过项来自当前开发环境缺少可选
-RapidOCR/OpenCV 运行依赖，不是测试失败。覆盖范围包括意图路由、缺参澄清、
+当前结果为 329 项通过、42 项跳过。跳过项来自当前开发环境缺少可选
+RapidOCR/OpenCV 运行依赖，不是测试失败。覆盖范围包括权威资产唯一性解析、
+设备/动作双重绑定、来源白名单、二次采集复核、令牌过期/重放/并发消费、API dry-run、
+意图路由、缺参澄清、
 动作授权、Playbook 预检、步骤注册、资源锁、执行后置条件、运行记忆、在线扩展
 语义采集、普通文本回退、复杂页面截断、Canvas 回退、页面采集失败回退、
 DOM/ARIA `ui_tree`、文本拓扑重建、本地 RapidOCR/OpenCV、密集星型、

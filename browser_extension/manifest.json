@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "KT6 Page Perception Capture",
-  "version": "0.2.0",
-  "description": "Capture DOM/ARIA and Canvas evidence from the active page for the local KT6 service.",
+  "version": "0.4.0",
+  "description": "Capture DOM/ARIA plus Canvas/SVG visual evidence from the active page for the local KT6 service.",
   "permissions": [
     "activeTab",
     "scripting"

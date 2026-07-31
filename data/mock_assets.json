@@ -1,0 +1,32 @@
+{
+  "assets": [
+    {
+      "asset_id": "ap_001",
+      "asset_type": "ap",
+      "name": "AP1",
+      "aliases": ["AP-001"],
+      "management_ip": "10.10.1.20",
+      "serial_number": "MOCK-AP-001",
+      "site_id": "site_1",
+      "site": "站点1",
+      "floor": "1F",
+      "status": "online",
+      "version": 1,
+      "allowed_origins": ["https://nce.example"]
+    },
+    {
+      "asset_id": "ap_003",
+      "asset_type": "ap",
+      "name": "AP3",
+      "aliases": ["AP-003"],
+      "management_ip": "10.10.1.22",
+      "serial_number": "MOCK-AP-003",
+      "site_id": "site_1",
+      "site": "站点1",
+      "floor": "1F",
+      "status": "offline",
+      "version": 1,
+      "allowed_origins": ["https://nce.example"]
+    }
+  ]
+}

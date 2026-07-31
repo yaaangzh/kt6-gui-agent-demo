@@ -18,6 +18,26 @@ class CanvasFrame:
     client_width: float
     client_height: float
     bbox: tuple[float, float, float, float]
+    source_kind: str = ""
+    source_type: str = ""
+    capture_method: str = ""
+    source_ref: str = ""
+    source_canvas_id: str = ""
+    frame_id: str = ""
+    frame_url: str = ""
+    document_id: str = ""
+    region_selector: str = ""
+    primitive_count: int = 0
+    device_pixel_ratio: float = 1.0
+    coordinate_space: Any = None
+    capture_kind: str = ""
+    roi_status: str = ""
+    source_region: Any = None
+    source_pixel_region: Any = None
+    source_frame_id: str = ""
+    source_frame_url: str = ""
+    visible_ratio: float = 0.0
+    visible_capture_error: str = ""
 
 
 class CanvasVisionAdapter(Protocol):

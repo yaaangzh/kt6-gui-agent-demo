@@ -9,7 +9,10 @@
   <body>
     <main>
       <h1>KT6 页面感知</h1>
-      <p>语义优先采集当前页面的业务对象、可操作元素、关键文本和 Canvas。</p>
+      <p>
+        并行采集页面的业务对象、可操作元素、关键文本，以及 Canvas/SVG
+        视觉区域。
+      </p>
       <button id="capture" type="button">采集当前页面</button>
       <div id="status" class="status" aria-live="polite">等待采集</div>
 
@@ -40,8 +43,24 @@
             <strong data-metric="actionable">-</strong>
           </div>
           <div class="metric">
-            <span>Canvas</span>
-            <strong data-metric="canvas">-</strong>
+            <span>原生 Canvas</span>
+            <strong data-metric="native-canvas">-</strong>
+          </div>
+          <div class="metric">
+            <span>图形区域</span>
+            <strong data-metric="visual-regions">-</strong>
+          </div>
+          <div class="metric">
+            <span>可见截图</span>
+            <strong data-metric="visible-screenshot">-</strong>
+          </div>
+          <div class="metric">
+            <span>视觉证据</span>
+            <strong data-metric="visual-evidence">-</strong>
+          </div>
+          <div class="metric">
+            <span>分治结果</span>
+            <strong data-metric="perception-decision">-</strong>
           </div>
           <div class="metric">
             <span>截断</span>

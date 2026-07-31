@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import Type
 from urllib.parse import parse_qs, urlparse
 
+from .asset_inventory import (
+    AssetResolver,
+    JSONAssetInventoryAdapter,
+)
 from .codeagent_canvas_vision import CodeAgentCanvasVisionAdapter
+from .dom_action_binding import DOMActionBindingService
 from .http_canvas_vision import HTTPTopologyVisionAdapter
 from .hybrid_canvas_vision import HybridCanvasVisionAdapter
 from .local_cv_canvas_vision import LocalCVTopologyVisionAdapter
@@ -19,6 +24,7 @@ from .perception import HybridPerception
 from .perception_runtime import PerceptionRuntime
 from .playbook_loader import PlaybookLoader
 from .runtime import KT6Runtime
+from .safe_dom_actions import SafeDOMActionService
 from .scene_store import SQLiteSceneStore
 from .topology_text_recognizer import TopologyTextRecognizer
 from .tools import MockBusinessTools
@@ -208,6 +214,10 @@ class AppServices:
     perception_runtime: PerceptionRuntime
     page_capture_store: SQLitePageCaptureStore
     page_perception: PagePerceptionService
+    asset_inventory: JSONAssetInventoryAdapter
+    asset_resolver: AssetResolver
+    dom_action_binding: DOMActionBindingService
+    safe_dom_actions: SafeDOMActionService
     tools: MockBusinessTools
     runtime: KT6Runtime
 
@@ -229,6 +239,10 @@ def create_services(root: Path = ROOT) -> AppServices:
         canvas_vision=canvas_vision,
         text_recognizer=TopologyTextRecognizer(),
     )
+    asset_inventory = JSONAssetInventoryAdapter(root / "data" / "mock_assets.json")
+    asset_resolver = AssetResolver(asset_inventory)
+    dom_action_binding = DOMActionBindingService(asset_resolver)
+    safe_dom_actions = SafeDOMActionService(dom_action_binding, page_perception)
     tools = MockBusinessTools(
         root / "data",
         perception_runtime=perception_runtime,
@@ -241,6 +255,10 @@ def create_services(root: Path = ROOT) -> AppServices:
         perception_runtime=perception_runtime,
         page_capture_store=page_capture_store,
         page_perception=page_perception,
+        asset_inventory=asset_inventory,
+        asset_resolver=asset_resolver,
+        dom_action_binding=dom_action_binding,
+        safe_dom_actions=safe_dom_actions,
         tools=tools,
         runtime=runtime,
     )
@@ -339,6 +357,9 @@ class KT6Handler(SimpleHTTPRequestHandler):
             limit = int(parse_qs(parsed.query).get("limit", ["20"])[0])
             self._json(200, {"captures": services.page_perception.list_captures(limit=limit)})
             return
+        if path == "/api/dom-actions/audit":
+            self._json(200, {"events": services.safe_dom_actions.audit_events()})
+            return
         if path.startswith("/api/perception/captures/"):
             capture_id = path.split("/")[4]
             capture = services.page_perception.get_capture(capture_id)
@@ -386,7 +407,13 @@ class KT6Handler(SimpleHTTPRequestHandler):
         services = self.app
         runtime = services.runtime
         known_path = (
-            path in {"/api/perception/captures", "/api/tasks"}
+            path in {
+                "/api/perception/captures",
+                "/api/tasks",
+                "/api/dom-actions/prepare",
+                "/api/dom-actions/preflight",
+                "/api/dom-actions/execute",
+            }
             or (path.startswith("/api/tasks/") and path.endswith("/actions"))
         )
         if not known_path:
@@ -407,6 +434,48 @@ class KT6Handler(SimpleHTTPRequestHandler):
                 self._json(400, {"error": str(exc)})
                 return
             self._json(201, capture)
+            return
+        if path == "/api/dom-actions/prepare":
+            asset_reference = payload.get("asset_reference")
+            action = str(payload.get("action", "")).strip()
+            capture_id = str(payload.get("page_capture_id", "")).strip()
+            if not asset_reference or not action or not capture_id:
+                self._json(
+                    400,
+                    {"error": "asset_reference, action and page_capture_id are required"},
+                )
+                return
+            result = services.safe_dom_actions.prepare(
+                asset_reference=asset_reference,
+                action=action,
+                page_capture_id=capture_id,
+                scope=payload.get("scope") if isinstance(payload.get("scope"), dict) else {},
+                task_id=str(payload.get("task_id", "")),
+                principal_id=str(payload.get("principal_id", "")),
+            )
+            self._json(201 if result["status"] == "prepared" else 409, result)
+            return
+        if path == "/api/dom-actions/preflight":
+            permissions = payload.get("permissions", [])
+            if not isinstance(permissions, list):
+                self._json(400, {"error": "permissions must be an array"})
+                return
+            result = services.safe_dom_actions.preflight(
+                plan_id=str(payload.get("plan_id", "")),
+                current_capture_id=str(payload.get("page_capture_id", "")),
+                confirmed=payload.get("confirmed") is True,
+                confirmed_asset_id=str(payload.get("confirmed_asset_id", "")),
+                confirmed_action=str(payload.get("confirmed_action", "")),
+                permissions=permissions,
+            )
+            self._json(201 if result["status"] == "ready" else 409, result)
+            return
+        if path == "/api/dom-actions/execute":
+            result = services.safe_dom_actions.execute(
+                execution_token=str(payload.get("execution_token", "")),
+                dry_run=payload.get("dry_run") is not False,
+            )
+            self._json(200 if result["status"] == "dry_run_ok" else 409, result)
             return
         if path == "/api/tasks":
             query = payload.get("query", "").strip()

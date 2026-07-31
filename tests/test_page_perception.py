@@ -251,6 +251,171 @@ class PagePerceptionTest(unittest.TestCase):
         self.assertEqual(result["perception"]["candidates"]["text"]["mode"], "topology_text_unavailable")
         self.assertFalse(capture["scene"]["pixel_inference_performed"])
 
+    def test_perception_decision_describes_dom_and_pixel_evidence_mix(self):
+        cases = (
+            ("dom_and_canvas", True, True),
+            ("dom_only", True, False),
+            ("canvas_only", False, True),
+            ("empty", False, False),
+        )
+        for expected, include_dom, include_canvas in cases:
+            with self.subTest(expected=expected):
+                payload = live_capture_payload()
+                payload["adapter_scene"] = None
+                if not include_dom:
+                    payload["dom"] = {"elements": []}
+                if not include_canvas:
+                    payload["canvases"] = []
+
+                capture = self.service.ingest(payload)
+                result = self.service.get_result(capture["capture_id"])
+
+                self.assertEqual(
+                    capture["summary"]["perception_decision"],
+                    expected,
+                )
+                self.assertEqual(
+                    result["perception"]["decision"]["perception_decision"],
+                    expected,
+                )
+
+    def test_svg_element_texts_are_retained_as_non_binding_evidence(self):
+        payload = live_capture_payload()
+        payload["adapter_scene"] = None
+        payload["dom"] = {"elements": []}
+        payload["canvases"] = []
+        payload["svg_element_texts"] = [
+            {
+                "text": "  CSG1  ",
+                "bbox": [10.125, 20, 80, 30],
+                "selector": "#topology svg text:nth-of-type(1)",
+                "frame_id": 0,
+                "frame_url": "https://nce.example/topology",
+                "document_id": "document-svg-1",
+                "business_id": "must_not_become_a_binding",
+                "actionable": True,
+            },
+            "  MW  ",
+            {"text": "AP1", "bbox": ["invalid", 0, 10, 10]},
+            {"text": "   "},
+            123,
+        ]
+
+        capture = self.service.ingest(payload)
+        result = self.service.get_result(capture["capture_id"])
+        stored = self.store.get(capture["capture_id"])
+        expected = [
+            {
+                "text": "CSG1",
+                "bbox": [10.12, 20.0, 80.0, 30.0],
+                "selector": "#topology svg text:nth-of-type(1)",
+                "frame_id": "0",
+                "frame_url": "https://nce.example/topology",
+                "document_id": "document-svg-1",
+            },
+            "MW",
+            {"text": "AP1"},
+        ]
+
+        self.assertEqual(
+            result["perception"]["raw_scenes"]["svg_element_texts"],
+            expected,
+        )
+        self.assertEqual(stored["capture"]["svg_element_texts"], expected)
+        self.assertEqual(capture["summary"]["perception_decision"], "empty")
+        self.assertEqual(capture["scene"]["business_object_bindings"], {})
+        self.assertEqual(capture["dom_action_bindings"], {})
+        self.assertNotIn(
+            "business_id",
+            result["perception"]["raw_scenes"]["svg_element_texts"][0],
+        )
+        self.assertNotIn(
+            "actionable",
+            result["perception"]["raw_scenes"]["svg_element_texts"][0],
+        )
+
+    def test_mixed_dom_assets_and_canvas_vision_keep_both_perception_paths(self):
+        payload = live_capture_payload()
+        payload["adapter_scene"] = None
+        payload["dom"] = {
+            "elements": [
+                {
+                    "ref": "frame:0:#ap-1",
+                    "selector": "#ap-1",
+                    "tag": "div",
+                    "label": "AP1",
+                    "business_id": "ap_001",
+                    "asset_id": "asset-ap-001",
+                    "bbox": [20, 20, 120, 40],
+                    "frame_id": "0",
+                    "frame_url": "https://nce.example/topology",
+                    "document_id": "document-1",
+                },
+                {
+                    "ref": "frame:0:#shutdown-ap-1",
+                    "selector": "#shutdown-ap-1",
+                    "parent_ref": "frame:0:#ap-1",
+                    "tag": "button",
+                    "role": "button",
+                    "label": "关闭 AP1",
+                    "actionable": True,
+                    "action_id": "ap.shutdown",
+                    "owner_business_id": "ap_001",
+                    "bbox": [20, 70, 120, 40],
+                    "frame_id": "0",
+                    "frame_url": "https://nce.example/topology",
+                    "document_id": "document-1",
+                },
+            ]
+        }
+        adapter = RecordingCanvasVisionAdapter()
+        service = self.service_with(canvas_vision=adapter)
+
+        capture = service.ingest(payload)
+        result = service.get_result(capture["capture_id"])
+        topology = service.get_topology(capture["capture_id"])
+
+        self.assertEqual(capture["summary"]["selected_mode"], "canvas_vision_adapter")
+        self.assertEqual(capture["summary"]["perception_decision"], "dom_and_canvas")
+        self.assertEqual(capture["canvas_perception"]["mode"], "canvas_vision_adapter")
+        self.assertIn("gw_001", capture["scene"]["business_object_bindings"])
+        self.assertIn("ap_001", capture["dom_business_object_bindings"])
+        self.assertIn("frame:0:#shutdown-ap-1", capture["dom_action_bindings"])
+        self.assertEqual(
+            result["perception"]["dom_business_object_bindings"]["ap_001"][
+                "binding_status"
+            ],
+            "observed",
+        )
+        self.assertEqual(
+            topology["canvas_perception"]["mode"],
+            "canvas_vision_adapter",
+        )
+        self.assertIn("ap_001", topology["dom_business_object_bindings"])
+
+    def test_verified_visible_tab_crop_remains_analysis_only(self):
+        payload = live_capture_payload()
+        payload["adapter_scene"] = None
+        payload["dom"] = {"elements": []}
+        payload["canvases"][0].update(
+            {
+                "source_kind": "graphic_container",
+                "source_type": "",
+                "capture_kind": "visible_tab",
+                "capture_method": "capture_visible_tab_crop",
+                "roi_status": "verified",
+            }
+        )
+        service = self.service_with(canvas_vision=RecordingCanvasVisionAdapter())
+
+        capture = service.ingest(payload)
+
+        self.assertEqual(capture["summary"]["selected_mode"], "canvas_vision_adapter")
+        self.assertFalse(capture["scene"]["actionable_grounding"])
+        self.assertFalse(
+            capture["scene"]["provenance"]["source_allows_actionable_grounding"]
+        )
+
     def test_accessible_canvas_dom_does_not_hide_missing_canvas_semantics(self):
         payload = live_capture_payload()
         payload["adapter_scene"] = None
@@ -411,6 +576,104 @@ class PagePerceptionTest(unittest.TestCase):
         )
         self.assertEqual(topology["dom_action_bindings"], scene["dom_action_bindings"])
         self.assertFalse(scene["actionable_grounding"])
+
+    def test_dom_business_id_stays_observed_until_asset_action_preflight(self):
+        payload = live_capture_payload()
+        payload["adapter_scene"] = None
+        payload["canvases"] = []
+        payload["dom"] = {
+            "elements": [
+                {
+                    "ref": "frame:0:#ap-1-row",
+                    "selector": "#ap-1-row",
+                    "tag": "div",
+                    "role": "row",
+                    "label": "AP1",
+                    "business_id": "ap_001",
+                    "business_type": "ap",
+                    "asset_id": "ap_001",
+                    "management_ip": "10.0.0.1",
+                    "serial_number": "SN-001",
+                    "site_id": "site-a",
+                    "asset_version": 3,
+                    "bbox": [20, 80, 500, 40],
+                    "frame_id": "0",
+                    "frame_url": "https://nce.example/devices",
+                    "document_id": "document-1",
+                },
+                {
+                    "ref": "frame:0:#shutdown-ap-1",
+                    "selector": "#shutdown-ap-1",
+                    "parent_ref": "frame:0:#ap-1-row",
+                    "tag": "button",
+                    "role": "button",
+                    "label": "关闭",
+                    "action_id": "ap.shutdown",
+                    "owner_business_id": "ap_001",
+                    "bbox": [440, 85, 60, 30],
+                    "actionable": True,
+                    "frame_id": "0",
+                    "frame_url": "https://nce.example/devices",
+                    "document_id": "document-1",
+                },
+            ]
+        }
+
+        capture = self.service.ingest(payload)
+        scene = capture["scene"]
+        business = scene["business_object_bindings"]["ap_001"]
+        action = capture["dom_action_bindings"][
+            "frame:0:#shutdown-ap-1"
+        ]
+
+        self.assertEqual(scene["mode"], "live_dom_snapshot")
+        self.assertFalse(scene["actionable_grounding"])
+        self.assertFalse(scene["execution_grounding"]["safe_for_execution"])
+        self.assertEqual(business["binding_status"], "observed")
+        self.assertFalse(business["safe_for_execution"])
+        self.assertEqual(action["binding_status"], "observed")
+        self.assertEqual(action["action_id"], "ap.shutdown")
+        self.assertEqual(action["owner_business_id"], "ap_001")
+
+        snapshot = self.service.get_action_snapshot(capture["capture_id"])
+        subject = snapshot["dom"]["elements"][0]
+        control = snapshot["dom"]["elements"][1]
+        self.assertEqual(subject["management_ip"], "10.0.0.1")
+        self.assertEqual(subject["serial_number"], "SN-001")
+        self.assertEqual(subject["asset_version"], 3)
+        self.assertEqual(control["action_id"], "ap.shutdown")
+        self.assertEqual(control["owner_business_id"], "ap_001")
+
+    def test_pseudo_ref_does_not_become_selector(self):
+        payload = live_capture_payload()
+        payload["adapter_scene"] = None
+        payload["canvases"] = []
+        payload["dom"] = {
+            "elements": [
+                {
+                    "ref": "frame:0:@capture:1",
+                    "selector": "",
+                    "tag": "button",
+                    "role": "button",
+                    "label": "关闭",
+                    "action_id": "ap.shutdown",
+                    "bbox": [20, 20, 60, 30],
+                    "actionable": True,
+                    "frame_id": "0",
+                    "frame_url": "https://nce.example/devices",
+                    "document_id": "document-1",
+                }
+            ]
+        }
+
+        capture = self.service.ingest(payload)
+        snapshot = self.service.get_action_snapshot(capture["capture_id"])
+
+        self.assertEqual(
+            snapshot["dom"]["elements"][0]["ref"],
+            "frame:0:@capture:1",
+        )
+        self.assertEqual(snapshot["dom"]["elements"][0]["selector"], "")
 
     def test_dom_hierarchy_records_bad_refs_without_losing_nodes(self):
         payload = live_capture_payload()
@@ -590,6 +853,199 @@ class PagePerceptionTest(unittest.TestCase):
         self.assertEqual(
             first["perception_meta"]["scene_revision"],
             second["perception_meta"]["scene_revision"],
+        )
+
+    def test_svg_region_raster_metadata_reaches_analysis_only_vision_frame(self):
+        payload = live_capture_payload()
+        payload["adapter_scene"] = None
+        payload["dom"] = {"elements": []}
+        payload["canvases"][0].update(
+            {
+                "source_kind": "visual_region",
+                "source_type": "svg_region",
+                "capture_method": "visible_tab_crop",
+                "source_ref": "visual-region:topology",
+                "source_canvas_id": "topology-svg-root",
+                "frame_id": "0",
+                "frame_url": "https://nce.example/topology",
+                "document_id": "document-svg-1",
+                "region_selector": "#topology-map > svg",
+                "capture_kind": "visible_tab",
+                "roi_status": "verified",
+                "source_region": {
+                    "x": 20,
+                    "y": 100,
+                    "width": 800,
+                    "height": 600,
+                },
+                "source_pixel_region": [40, 200, 1600, 1200],
+                "source_frame_id": "0",
+                "source_frame_url": "https://nce.example/topology",
+                "visible_ratio": 0.95,
+                "visible_capture_error": "",
+                "primitive_count": 27,
+                "device_pixel_ratio": 2,
+                "coordinate_space": {
+                    "type": "viewport_css_pixels",
+                    "origin": [20, 100],
+                },
+            }
+        )
+        adapter = RecordingCanvasVisionAdapter()
+        service = self.service_with(canvas_vision=adapter)
+
+        capture = service.ingest(payload)
+        result = service.get_result(capture["capture_id"])
+
+        self.assertEqual(capture["summary"]["selected_mode"], "canvas_vision_adapter")
+        self.assertEqual(len(adapter.calls), 1)
+        frame = adapter.calls[0]["frames"][0]
+        self.assertEqual(frame.source_kind, "visual_region")
+        self.assertEqual(frame.source_type, "svg_region")
+        self.assertEqual(frame.capture_method, "visible_tab_crop")
+        self.assertEqual(frame.source_ref, "visual-region:topology")
+        self.assertEqual(frame.source_canvas_id, "topology-svg-root")
+        self.assertEqual(frame.frame_id, "0")
+        self.assertEqual(frame.frame_url, "https://nce.example/topology")
+        self.assertEqual(frame.document_id, "document-svg-1")
+        self.assertEqual(frame.region_selector, "#topology-map > svg")
+        self.assertEqual(frame.capture_kind, "visible_tab")
+        self.assertEqual(frame.roi_status, "verified")
+        self.assertEqual(
+            frame.source_region,
+            {"x": 20, "y": 100, "width": 800, "height": 600},
+        )
+        self.assertEqual(
+            frame.source_pixel_region,
+            [40, 200, 1600, 1200],
+        )
+        self.assertEqual(frame.source_frame_id, "0")
+        self.assertEqual(
+            frame.source_frame_url,
+            "https://nce.example/topology",
+        )
+        self.assertEqual(frame.visible_ratio, 0.95)
+        self.assertEqual(frame.visible_capture_error, "")
+        self.assertEqual(frame.primitive_count, 27)
+        self.assertEqual(frame.device_pixel_ratio, 2)
+        self.assertEqual(
+            frame.coordinate_space,
+            {"type": "viewport_css_pixels", "origin": [20, 100]},
+        )
+
+        visual_input = result["perception"]["candidates"]["canvas"]["input"][
+            "canvases"
+        ][0]
+        for field in (
+            "source_kind",
+            "source_type",
+            "capture_method",
+            "source_ref",
+            "source_canvas_id",
+            "frame_id",
+            "frame_url",
+            "document_id",
+            "region_selector",
+            "capture_kind",
+            "roi_status",
+            "source_region",
+            "source_pixel_region",
+            "source_frame_id",
+            "source_frame_url",
+            "visible_ratio",
+            "visible_capture_error",
+            "primitive_count",
+            "device_pixel_ratio",
+            "coordinate_space",
+        ):
+            self.assertEqual(visual_input[field], payload["canvases"][0][field])
+        self.assertTrue(frame.screenshot_path.exists())
+        self.assertTrue(capture["scene"]["pixel_inference_performed"])
+        self.assertFalse(capture["scene"]["actionable_grounding"])
+        self.assertFalse(
+            capture["scene"]["provenance"]["source_allows_actionable_grounding"]
+        )
+        self.assertTrue(
+            all(
+                binding["actionable"] is False
+                for binding in capture["scene"]["business_object_bindings"].values()
+            )
+        )
+
+    def test_svg_data_url_is_rejected_without_reaching_vision_adapter(self):
+        payload = live_capture_payload()
+        payload["adapter_scene"] = None
+        payload["canvases"][0].update(
+            {
+                "source_kind": "visual_region",
+                "source_type": "svg_region",
+                "capture_method": "inline_svg",
+                "region_selector": "#topology-map > svg",
+                "data_url": "data:image/svg+xml;base64,PHN2Zy8+",
+            }
+        )
+        adapter = RecordingCanvasVisionAdapter()
+        service = self.service_with(canvas_vision=adapter)
+
+        capture = service.ingest(payload)
+        result = service.get_result(capture["capture_id"])
+
+        self.assertEqual(capture["summary"]["selected_mode"], "live_dom_snapshot")
+        self.assertEqual(adapter.calls, [])
+        visual_input = result["perception"]["candidates"]["canvas"]["input"][
+            "canvases"
+        ][0]
+        self.assertEqual(visual_input["source_type"], "svg_region")
+        self.assertEqual(visual_input["capture_method"], "inline_svg")
+        self.assertEqual(
+            visual_input["capture_error"],
+            "unsupported canvas data URL",
+        )
+        self.assertNotIn("screenshot_path", visual_input)
+        self.assertFalse(
+            result["perception"]["candidates"]["canvas"]["pixel_capture_available"]
+        )
+
+    def test_unverified_visible_tab_roi_is_analysis_only(self):
+        payload = live_capture_payload()
+        payload["adapter_scene"] = None
+        payload["dom"] = {"elements": []}
+        payload["canvases"][0].update(
+            {
+                "source_kind": "visual_region",
+                "source_type": "canvas_region",
+                "capture_kind": "visible_tab",
+                "roi_status": "unverified",
+                "source_region": {
+                    "x": 0,
+                    "y": 0,
+                    "width": 1280,
+                    "height": 720,
+                },
+                "source_frame_id": "3",
+                "source_frame_url": "https://nce.example/embedded-topology",
+                "visible_ratio": 1,
+            }
+        )
+        adapter = RecordingCanvasVisionAdapter()
+        service = self.service_with(canvas_vision=adapter)
+
+        capture = service.ingest(payload)
+
+        self.assertEqual(capture["summary"]["selected_mode"], "canvas_vision_adapter")
+        self.assertEqual(len(adapter.calls), 1)
+        frame = adapter.calls[0]["frames"][0]
+        self.assertEqual(frame.roi_status, "unverified")
+        self.assertEqual(frame.source_frame_id, "3")
+        self.assertFalse(capture["scene"]["actionable_grounding"])
+        self.assertFalse(
+            capture["scene"]["provenance"]["source_allows_actionable_grounding"]
+        )
+        self.assertTrue(
+            all(
+                binding["actionable"] is False
+                for binding in capture["scene"]["business_object_bindings"].values()
+            )
         )
 
     def test_canvas_vision_adapter_receives_persisted_frames_and_stamps_provenance(self):

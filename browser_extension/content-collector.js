@@ -4,8 +4,19 @@
   const MAX_SCANNED_ELEMENTS = 12000;
   const MAX_CAPTURED_ELEMENTS = 220;
   const MAX_CANVASES = 4;
+  const MAX_VISUAL_REGIONS = 6;
   const MAX_CANVAS_DATA_URL_LENGTH = 6_500_000;
+  const MIN_VISUAL_REGION_WIDTH = 220;
+  const MIN_VISUAL_REGION_HEIGHT = 120;
+  const MIN_VISUAL_REGION_AREA = 48_000;
+  const VISUAL_REGION_HINT =
+    /(topology|topo|network|graph|map|canvas|diagram|拓扑|网络|地图)/i;
   const SEMANTIC_SELECTOR = [
+    "[data-asset-id]",
+    "[data-management-ip]",
+    "[data-serial-number]",
+    "[data-site-id]",
+    "[data-asset-version]",
     "[data-business-id]",
     "[data-business-type]",
     "[data-testid]",
@@ -30,6 +41,7 @@
     "nav",
     "main",
     "aside",
+    "svg text",
   ].join(",");
   const ACTIONABLE_ROLES = new Set([
     "button",
@@ -68,12 +80,25 @@
     "small",
     "strong",
   ]);
+  const STATISTIC_TEXT_TAGS = new Set(["div", "span", "p", "strong"]);
 
   function compactText(value, maximum = 300) {
     return String(value || "")
       .trim()
       .replace(/\s+/g, " ")
       .slice(0, maximum);
+  }
+
+  function looksLikeStatistic(value) {
+    const text = compactText(value, 120);
+    if (!text) return false;
+    return Boolean(
+      /\d+(?:[.,]\d+)?\s*(?:%|ms|s|kbps|mbps|gbps|kb|mb|gb)(?![A-Za-z])/i.test(
+        text,
+      ) ||
+        /\d+(?:[.,]\d+)?\s*(?:台|个|条|处|站|次|户)/.test(text) ||
+        /\d+\s*\/\s*\d+/.test(text),
+    );
   }
 
   function escapeIdentifier(value) {
@@ -104,6 +129,7 @@
       if (byId) return byId;
     }
     for (const name of [
+      "data-asset-id",
       "data-business-id",
       "data-testid",
       "data-kt6-action",
@@ -166,6 +192,55 @@
     };
   }
 
+  function clippedBoxToViewport(bbox) {
+    const [left, top, width, height] = bbox;
+    const right = Math.min(innerWidth, left + width);
+    const bottom = Math.min(innerHeight, top + height);
+    const clippedLeft = Math.max(0, left);
+    const clippedTop = Math.max(0, top);
+    const clippedWidth = right - clippedLeft;
+    const clippedHeight = bottom - clippedTop;
+    if (clippedWidth <= 0 || clippedHeight <= 0) return null;
+    return [
+      Number(clippedLeft.toFixed(2)),
+      Number(clippedTop.toFixed(2)),
+      Number(clippedWidth.toFixed(2)),
+      Number(clippedHeight.toFixed(2)),
+    ];
+  }
+
+  function regionHintFor(element) {
+    return compactText(
+      [
+        element.id,
+        typeof element.className === "string"
+          ? element.className
+          : element.getAttribute("class"),
+        element.getAttribute("aria-label"),
+        element.getAttribute("data-testid"),
+        element.getAttribute("role"),
+        element.getAttribute("title"),
+      ].join(" "),
+      500,
+    );
+  }
+
+  function regionOverlapRatio(left, right) {
+    const intersectionWidth = Math.max(
+      0,
+      Math.min(left[0] + left[2], right[0] + right[2]) -
+        Math.max(left[0], right[0]),
+    );
+    const intersectionHeight = Math.max(
+      0,
+      Math.min(left[1] + left[3], right[1] + right[3]) -
+        Math.max(left[1], right[1]),
+    );
+    const intersection = intersectionWidth * intersectionHeight;
+    const smallerArea = Math.min(left[2] * left[3], right[2] * right[3]);
+    return smallerArea > 0 ? intersection / smallerArea : 0;
+  }
+
   function inferredRole(element) {
     const explicit = compactText(element.getAttribute("role"), 100);
     if (explicit) return explicit.toLowerCase();
@@ -180,6 +255,7 @@
     if (tag === "nav") return "navigation";
     if (tag === "main") return "main";
     if (tag === "aside") return "complementary";
+    if (tag === "text" && element.closest("svg")) return "svg_text";
     if (tag === "input") {
       const inputType = compactText(element.getAttribute("type"), 30).toLowerCase();
       if (["button", "reset", "submit"].includes(inputType)) return "button";
@@ -237,14 +313,27 @@
     return compactText(element.innerText || element.textContent);
   }
 
+  function ownerBusinessIdFor(element) {
+    const owner = element.closest("[data-asset-id],[data-business-id]");
+    if (!owner) return "";
+    return compactText(
+      owner.getAttribute("data-asset-id") ||
+        owner.getAttribute("data-business-id"),
+      200,
+    );
+  }
+
   function priorityFor(candidate) {
     let priority = 0;
     if (candidate.businessId) priority += 120;
+    if (candidate.assetId) priority += 120;
     if (candidate.testId) priority += 35;
     if (candidate.actionable) priority += 70;
     if (candidate.ariaLabel) priority += 30;
-    if (candidate.element.hasAttribute("data-kt6-action")) priority += 45;
+    if (candidate.actionId) priority += 45;
     if (candidate.role === "heading") priority += 25;
+    if (candidate.role === "svg_text") priority += 15;
+    if (looksLikeStatistic(candidate.label)) priority += 18;
     if (
       ["table", "tree", "grid", "navigation", "main"].includes(candidate.role)
     ) {
@@ -285,9 +374,39 @@
       element.getAttribute("data-business-type"),
       100,
     );
+    const assetId = compactText(
+      element.getAttribute("data-asset-id") || businessId,
+      200,
+    );
+    const managementIp = compactText(
+      element.getAttribute("data-management-ip"),
+      100,
+    );
+    const serialNumber = compactText(
+      element.getAttribute("data-serial-number"),
+      200,
+    );
+    const siteId = compactText(element.getAttribute("data-site-id"), 200);
+    const assetVersion = compactText(
+      element.getAttribute("data-asset-version"),
+      50,
+    );
+    const actionId = compactText(
+      element.getAttribute("data-kt6-action"),
+      200,
+    );
+    const ownerBusinessId = ownerBusinessIdFor(element);
     const testId = compactText(element.getAttribute("data-testid"), 200);
     const label = labelFor(element);
-    if (!label && !businessId && !testId && !ariaLabel && !placeholder) return;
+    if (
+      !label &&
+      !businessId &&
+      !assetId &&
+      !actionId &&
+      !testId &&
+      !ariaLabel &&
+      !placeholder
+    ) return;
 
     const candidate = {
       element,
@@ -299,6 +418,13 @@
       placeholder,
       businessId,
       businessType,
+      assetId,
+      managementIp,
+      serialNumber,
+      siteId,
+      assetVersion,
+      actionId,
+      ownerBusinessId,
       testId,
       label,
       fallbackText,
@@ -312,7 +438,18 @@
     addCandidate(element, documentOrder, false);
   });
 
-  if (candidates.length < 5) {
+  scanned.forEach((element, documentOrder) => {
+    if (!STATISTIC_TEXT_TAGS.has(element.tagName.toLowerCase())) return;
+    const text = compactText(element.innerText || element.textContent, 100);
+    if (!looksLikeStatistic(text)) return;
+    const childHasSameStatistic = Array.from(element.children).some((child) =>
+      looksLikeStatistic(child.innerText || child.textContent),
+    );
+    if (childHasSameStatistic) return;
+    addCandidate(element, documentOrder, true);
+  });
+
+  if (candidates.length < 20) {
     scanned.forEach((element, documentOrder) => {
       if (!FALLBACK_TEXT_TAGS.has(element.tagName.toLowerCase())) return;
       const text = compactText(element.innerText || element.textContent, 180);
@@ -361,6 +498,14 @@
       placeholder: item.placeholder,
       business_id: item.businessId,
       business_type: item.businessType,
+      asset_id: item.assetId,
+      management_ip: item.managementIp,
+      serial_number: item.serialNumber,
+      site_id: item.siteId,
+      asset_version: item.assetVersion,
+      action_id: item.actionId,
+      owner_business_id: item.ownerBusinessId,
+      test_id: item.testId,
       bbox: item.bbox,
       disabled: isDisabled(item.element),
       checked: Boolean(item.element.checked),
@@ -398,6 +543,198 @@
     canvases.push(result);
   }
 
+  const visualRegions = [];
+
+  function addVisualRegion(
+    element,
+    sourceKind,
+    sourceIndex,
+    primitiveCount = 0,
+  ) {
+    const visible = visibleBox(element);
+    if (!visible) return;
+    const clipped = clippedBoxToViewport(visible.bbox);
+    if (!clipped) return;
+    const area = clipped[2] * clipped[3];
+    const hint = regionHintFor(element);
+    const hasHint = VISUAL_REGION_HINT.test(hint);
+    const largeEnough =
+      clipped[2] >= MIN_VISUAL_REGION_WIDTH &&
+      clipped[3] >= MIN_VISUAL_REGION_HEIGHT &&
+      area >= MIN_VISUAL_REGION_AREA;
+    if (!largeEnough) return;
+    if (
+      sourceKind === "svg" &&
+      !hasHint &&
+      Number(primitiveCount || 0) < 6
+    ) {
+      return;
+    }
+    if (
+      sourceKind === "graphic_container" &&
+      !hasHint &&
+      Number(primitiveCount || 0) < 6
+    ) {
+      return;
+    }
+    if (
+      ["embedded_region", "role_img"].includes(sourceKind) &&
+      !hasHint &&
+      area < 160_000
+    ) {
+      return;
+    }
+
+    const originalArea = visible.bbox[2] * visible.bbox[3];
+    const selector = selectorFor(element);
+    const sourcePriority = {
+      graphic_container: 40,
+      svg: 110,
+      canvas: 120,
+      embedded_region: 80,
+      role_img: 10,
+    };
+    const score =
+      (sourcePriority[sourceKind] || 0) +
+      (hasHint ? 60 : 0) +
+      Math.min(Number(primitiveCount || 0), 20);
+    const candidate = {
+      region_id: `${sourceKind}_${element.id || sourceIndex}`,
+      source_kind: sourceKind,
+      source_ref: selector,
+      bbox: clipped,
+      source_region: visible.bbox,
+      client_width: clipped[2],
+      client_height: clipped[3],
+      visible_ratio:
+        originalArea > 0
+          ? Number((area / originalArea).toFixed(4))
+          : 0,
+      primitive_count: Number(primitiveCount || 0),
+      explicit_hint: hasHint,
+      _score: score,
+    };
+
+    const duplicateIndex = visualRegions.findIndex(
+      (item) => regionOverlapRatio(item.bbox, clipped) >= 0.9,
+    );
+    if (duplicateIndex >= 0) {
+      if (score > visualRegions[duplicateIndex]._score) {
+        visualRegions[duplicateIndex] = candidate;
+      }
+      return;
+    }
+    visualRegions.push(candidate);
+  }
+
+  scanned.forEach((element, index) => {
+    const tag = element.tagName.toLowerCase();
+    if (
+      ["html", "body", "canvas", "svg", "iframe", "object", "embed"].includes(
+        tag,
+      ) ||
+      !VISUAL_REGION_HINT.test(regionHintFor(element))
+    ) {
+      return;
+    }
+    const primitiveCount = element.querySelectorAll(
+      "canvas,svg,circle,ellipse,line,path,polygon,polyline",
+    ).length;
+    addVisualRegion(element, "graphic_container", index, primitiveCount);
+  });
+
+  const graphicAncestorCounts = new Map();
+  Array.from(document.querySelectorAll("canvas,svg")).forEach((graphic) => {
+    let ancestor = graphic.parentElement;
+    let depth = 0;
+    while (
+      ancestor &&
+      ancestor !== document.body &&
+      ancestor !== document.documentElement &&
+      depth < 8
+    ) {
+      graphicAncestorCounts.set(
+        ancestor,
+        (graphicAncestorCounts.get(ancestor) || 0) + 1,
+      );
+      ancestor = ancestor.parentElement;
+      depth += 1;
+    }
+  });
+  Array.from(graphicAncestorCounts.entries())
+    .filter(([, count]) => count >= 8)
+    .map(([element, count]) => {
+      const visible = visibleBox(element);
+      return {
+        element,
+        count,
+        area: visible ? visible.bbox[2] * visible.bbox[3] : 0,
+      };
+    })
+    .sort(
+      (left, right) =>
+        right.count - left.count || left.area - right.area,
+    )
+    .slice(0, 12)
+    .forEach((item, index) => {
+      addVisualRegion(
+        item.element,
+        "graphic_container",
+        `cluster_${index}`,
+        item.count,
+      );
+    });
+
+  Array.from(document.querySelectorAll("canvas")).forEach((canvas, index) => {
+    addVisualRegion(canvas, "canvas", index, 1);
+  });
+  Array.from(document.querySelectorAll("svg")).forEach((svg, index) => {
+    if (svg.ownerSVGElement) return;
+    const primitiveCount = svg.querySelectorAll(
+      "circle,ellipse,line,path,polygon,polyline,rect,text,use,g",
+    ).length;
+    addVisualRegion(svg, "svg", index, primitiveCount);
+  });
+  Array.from(document.querySelectorAll("iframe,object,embed")).forEach(
+    (element, index) => {
+      addVisualRegion(element, "embedded_region", index, 0);
+    },
+  );
+  Array.from(document.querySelectorAll("[role='img']")).forEach(
+    (element, index) => {
+      addVisualRegion(element, "role_img", index, 0);
+    },
+  );
+
+  visualRegions.sort(
+    (left, right) =>
+      right._score - left._score ||
+      right.bbox[2] * right.bbox[3] - left.bbox[2] * left.bbox[3],
+  );
+  visualRegions.splice(MAX_VISUAL_REGIONS);
+  visualRegions.forEach((item) => delete item._score);
+
+  const svgElementTexts = [];
+  const svgTextKeys = new Set();
+  for (const textElement of Array.from(
+    document.querySelectorAll("svg text"),
+  )) {
+    if (svgElementTexts.length >= 1000) break;
+    const visible = visibleBox(textElement);
+    if (!visible) continue;
+    const text = compactText(textElement.textContent, 500);
+    if (!text) continue;
+    const selector = selectorFor(textElement);
+    const key = `${text}\u0000${visible.bbox.join(",")}`;
+    if (svgTextKeys.has(key)) continue;
+    svgTextKeys.add(key);
+    svgElementTexts.push({
+      text,
+      bbox: visible.bbox,
+      selector,
+    });
+  }
+
   const captureResult = {
     page: {
       url: location.href,
@@ -411,6 +748,8 @@
     },
     elements,
     canvases,
+    visual_regions: visualRegions,
+    svg_element_texts: svgElementTexts,
     stats: {
       scanned_element_count: scanned.length,
       candidate_count: candidates.length,
@@ -418,6 +757,11 @@
       actionable_element_count: elements.filter((item) => item.actionable)
         .length,
       fallback_text_count: elements.filter((item) => item.fallback_text).length,
+      native_canvas_count: canvases.length,
+      visual_region_count: visualRegions.length,
+      svg_region_count: visualRegions.filter((item) => item.source_kind === "svg")
+        .length,
+      svg_element_text_count: svgElementTexts.length,
       truncated: candidates.length > elements.length,
     },
   };
