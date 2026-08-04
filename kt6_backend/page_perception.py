@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from .perception_runtime import PerceptionRuntime
+from .vision_cache_coordinator import VisionCacheCoordinator
 from .vision_recognition import CanvasFrame, CanvasVisionAdapter
 
 
@@ -215,11 +216,13 @@ class PagePerceptionService:
         perception_runtime: PerceptionRuntime,
         canvas_vision: CanvasVisionAdapter | None = None,
         text_recognizer: Any | None = None,
+        vision_cache_coordinator: VisionCacheCoordinator | None = None,
     ):
         self.store = store
         self.perception_runtime = perception_runtime
         self.canvas_vision = canvas_vision
         self.text_recognizer = text_recognizer
+        self.vision_cache_coordinator = vision_cache_coordinator
 
     def ingest(self, payload: dict[str, Any]) -> dict[str, Any]:
         capture_id = f"capture_{uuid.uuid4().hex[:12]}"
@@ -245,7 +248,12 @@ class PagePerceptionService:
         if svg_element_texts is not None:
             capture["svg_element_texts"] = svg_element_texts
         dom_scene = self._dom_scene(dom, page)
-        canvas_scene = self._canvas_scene(canvases, adapter_scene, page)
+        canvas_scene = self._canvas_scene(
+            canvases,
+            adapter_scene,
+            page,
+            force_vision_refresh=payload.get("force_vision_refresh") is True,
+        )
         page_api_scene = self._page_api_scene(canvases, adapter_scene, page)
         text_scene = self._text_scene(topology_text, page, canvases)
         selected = self._select_scene(dom_scene, canvas_scene, text_scene)
@@ -329,6 +337,11 @@ class PagePerceptionService:
             )
         if canvas_scene.get("vision_routing") is not None:
             summary["vision_routing"] = copy.deepcopy(canvas_scene["vision_routing"])
+        if canvas_scene.get("vision_cache") is not None:
+            summary["vision_cache"] = copy.deepcopy(canvas_scene["vision_cache"])
+            summary["vision_cache_status"] = str(
+                canvas_scene["vision_cache"].get("status", "unknown")
+            )
         record = {
             "capture_id": capture_id,
             "capture": capture,
@@ -1493,6 +1506,8 @@ class PagePerceptionService:
         canvases: list[dict[str, Any]],
         adapter_scene: dict[str, Any] | None,
         page: dict[str, Any],
+        *,
+        force_vision_refresh: bool = False,
     ) -> dict[str, Any]:
         input_payload = {
             "source": "live_browser_canvas",
@@ -1526,10 +1541,18 @@ class PagePerceptionService:
                 adapter_version = str(self.canvas_vision.adapter_version).strip()
                 if not adapter_id or not adapter_version:
                     raise ValueError("CanvasVisionAdapter id and version are required")
-                recognized = self.canvas_vision.recognize(
-                    page=copy.deepcopy(page),
-                    frames=frames,
-                )
+                if self.vision_cache_coordinator is not None:
+                    recognized = self.vision_cache_coordinator.recognize(
+                        adapter=self.canvas_vision,
+                        page=copy.deepcopy(page),
+                        frames=frames,
+                        force_refresh=force_vision_refresh,
+                    )
+                else:
+                    recognized = self.canvas_vision.recognize(
+                        page=copy.deepcopy(page),
+                        frames=frames,
+                    )
                 if isinstance(recognized, dict) and "vision_routing" in recognized:
                     vision_routing = self._bounded_metadata(
                         recognized.get("vision_routing")
@@ -1977,6 +2000,10 @@ class PagePerceptionService:
         if "vision_routing" in recognized:
             scene["vision_routing"] = self._bounded_metadata(
                 recognized.get("vision_routing")
+            )
+        if "vision_cache" in recognized:
+            scene["vision_cache"] = self._bounded_metadata(
+                recognized.get("vision_cache")
             )
         return self._stamp_provenance(
             scene,

@@ -30,6 +30,8 @@ from .scene_store import SQLiteSceneStore
 from .topology_text_recognizer import TopologyTextRecognizer
 from .tools import MockBusinessTools
 from .vision_recognition import CanvasVisionAdapter
+from .vision_cache_coordinator import VisionCacheCoordinator
+from .vision_result_cache import SQLiteVisionResultCacheStore
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -276,11 +278,16 @@ def create_services(root: Path = ROOT) -> AppServices:
         runtime_dir / "kt6_page_captures.sqlite3",
         runtime_dir / "page_captures",
     )
+    vision_cache_coordinator = VisionCacheCoordinator(
+        SQLiteVisionResultCacheStore(runtime_dir / "kt6_vision_cache.sqlite3"),
+        asset_root=page_capture_store.asset_dir,
+    )
     page_perception = PagePerceptionService(
         page_capture_store,
         perception_runtime,
         canvas_vision=canvas_vision,
         text_recognizer=TopologyTextRecognizer(),
+        vision_cache_coordinator=vision_cache_coordinator,
     )
     page_capture_jobs = PageCaptureJobService(page_perception)
     asset_inventory = JSONAssetInventoryAdapter(root / "data" / "mock_assets.json")

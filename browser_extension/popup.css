@@ -39,6 +39,16 @@ button:disabled {
   opacity: 0.65;
 }
 
+.capture-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 10px 0 0;
+  color: #475467;
+  cursor: pointer;
+  font-size: 12px;
+}
+
 .status {
   margin: 12px 0 0;
   padding: 10px;

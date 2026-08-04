@@ -829,7 +829,7 @@ async function collectFrameResults(tabId) {
   }
 }
 
-async function captureActivePage({ onStage = () => {} } = {}) {
+async function captureActivePage({ onStage = () => {}, forceRefresh = false } = {}) {
   onStage("locating");
   const healthPromise = readBackendHealth();
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -1073,12 +1073,13 @@ async function captureActivePage({ onStage = () => {} } = {}) {
   const payload = {
     page: {
       ...topFrame.result.page,
-      ui_version: "kt6-browser-extension-v0.5.1",
+      ui_version: "kt6-browser-extension-v0.5.2",
     },
     dom: { elements, stats },
     canvases,
     svg_element_texts: svgElementTexts,
     adapter_scene: pageAdapterScene,
+    force_vision_refresh: Boolean(forceRefresh),
     captured_at: Date.now() / 1000,
   };
   const health = await healthPromise;
@@ -1151,6 +1152,7 @@ globalThis.__KT6_CAPTURE_JOB_INTERNALS__ = Object.freeze({
 });
 
 const captureButton = document.querySelector("#capture");
+const forceRefreshCheckbox = document.querySelector("#force-refresh");
 const statusOutput = document.querySelector("#status");
 
 function backendStageMessage(detail = {}) {
@@ -1188,11 +1190,15 @@ function renderCapture(capture, { resumed = false } = {}) {
   const stats = capture?.stats || {};
   const selectedMode = summary.selected_mode || "识别完成";
   const resumedNote = resumed ? " · 已恢复后台任务" : "";
+  const visionCacheStatus = summary.vision_cache_status || summary.vision_cache?.status || "";
+  const cacheNote = ["exact_hit", "reprojected", "coalesced"].includes(visionCacheStatus)
+    ? ` · 视觉缓存 ${visionCacheStatus}`
+    : "";
   statusOutput.textContent = stats.visible_capture_error
-    ? `DOM 采集成功 · 视觉截图失败：${stats.visible_capture_error}${resumedNote}`
+    ? `DOM 采集成功 · 视觉截图失败：${stats.visible_capture_error}${resumedNote}${cacheNote}`
     : stats.page_screenshot_fallback
-      ? `采集成功 · 全页视觉兜底（仅分析） · ${selectedMode}${resumedNote}`
-      : `采集成功 · ${selectedMode}${resumedNote}`;
+      ? `采集成功 · 全页视觉兜底（仅分析） · ${selectedMode}${resumedNote}${cacheNote}`
+      : `采集成功 · ${selectedMode}${resumedNote}${cacheNote}`;
   statusOutput.dataset.state = "success";
   setMetric("capture-id", result.capture_id || "-");
   setMetric("frames", stats.frame_count ?? "-");
@@ -1208,6 +1214,12 @@ function renderCapture(capture, { resumed = false } = {}) {
     "perception-decision",
     summary.perception_decision || "等待后端判断",
   );
+  const cacheLabel = visionCacheStatus
+    ? `${visionCacheStatus}${
+        summary.vision_cache?.model_invocation_avoided === true ? " · 未调用模型" : ""
+      }`
+    : "未启用";
+  setMetric("vision-cache", cacheLabel);
   setMetric("page-adapter", stats.page_adapter_status || "-");
   setMetric("truncated", stats.truncated === undefined ? "-" : stats.truncated ? "是" : "否");
   renderPreview(Array.isArray(capture?.preview) ? capture.preview : []);
@@ -1273,7 +1285,10 @@ captureButton.addEventListener("click", async () => {
     return;
   }
   await runCaptureOperation(
-    () => captureActivePage({ onStage: updateCaptureStage }),
+    () => captureActivePage({
+      onStage: updateCaptureStage,
+      forceRefresh: forceRefreshCheckbox.checked,
+    }),
     { resumed: false },
   );
 });
