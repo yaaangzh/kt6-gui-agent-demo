@@ -40,6 +40,57 @@ class AppFactoryTest(unittest.TestCase):
 
         self.assertIsNone(services.page_perception.canvas_vision)
 
+    def test_canvas_vision_health_is_safe_and_describes_adaptive_routing(self):
+        self.assertEqual(
+            app._canvas_vision_health(None),
+            {
+                "configured": False,
+                "adapter_id": None,
+                "adapter_version": None,
+                "routing_mode": "evidence_only",
+                "timeout_seconds": None,
+            },
+        )
+
+        class Adapter:
+            adapter_id = "model"
+            adapter_version = "2.0"
+            timeout_seconds = 75
+
+        class Local:
+            adapter_id = "local-cv"
+
+        class Hybrid:
+            adapter_id = "hybrid"
+            adapter_version = "1.0"
+            local_adapter = Local()
+            model_adapter = Adapter()
+
+        health = app._canvas_vision_health(Hybrid())
+        self.assertTrue(health["configured"])
+        self.assertEqual(health["routing_mode"], "cv_first_adaptive")
+        self.assertEqual(health["timeout_seconds"], 75.0)
+        self.assertEqual(health["local_adapter_id"], "local-cv")
+        self.assertEqual(health["model_adapter_id"], "model")
+        self.assertNotIn("endpoint", health)
+        self.assertNotIn("api_key", health)
+
+        for invalid_timeout in (
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            "invalid",
+        ):
+            with self.subTest(invalid_timeout=invalid_timeout):
+                invalid_adapter = type(
+                    "InvalidTimeoutAdapter",
+                    (),
+                    {"timeout_seconds": invalid_timeout},
+                )()
+                self.assertIsNone(
+                    app._canvas_vision_health(invalid_adapter)["timeout_seconds"]
+                )
+
     def test_create_services_builds_canvas_vision_from_environment(self):
         adapter = object()
         environment = {

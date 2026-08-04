@@ -66,7 +66,12 @@ const canvasState = {
 };
 
 window.__KT6_PAGE_ADAPTER__ = {
-  version: "1.0",
+  adapter_id: "kt6-demo-canvas-renderer",
+  adapter_version: "1.0",
+  snapshot_complete: true,
+  snapshot() {
+    return this.captureScene();
+  },
   captureScene() {
     const topology = canvasState.topology;
     if (!topology) return null;

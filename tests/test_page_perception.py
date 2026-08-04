@@ -128,6 +128,40 @@ class DanglingCanvasVisionAdapter(RecordingCanvasVisionAdapter):
         return result
 
 
+class RoutingCanvasVisionAdapter(RecordingCanvasVisionAdapter):
+    adapter_id = "routing-vision"
+    supports_actionable_grounding = False
+
+    def recognize(self, *, page, frames):
+        result = super().recognize(page=page, frames=frames)
+        result["vision_routing"] = {
+            "decision": "model_assist",
+            "scene_type": "complex_topology",
+            "effective_profile": "visible_topology",
+            "reason_codes": ["cv_connectivity_incomplete"],
+        }
+        return result
+
+
+class SpoofingCanvasVisionAdapter(RecordingCanvasVisionAdapter):
+    adapter_id = "spoofing-vision"
+    supports_actionable_grounding = True
+
+    def recognize(self, *, page, frames):
+        result = super().recognize(page=page, frames=frames)
+        item = result["objects"][0]
+        item["actionable"] = True
+        item["safe_for_execution"] = True
+        item["source"] = {"kind": "dom"}
+        item["interaction"] = {"can_click_now": True}
+        item["attributes"] = {
+            "safe_for_execution": True,
+            "interaction_eligible": True,
+            "vendor": "Huawei",
+        }
+        return result
+
+
 def live_capture_payload() -> dict:
     return {
         "page": {
@@ -251,19 +285,31 @@ class PagePerceptionTest(unittest.TestCase):
         self.assertEqual(result["perception"]["candidates"]["text"]["mode"], "topology_text_unavailable")
         self.assertFalse(capture["scene"]["pixel_inference_performed"])
 
-    def test_perception_decision_describes_dom_and_pixel_evidence_mix(self):
+    def test_perception_decision_describes_all_evidence_channel_combinations(self):
         cases = (
-            ("dom_and_canvas", True, True),
-            ("dom_only", True, False),
-            ("canvas_only", False, True),
-            ("empty", False, False),
+            ("empty", False, False, False),
+            ("dom_only", True, False, False),
+            ("page_api_only", False, True, False),
+            ("canvas_only", False, False, True),
+            ("dom_and_page_api", True, True, False),
+            ("dom_and_canvas", True, False, True),
+            ("page_api_and_canvas", False, True, True),
+            ("dom_and_page_api_and_canvas", True, True, True),
         )
-        for expected, include_dom, include_canvas in cases:
+        for expected, include_dom, include_page_api, include_canvas in cases:
             with self.subTest(expected=expected):
                 payload = live_capture_payload()
-                payload["adapter_scene"] = None
                 if not include_dom:
                     payload["dom"] = {"elements": []}
+                if include_page_api:
+                    payload["adapter_scene"]["source_metadata"] = {
+                        "source_type": "explicit_page_adapter",
+                        "adapter_id": "test-page-adapter",
+                        "adapter_version": "1.0",
+                        "snapshot_complete": True,
+                    }
+                else:
+                    payload["adapter_scene"] = None
                 if not include_canvas:
                     payload["canvases"] = []
 
@@ -378,6 +424,11 @@ class PagePerceptionTest(unittest.TestCase):
         self.assertEqual(capture["summary"]["selected_mode"], "canvas_vision_adapter")
         self.assertEqual(capture["summary"]["perception_decision"], "dom_and_canvas")
         self.assertEqual(capture["canvas_perception"]["mode"], "canvas_vision_adapter")
+        self.assertEqual(capture["dom_perception"]["mode"], "live_dom_snapshot")
+        self.assertEqual(
+            result["perception"]["dom_perception"], capture["dom_perception"]
+        )
+        self.assertEqual(topology["dom_perception"], capture["dom_perception"])
         self.assertIn("gw_001", capture["scene"]["business_object_bindings"])
         self.assertIn("ap_001", capture["dom_business_object_bindings"])
         self.assertIn("frame:0:#shutdown-ap-1", capture["dom_action_bindings"])
@@ -520,6 +571,89 @@ class PagePerceptionTest(unittest.TestCase):
         self.assertEqual(stored[2]["depth"], 2)
         self.assertEqual(stored[2]["document_order"], 1)
 
+    def test_dom_projection_preserves_coverage_and_frame_scoped_hierarchy(self):
+        payload = live_capture_payload()
+        payload["adapter_scene"] = None
+        payload["canvases"] = []
+        payload["dom"] = {
+            "stats": {
+                "frame_count": 2,
+                "scanned_element_count": 300,
+                "captured_element_count": 3,
+                "truncated": False,
+                "unknown": "discarded",
+            },
+            "coverage": {
+                "source_complete": False,
+                "compressed": True,
+                "omitted_ancestor_count": 2,
+            },
+            "elements": [
+                {
+                    "ref": "frame:0:#panel",
+                    "frame_id": "0",
+                    "frame_url": "https://nce.example/main",
+                    "document_id": "doc-0",
+                    "parent_relation": "root",
+                    "bbox": [0, 0, 100, 100],
+                },
+                {
+                    "ref": "frame:0:#button",
+                    "parent_ref": "frame:0:#panel",
+                    "parent_relation": "nearest_captured_ancestor",
+                    "omitted_ancestor_count": 2,
+                    "frame_id": "0",
+                    "frame_url": "https://nce.example/main",
+                    "document_id": "doc-0",
+                    "bbox": [10, 10, 20, 20],
+                },
+                {
+                    "ref": "frame:7:#panel",
+                    "frame_id": "7",
+                    "frame_url": "https://nce.example/frame",
+                    "document_id": "doc-7",
+                    "bbox": [0, 0, 100, 100],
+                },
+            ],
+        }
+
+        capture = self.service.ingest(payload)
+        result = self.service.get_result(capture["capture_id"])
+        topology = self.service.get_topology(capture["capture_id"])
+        dom = capture["dom_perception"]
+        tree = dom["ui_tree"]
+
+        self.assertEqual(capture["summary"]["dom_stats"]["frame_count"], 2)
+        self.assertNotIn("unknown", capture["summary"]["dom_stats"])
+        self.assertEqual(dom["coverage"]["tree_scope"], "semantic_projection")
+        self.assertFalse(tree["source_complete"])
+        self.assertTrue(tree["action_binding_complete"])
+        self.assertTrue(tree["compressed"])
+        self.assertTrue(tree["graph_consistent"])
+        self.assertFalse(tree["complete"])
+        self.assertEqual(len(tree["frame_roots"]), 2)
+        parent = tree["nodes"]["frame:0:#panel"]
+        child = tree["nodes"]["frame:0:#button"]
+        self.assertEqual(child["parent_element_id"], parent["element_id"])
+        self.assertEqual(parent["child_element_ids"], [child["element_id"]])
+        self.assertEqual(child["parent_relation"], "nearest_captured_ancestor")
+        self.assertEqual(result["perception"]["dom_perception"], dom)
+        self.assertEqual(topology["dom_perception"], dom)
+
+    def test_dom_frame_collection_error_blocks_action_binding_completeness(self):
+        payload = live_capture_payload()
+        payload["adapter_scene"] = None
+        payload["canvases"] = []
+        payload["dom"]["stats"] = {
+            "frame_collection_error": "cross-origin frame unavailable"
+        }
+
+        capture = self.service.ingest(payload)
+
+        self.assertFalse(
+            capture["dom_perception"]["coverage"]["action_binding_complete"]
+        )
+
     def test_browser_extension_dom_preserves_frame_selector_and_action_binding(self):
         payload = live_capture_payload()
         payload["adapter_scene"] = None
@@ -576,6 +710,11 @@ class PagePerceptionTest(unittest.TestCase):
         )
         self.assertEqual(topology["dom_action_bindings"], scene["dom_action_bindings"])
         self.assertFalse(scene["actionable_grounding"])
+        element = scene["elements"][0]
+        self.assertEqual(element["source"]["kind"], "dom")
+        self.assertEqual(element["interaction"]["status"], "preflight_required")
+        self.assertFalse(element["interaction"]["can_click_now"])
+        self.assertTrue(element["interaction_eligible"])
 
     def test_dom_business_id_stays_observed_until_asset_action_preflight(self):
         payload = live_capture_payload()
@@ -759,6 +898,161 @@ class PagePerceptionTest(unittest.TestCase):
         self.assertIn("截图不可用", result["perception"]["decision"]["reason"])
         self.assertIn("截图不可用", capture["scene"]["limitations"][0])
         self.assertNotIn("像素来自浏览器实时截图", capture["scene"]["limitations"][0])
+
+    def test_explicit_page_adapter_metadata_is_bounded_and_analysis_only(self):
+        payload = live_capture_payload()
+        payload["adapter_scene"]["source_metadata"] = {
+            "source_type": "explicit_page_adapter",
+            "adapter_id": "nce-topology-sdk",
+            "adapter_version": "2.1",
+            "frame_id": "7",
+            "frame_url": "https://nce.example/topology",
+            "document_id": "document-7",
+            "captured_at": 123.5,
+            "snapshot_complete": True,
+            "safe_for_execution": True,
+            "secret": "discarded",
+        }
+        payload["adapter_scene"]["objects"][0].update(
+            {
+                "actionable": True,
+                "safe_for_execution": True,
+                "interaction": {"can_click_now": True},
+            }
+        )
+
+        capture = self.service.ingest(payload)
+        scene = capture["scene"]
+        metadata = capture["summary"]["adapter_source_metadata"]
+        element = scene["elements"][0]
+
+        self.assertEqual(metadata["source_type"], "explicit_page_adapter")
+        self.assertEqual(metadata["adapter_id"], "nce-topology-sdk")
+        self.assertFalse(metadata["safe_for_execution"])
+        self.assertNotIn("secret", metadata)
+        self.assertEqual(scene["source_metadata"], metadata)
+        self.assertTrue(capture["summary"]["adapter_snapshot_complete"])
+        self.assertEqual(element["source"]["kind"], "page_api")
+        self.assertEqual(element["source"]["semantic_source"], "page_api_adapter")
+        self.assertEqual(scene["provenance"]["semantic_source"], "page_api_adapter")
+        self.assertTrue(scene["provenance"]["page_adapter_snapshot_complete"])
+        self.assertEqual(scene["business_object_bindings"]["user_zhangsan"]["method"], "page_api_adapter")
+        self.assertEqual(element["interaction"]["status"], "analysis_only")
+        self.assertFalse(element["interaction"]["can_click_now"])
+        self.assertFalse(element["interaction_eligible"])
+        self.assertNotIn("actionable", element["attributes"])
+        self.assertNotIn("safe_for_execution", element["attributes"])
+        self.assertNotIn("interaction", element["attributes"])
+        self.assertFalse(scene["actionable_grounding"])
+        self.assertTrue(
+            all(not item["actionable"] for item in scene["business_object_bindings"].values())
+        )
+
+    def test_partial_page_adapter_keeps_api_evidence_but_prefers_successful_vision(self):
+        payload = live_capture_payload()
+        payload["dom"] = {"elements": []}
+        payload["adapter_scene"]["source_metadata"] = {
+            "source_type": "explicit_page_adapter",
+            "adapter_id": "nce-topology-sdk",
+            "adapter_version": "2.1",
+            "snapshot_complete": False,
+        }
+        adapter = RecordingCanvasVisionAdapter()
+        service = self.service_with(canvas_vision=adapter)
+
+        capture = service.ingest(payload)
+        result = service.get_result(capture["capture_id"])
+
+        self.assertEqual(len(adapter.calls), 1)
+        self.assertEqual(capture["summary"]["selected_mode"], "canvas_vision_adapter")
+        self.assertFalse(capture["summary"]["adapter_snapshot_complete"])
+        self.assertEqual(capture["scene"]["provenance"]["semantic_source"], "canvas_pixels")
+        page_api = capture["page_api_perception"]
+        self.assertEqual(page_api["provenance"]["semantic_source"], "page_api_adapter")
+        self.assertEqual(page_api["elements"][0]["source"]["kind"], "page_api")
+        self.assertEqual(page_api["elements"][0]["interaction"]["status"], "analysis_only")
+        self.assertFalse(page_api["actionable_grounding"])
+        self.assertEqual(result["perception"]["candidates"]["page_api"], page_api)
+
+    def test_complete_page_adapter_skips_available_vision(self):
+        payload = live_capture_payload()
+        payload["dom"] = {"elements": []}
+        payload["adapter_scene"]["source_metadata"] = {
+            "source_type": "explicit_page_adapter",
+            "adapter_id": "nce-topology-sdk",
+            "adapter_version": "2.1",
+            "snapshot_complete": True,
+        }
+        adapter = RecordingCanvasVisionAdapter()
+        service = self.service_with(canvas_vision=adapter)
+
+        capture = service.ingest(payload)
+
+        self.assertEqual(adapter.calls, [])
+        self.assertEqual(capture["summary"]["selected_mode"], "canvas_renderer_adapter")
+        self.assertEqual(capture["scene"]["provenance"]["semantic_source"], "page_api_adapter")
+        self.assertEqual(capture["scene"]["elements"][0]["source"]["kind"], "page_api")
+        self.assertFalse(capture["scene"]["actionable_grounding"])
+
+    def test_partial_page_adapter_falls_back_when_vision_fails(self):
+        payload = live_capture_payload()
+        payload["dom"] = {"elements": []}
+        payload["adapter_scene"]["source_metadata"] = {
+            "source_type": "explicit_page_adapter",
+            "snapshot_complete": False,
+        }
+        service = self.service_with(canvas_vision=FailingCanvasVisionAdapter())
+
+        capture = service.ingest(payload)
+
+        self.assertEqual(capture["summary"]["selected_mode"], "canvas_renderer_adapter")
+        self.assertEqual(capture["scene"]["vision_fallback"], "incomplete_page_api_snapshot")
+        self.assertIn("RuntimeError: vision backend unavailable", capture["scene"]["vision_error"])
+        self.assertTrue(capture["scene"]["requires_vision_model"])
+        self.assertTrue(any("已回退到页面 API" in item for item in capture["scene"]["limitations"]))
+        self.assertEqual(capture["page_api_perception"]["elements"][0]["source"]["kind"], "page_api")
+        self.assertFalse(capture["scene"]["actionable_grounding"])
+
+    def test_malformed_page_adapter_contract_is_rejected(self):
+        base = copy.deepcopy(live_capture_payload()["adapter_scene"])
+        invalid_entry = copy.deepcopy(base)
+        invalid_entry["objects"] = ["not-an-object"]
+        invalid_coordinate = copy.deepcopy(base)
+        invalid_coordinate["objects"][0]["x"] = float("nan")
+        invalid_dimension = copy.deepcopy(base)
+        invalid_dimension["objects"][0]["width"] = 0
+        invalid_canvas = copy.deepcopy(base)
+        invalid_canvas["canvas"] = {"width": float("inf"), "height": 900}
+        invalid_relation_entry = copy.deepcopy(base)
+        invalid_relation_entry["links"] = ["not-a-relation"]
+        dangling_relation = copy.deepcopy(base)
+        dangling_relation["links"] = [
+            {"source": "user_zhangsan", "target": "missing-node"}
+        ]
+        cases = (
+            ("scene_type", "not-an-object", "adapter_scene must be an object"),
+            ("objects_type", {**base, "objects": {}}, "objects must be a list"),
+            ("object_entry", invalid_entry, "object entries must be objects"),
+            ("coordinate", invalid_coordinate, "object x must be finite"),
+            ("dimension", invalid_dimension, "object dimensions must be positive"),
+            ("canvas_type", {**base, "canvas": []}, "canvas must be an object"),
+            ("canvas_coordinate", invalid_canvas, "canvas.width must be finite"),
+            ("relations_type", {**base, "links": {}}, "links must be a list"),
+            ("relation_entry", invalid_relation_entry, "links entries must be objects"),
+            ("dangling_relation", dangling_relation, "dangling endpoint"),
+            (
+                "source_metadata_type",
+                {**base, "source_metadata": "not-an-object"},
+                "source_metadata must be an object",
+            ),
+        )
+        for name, adapter_scene, error in cases:
+            with self.subTest(name=name):
+                payload = live_capture_payload()
+                payload["canvases"] = []
+                payload["adapter_scene"] = adapter_scene
+                with self.assertRaisesRegex(ValueError, error):
+                    self.service.ingest(payload)
 
     def test_provided_topology_text_reconstructs_semantics_without_pixel_claims(self):
         payload = live_capture_payload()
@@ -1070,7 +1364,10 @@ class PagePerceptionTest(unittest.TestCase):
         )
         self.assertTrue(capture["scene"]["pixel_inference_performed"])
         self.assertTrue(capture["scene"]["pixel_verified"])
-        self.assertTrue(capture["scene"]["actionable_grounding"])
+        self.assertFalse(capture["scene"]["actionable_grounding"])
+        self.assertTrue(
+            all(not item["actionable"] for item in capture["scene"]["business_object_bindings"].values())
+        )
         self.assertEqual(capture["scene"]["semantic_tree"]["roots"], ["gw_001"])
         self.assertEqual(
             capture["scene"]["semantic_tree"]["nodes"]["gw_001"]["children"],
@@ -1082,6 +1379,62 @@ class PagePerceptionTest(unittest.TestCase):
                 }
             ],
         )
+        element = capture["scene"]["elements"][0]
+        self.assertEqual(element["source"]["kind"], "vision")
+        self.assertEqual(element["interaction"]["status"], "analysis_only")
+        self.assertFalse(element["interaction"]["can_click_now"])
+
+    def test_canvas_vision_routing_is_visible_in_scene_and_summary(self):
+        payload = live_capture_payload()
+        payload["adapter_scene"] = None
+        payload["dom"] = {"elements": []}
+        service = self.service_with(canvas_vision=RoutingCanvasVisionAdapter())
+
+        capture = service.ingest(payload)
+
+        expected = {
+            "decision": "model_assist",
+            "scene_type": "complex_topology",
+            "effective_profile": "visible_topology",
+            "reason_codes": ["cv_connectivity_incomplete"],
+        }
+        self.assertEqual(capture["scene"]["vision_routing"], expected)
+        self.assertEqual(capture["summary"]["vision_routing"], expected)
+
+    def test_canvas_adapter_cannot_self_authorize_nodes(self):
+        payload = live_capture_payload()
+        payload["adapter_scene"] = None
+        payload["dom"] = {"elements": []}
+        service = self.service_with(canvas_vision=SpoofingCanvasVisionAdapter())
+
+        capture = service.ingest(payload)
+        element = capture["scene"]["elements"][0]
+
+        self.assertEqual(element["source"]["kind"], "vision")
+        self.assertEqual(element["source"]["producer_id"], "spoofing-vision")
+        self.assertEqual(element["interaction"]["status"], "analysis_only")
+        self.assertFalse(element["interaction"]["can_click_now"])
+        self.assertFalse(element["interaction_eligible"])
+        self.assertNotIn("safe_for_execution", element["attributes"])
+        self.assertNotIn("interaction_eligible", element["attributes"])
+        self.assertNotIn("actionable", element["attributes"])
+        self.assertEqual(element["attributes"]["vendor"], "Huawei")
+        self.assertFalse(capture["scene"]["actionable_grounding"])
+
+    def test_text_nodes_are_explicitly_analysis_only(self):
+        payload = live_capture_payload()
+        payload["adapter_scene"] = None
+        payload["dom"] = {"elements": []}
+        payload["canvases"] = []
+        payload["topology_text"] = self.topology_text()
+        service = self.service_with(text_recognizer=TopologyTextRecognizer())
+
+        capture = service.ingest(payload)
+        element = capture["scene"]["elements"][0]
+
+        self.assertEqual(element["source"]["kind"], "text")
+        self.assertEqual(element["interaction"]["status"], "analysis_only")
+        self.assertFalse(element["interaction_eligible"])
 
     def test_canvas_vision_failure_falls_back_without_losing_error_or_pixels(self):
         payload = live_capture_payload()
@@ -1214,7 +1567,7 @@ class PagePerceptionTest(unittest.TestCase):
         )
         self.assertEqual(len(relations), 3)
 
-    def test_runtime_uses_live_page_capture_and_detects_movement(self):
+    def test_runtime_rejects_analysis_only_page_api_scene(self):
         first = self.service.ingest(live_capture_payload())
         tools = MockBusinessTools(
             Path("data"),
@@ -1239,9 +1592,9 @@ class PagePerceptionTest(unittest.TestCase):
             "execute_solution",
             {"solution_id": "rf_optimization", "page_capture_id": second["capture_id"]},
         )
-        self.assertTrue(accepted)
-        task = wait_for_state(runtime, task.task_id, "completed")
-        self.assertTrue(any(event.type == "topology_changed" for event in task.events))
+        self.assertFalse(accepted)
+        task = runtime.get_task(task.task_id)
+        self.assertTrue(any(event.payload.get("reason") == "non_actionable_grounding" for event in task.events))
 
 
 if __name__ == "__main__":

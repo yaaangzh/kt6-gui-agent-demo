@@ -343,7 +343,9 @@
     return priority;
   }
 
-  const scanned = Array.from(document.querySelectorAll("*")).slice(
+  const pageElements = document.querySelectorAll("*");
+  const totalElementCount = pageElements.length;
+  const scanned = Array.from(pageElements).slice(
     0,
     MAX_SCANNED_ELEMENTS,
   );
@@ -476,8 +478,13 @@
   });
 
   const elements = selected.map((item) => {
-    let parent = item.element.parentElement;
-    while (parent && !refByElement.has(parent)) parent = parent.parentElement;
+    const immediateParent = item.element.parentElement;
+    let parent = immediateParent;
+    let omittedAncestorCount = 0;
+    while (parent && !refByElement.has(parent)) {
+      omittedAncestorCount += 1;
+      parent = parent.parentElement;
+    }
     let depth = 0;
     let ancestor = item.element;
     while (ancestor && ancestor !== document.documentElement) {
@@ -489,6 +496,12 @@
       ref: selector,
       selector: selector.startsWith("@capture:") ? "" : selector,
       parent_ref: parent ? refByElement.get(parent) || "" : "",
+      parent_relation: parent
+        ? parent === immediateParent
+          ? "direct"
+          : "nearest_captured_ancestor"
+        : "root_or_unobserved",
+      omitted_ancestor_count: omittedAncestorCount,
       depth,
       document_order: item.documentOrder,
       tag: item.element.tagName.toLowerCase(),
@@ -751,7 +764,9 @@
     visual_regions: visualRegions,
     svg_element_texts: svgElementTexts,
     stats: {
+      total_element_count: totalElementCount,
       scanned_element_count: scanned.length,
+      scan_truncated: totalElementCount > scanned.length,
       candidate_count: candidates.length,
       captured_element_count: elements.length,
       actionable_element_count: elements.filter((item) => item.actionable)
@@ -762,7 +777,16 @@
       svg_region_count: visualRegions.filter((item) => item.source_kind === "svg")
         .length,
       svg_element_text_count: svgElementTexts.length,
-      truncated: candidates.length > elements.length,
+      projected_parent_count: elements.filter((item) => item.parent_ref).length,
+      omitted_ancestor_count: elements.reduce(
+        (total, item) => total + Number(item.omitted_ancestor_count || 0),
+        0,
+      ),
+      open_shadow_root_count: scanned.filter((item) => Boolean(item.shadowRoot))
+        .length,
+      truncated:
+        totalElementCount > scanned.length ||
+        candidates.length > elements.length,
     },
   };
   globalThis.__KT6_EXTENSION_CAPTURE__ = captureResult;

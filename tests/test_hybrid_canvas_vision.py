@@ -4,6 +4,7 @@ from kt6_backend.hybrid_canvas_vision import (
     HybridCanvasVisionAdapter,
     HybridCanvasVisionError,
 )
+from kt6_backend.local_cv_canvas_vision import LocalCVTopologyVisionAdapter
 
 
 class StaticAdapter:
@@ -34,6 +35,11 @@ class ContextAwareAdapter(StaticAdapter):
         if self.error is not None:
             raise self.error
         return self.result
+
+
+class TrustedLocalAdapter(StaticAdapter):
+    adapter_id = LocalCVTopologyVisionAdapter.adapter_id
+    adapter_version = LocalCVTopologyVisionAdapter.adapter_version
 
 
 def local_result():
@@ -104,6 +110,23 @@ def model_result():
     }
 
 
+def trusted_structured_local_result():
+    result = local_result()
+    for item in result["objects"]:
+        item["attributes"]["source_region"] = "diagram"
+    result["diagnostics"] = {
+        "producer": "local_cv_ocr",
+        "connector_scan": {
+            "status": "complete",
+            "pixel_count": 100,
+            "component_count": 1,
+            "line_segment_count": 1,
+            "budget_exhausted": False,
+        },
+    }
+    return result
+
+
 class HybridCanvasVisionAdapterTest(unittest.TestCase):
     def test_fuses_local_geometry_and_model_semantics(self):
         local = StaticAdapter(local_result())
@@ -142,6 +165,50 @@ class HybridCanvasVisionAdapterTest(unittest.TestCase):
             result["objects"],
             result["fusion_analysis"]["grounded_graph"]["objects"],
         )
+        self.assertEqual(result["vision_routing"]["decision"], "model_assist")
+        self.assertEqual(
+            result["vision_routing"]["execution_status"], "model_completed"
+        )
+        self.assertFalse(result["vision_routing"]["metrics"]["trusted_adapter"])
+
+    def test_trusted_structured_cv_skips_model(self):
+        local = TrustedLocalAdapter(trusted_structured_local_result())
+        model = ContextAwareAdapter(model_result())
+        adapter = HybridCanvasVisionAdapter(
+            local_adapter=local,
+            model_adapter=model,
+        )
+
+        result = adapter.recognize(page={"url": "test"}, frames=())
+
+        self.assertIsNotNone(result)
+        self.assertEqual(local.calls, 1)
+        self.assertEqual(model.calls, 0)
+        self.assertEqual(result["vision_routing"]["decision"], "cv_only")
+        self.assertTrue(result["vision_routing"]["requirement_satisfied"])
+        self.assertFalse(result["vision_routing"]["model_invoked"])
+        self.assertEqual(
+            result["vision_routing"]["execution_status"],
+            "completed_without_model",
+        )
+        self.assertEqual(
+            result["fusion_summary"]["degraded_to"],
+            "local_cv",
+        )
+
+    def test_untrusted_cv_never_skips_model(self):
+        local = StaticAdapter(trusted_structured_local_result())
+        model = ContextAwareAdapter(model_result())
+        adapter = HybridCanvasVisionAdapter(
+            local_adapter=local,
+            model_adapter=model,
+        )
+
+        result = adapter.recognize(page={"url": "test"}, frames=())
+
+        self.assertEqual(model.calls, 1)
+        self.assertEqual(result["vision_routing"]["decision"], "model_assist")
+        self.assertFalse(result["vision_routing"]["metrics"]["trusted_adapter"])
 
     def test_inferred_geometry_stays_inside_display_analysis(self):
         model = {
@@ -233,6 +300,12 @@ class HybridCanvasVisionAdapterTest(unittest.TestCase):
         self.assertEqual(
             result["objects"][0]["attributes"]["fusion_status"], "cv_only"
         )
+        self.assertEqual(result["vision_routing"]["decision"], "model_assist")
+        self.assertEqual(result["vision_routing"]["execution_status"], "model_failed")
+        self.assertIn(
+            "model_branch_failed",
+            result["vision_routing"]["reason_codes"],
+        )
 
     def test_local_failure_degrades_to_model(self):
         adapter = HybridCanvasVisionAdapter(
@@ -247,6 +320,32 @@ class HybridCanvasVisionAdapterTest(unittest.TestCase):
         )
         self.assertEqual(
             result["objects"][0]["attributes"]["fusion_status"], "model_only"
+        )
+        self.assertEqual(result["vision_routing"]["decision"], "model_assist")
+        self.assertEqual(
+            result["vision_routing"]["execution_status"], "model_completed"
+        )
+        self.assertIn(
+            "local_cv_branch_failed",
+            result["vision_routing"]["reason_codes"],
+        )
+
+    def test_invalid_local_cv_is_not_sent_to_context_aware_model(self):
+        local = StaticAdapter({"objects": "invalid", "links": []})
+        model = ContextAwareAdapter(model_result())
+        adapter = HybridCanvasVisionAdapter(
+            local_adapter=local,
+            model_adapter=model,
+        )
+
+        result = adapter.recognize(page={}, frames=())
+
+        self.assertEqual(model.calls, 1)
+        self.assertIsNone(model.cv_observations)
+        self.assertEqual(result["vision_routing"]["decision"], "model_assist")
+        self.assertIn(
+            "local_cv_routing_validation_failed",
+            result["vision_routing"]["reason_codes"],
         )
 
     def test_both_fail_without_exposing_branch_error_details(self):

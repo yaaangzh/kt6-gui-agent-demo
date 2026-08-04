@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
   "name": "KT6 Page Perception Capture",
-  "version": "0.4.0",
+  "version": "0.5.1",
   "description": "Capture DOM/ARIA plus Canvas/SVG visual evidence from the active page for the local KT6 service.",
   "permissions": [
     "activeTab",
-    "scripting"
+    "scripting",
+    "storage"
   ],
   "host_permissions": [
     "http://127.0.0.1:8787/*",

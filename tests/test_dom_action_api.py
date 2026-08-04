@@ -49,6 +49,13 @@ class DOMActionAPITest(unittest.TestCase):
             thread.start()
             base_url = f"http://127.0.0.1:{server.server_port}"
             try:
+                health = self.get(base_url, "/api/health", expected_status=200)
+                self.assertEqual(health["status"], "ok")
+                self.assertFalse(health["vision"]["configured"])
+                self.assertEqual(
+                    health["page_api"]["mode"], "explicit_read_only_adapter"
+                )
+
                 initial = self.post(
                     base_url,
                     "/api/perception/captures",
@@ -68,6 +75,13 @@ class DOMActionAPITest(unittest.TestCase):
                     },
                     expected_status=201,
                 )
+                prepared_status = self.get(
+                    base_url,
+                    f"/api/dom-actions/plans/{prepared['plan_id']}",
+                    expected_status=200,
+                )
+                self.assertEqual(prepared_status["status"], "prepared")
+                self.assertNotIn("binding", prepared_status)
                 current = self.post(
                     base_url,
                     "/api/perception/captures",
@@ -101,6 +115,14 @@ class DOMActionAPITest(unittest.TestCase):
                 self.assertEqual(result["asset_id"], "ap_001")
                 self.assertFalse(result["executed"])
 
+                completed_status = self.get(
+                    base_url,
+                    f"/api/dom-actions/plans/{prepared['plan_id']}",
+                    expected_status=200,
+                )
+                self.assertEqual(completed_status["status"], "dry_run_ok")
+                self.assertFalse(completed_status["safe_for_execution"])
+
                 rejected = self.post(
                     base_url,
                     "/api/dom-actions/execute",
@@ -131,6 +153,30 @@ class DOMActionAPITest(unittest.TestCase):
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
+        )
+        try:
+            response = urlopen(request, timeout=3)
+        except HTTPError as exc:
+            response = exc
+        with response:
+            body = json.loads(response.read().decode("utf-8"))
+            if response.status != expected_status:
+                raise AssertionError(
+                    f"expected HTTP {expected_status}, got {response.status}: {body}"
+                )
+            return body
+
+    @staticmethod
+    def get(
+        base_url: str,
+        path: str,
+        *,
+        expected_status: int,
+    ) -> dict:
+        request = Request(
+            base_url + path,
+            headers={"Accept": "application/json"},
+            method="GET",
         )
         try:
             response = urlopen(request, timeout=3)

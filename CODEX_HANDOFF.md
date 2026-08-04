@@ -28,14 +28,24 @@ cv-result.json + model-result.json
 模型提供语义、层级、连接和结构判断，最后通过确定性算法互补融合。
 
 同时已经增加在线页面 DOM 路线。由于当前仓库没有 FEBS/NCE 前端源码，暂不做
-嵌入式 SDK 集成；现阶段使用 Chrome/Edge 扩展 v0.4，由用户显式采集普通
+嵌入式 SDK 集成；现阶段使用 Chrome/Edge 扩展 v0.5.1，由用户显式采集普通
 HTTP(S) 页面中的 DOM/ARIA、iframe 上下文和稳定选择器，并自动检测可见的
 Canvas/SVG/图形区域。扩展每次采集至多截取一个视觉主帧，与 DOM 证据一起提交给
-本机 KT6。后端以 `dom_scene` 和 `canvas_scene` 分治处理，并并行保留视觉拓扑、
-DOM 业务绑定和 DOM 动作绑定。扩展同时采集资产 ID、管理 IP、序列号、站点、版本、
-动作 ID 和控件归属。后端已实现权威资产唯一解析、设备/控件双重绑定、新鲜页面
-复核、一次性令牌和 dry-run；扩展仍不直接点击页面，服务端也没有真实设备动作
-通道。
+本机 KT6。耗时识别由后端异步 capture job 执行，扩展把待完成 `job_id` 保存到
+`chrome.storage.local`，关闭并重开弹窗后可以继续查询；同步 capture 接口仍保留。
+
+页面可选显式暴露只读 `window.__KT6_PAGE_ADAPTER__` 快照。扩展只调用这个明确的
+适配器，不会监听或拦截任意 `fetch`/XHR；`snapshot_complete` 决定快照能否作为完整
+页面 API 证据，不完整快照会与像素视觉并行并作为失败回退保留。后端以 `dom_scene`、
+`canvas_scene` 分治处理并另行保留 `page_api_perception`，节点用
+`source.kind=dom|page_api|vision` 标明来源，并通过 `interaction.status`/`can_click_now` 明确交互资格。DOM `ui_tree` 是
+带 frame 根、父子引用和省略祖先计数的语义投影，`action_binding_complete` 单独表示
+动作证据是否完整。
+
+扩展同时采集资产 ID、管理 IP、序列号、站点、版本、动作 ID 和控件归属。后端已
+实现权威资产唯一解析、设备/控件双重绑定、六步 `operation_plan`、新鲜页面复核、
+一次性令牌和 dry-run；计划与令牌过期可通过查询接口观察。扩展仍不直接点击页面，
+服务端也没有真实设备动作通道。
 
 用户已明确：先把链路打通，真实图片准确率、批量评测、复杂图片超长 timeout
 和更深层模型优化之后再处理。
@@ -49,7 +59,7 @@ DOM 业务绑定和 DOM 动作绑定。扩展同时采集资产 ID、管理 IP�
 测试目录（另一台测试机）：D:\04project\FreeStyle_Copilot_KT6_demo
 GitHub：git@github.com:yaaangzh/kt6-gui-agent-demo.git
 分支：main
-当前变更基于本地 HEAD：e26e07b 增强在线页面DOM语义采集扩展
+当前本地 HEAD 与远端状态：以 `git log`、`git status` 和 `git fetch` 的结果为准
 ```
 
 当前开发机未挂载 `D:\04project`，不要把测试目录不存在误判为代码问题。
@@ -86,6 +96,7 @@ kt6_backend/topology_fusion.py
 kt6_backend/topology_fusion_cli.py
 kt6_backend/codeagent_canvas_vision.py
 kt6_backend/page_perception.py
+kt6_backend/page_capture_jobs.py
 kt6_backend/asset_inventory.py
 kt6_backend/dom_action_binding.py
 kt6_backend/safe_dom_actions.py
@@ -104,12 +115,15 @@ tests/test_topology_model_contract.py
 tests/test_topology_artifact_clis.py
 tests/test_topology_fusion.py
 tests/test_page_perception.py
+tests/test_page_capture_jobs.py
 tests/test_asset_inventory.py
 tests/test_dom_action_binding.py
 tests/test_safe_dom_actions.py
+tests/test_safe_dom_action_plan.py
 tests/test_asset_action_integration.py
 tests/test_dom_action_api.py
 tests/test_browser_extension_assets.py
+tests/test_hybrid_canvas_vision.py
 tests/fixtures/extension_plain_page.html
 tests/fixtures/extension_complex_page.html
 tests/fixtures/extension_canvas_page.html
@@ -139,6 +153,11 @@ tests/fixtures/extension_canvas_page.html
 - 扩展过滤继承 `cursor:pointer` 产生的按钮子节点重复，同时保留普通文本页回退。
 - 扩展采集 iframe/document 上下文、稳定 selector、业务 ID、资产身份、动作归属、
   ARIA、SVG 文本证据和 Canvas/SVG 视觉区域。
+- 扩展通过 `POST /api/perception/capture-jobs` 创建后端异步任务，待完成 `job_id`
+  保存在 `chrome.storage.local`；弹窗关闭不终止后端识别，重开后继续轮询。
+- 同步 `POST /api/perception/captures` 仍作为兼容和诊断接口保留。
+- 显式只读 `window.__KT6_PAGE_ADAPTER__` 只导出有界结构化快照；扩展不拦截任意
+  `fetch`/XHR。`snapshot_complete=false` 或缺失时，页面 API 与视觉并行并可作回退。
 - 大尺寸 Canvas、SVG、图形容器与嵌入区域会成为视觉 ROI；装饰性小图标被过滤。
 - 每次点击只调用一次 `captureVisibleTab()`，且只提交一个最高优先级视觉主帧；
   原生 Canvas `toDataURL()` 是像素回退，不与可见截图组成多帧请求。
@@ -150,15 +169,23 @@ tests/fixtures/extension_canvas_page.html
 - 后端保留 `selector`、`source_ref`、`frame_id`、`frame_url`、`document_id` 和
   `actionable`，以及 `asset_id`、管理 IP、序列号、站点、资产版本、`action_id` 和
   `owner_business_id`。
-- 后端输出 `perception_decision=dom_only|canvas_only|dom_and_canvas|empty`；
-  `canvas_perception`、`dom_business_object_bindings` 和 `dom_action_bindings` 并行
-  保留。识别成功的视觉拓扑不会再被 DOM 业务绑定遮住。
+- 在线节点以 `source.kind=dom|page_api|vision` 标明来源；`interaction.status`、
+  `can_click_now`、`preflight_required` 和拒绝原因明确区分可定位与可立即点击。当前
+  所有节点的 `can_click_now=false`。
+- DOM `ui_tree` 是每个 frame/document 有独立根节点的语义投影；节点保留
+  `parent_element_id`、`children`、`parent_relation`、`omitted_ancestor_count`，并以
+  `action_binding_complete` 对截断、frame 错误和 open Shadow Root fail closed。
+- 后端以 `perception_decision` 标记 `dom`、`page_api`、`canvas` 三种证据的全部八种
+  组合，包括 `empty`、`page_api_only`、`dom_and_canvas` 和
+  `dom_and_page_api_and_canvas`；`page_api_perception`、`canvas_perception`、
+  `dom_business_object_bindings` 和 `dom_action_bindings` 并行保留。
 - `svg_element_texts` 只作为原始文本证据，不能自动生成业务对象或动作绑定。
 - 所有 `capture_kind=visible_tab` 截图固定为 analysis-only，不能作为直接点击依据。
 - 原始 DOM 绑定固定为 `observed`、不可执行；disabled 元素不会成为交互候选。
-- 扩展权限保持为 `activeTab` + `scripting`，没有申请 `<all_urls>`。
+- 扩展权限保持为 `activeTab` + `scripting` + `storage`，没有申请 `<all_urls>`；
+  `storage` 仅用于恢复待完成的本机 capture job。
 
-### 3.1 在线页面 DOM + 视觉分治扩展 v0.4
+### 3.1 在线页面 DOM + 视觉分治扩展 v0.5.1
 
 启动本机后端：
 
@@ -177,16 +204,33 @@ D:\yangzehui\FreeStyleCopilot\browser_extension
 点击扩展中的“采集当前页面”。正常结果应同时看到采集统计和关键元素预览，而不是
 只有固定的 `DOM: 600`。
 
+提交后扩展会立即获得一个后端 `job_id`。视觉模型耗时较长时可以关闭弹窗；后端任务
+不会因此终止。再次打开扩展会从 `chrome.storage.local` 恢复同一任务并继续查询，
+完成后显示 `capture_id`。若后端已重启或任务记录已过期，扩展会删除旧 pending 并
+明确提示重新采集。若要排查兼容问题，仍可直接调用同步 captures 接口。
+
+若目标页面能修改，可在页面中显式提供只读 `window.__KT6_PAGE_ADAPTER__`，让扩展
+读取结构化对象与关系。它不是通用页面 API 抓包器：当前实现不会 monkey-patch
+`fetch`/XHR，也不会自行扫描业务接口。适配器应准确声明 `snapshot_complete=true`；
+否则后端保留 `page_api_perception`，同时优先继续像素视觉，视觉不可用或失败时才降级
+使用这份不完整分析证据。
+
 结果解释：
 
 - `truncated: true` 表示候选超过预算且已明确截断，不等于采集失败。
 - SVG/Canvas 页面允许原生 `Canvas: 0`，但应检测到视觉区域，并产生一张视觉主帧。
-- `perception_decision=dom_and_canvas` 表示两类证据均已进入后端，不代表视觉坐标可
-  直接执行。
+- `perception_decision` 覆盖 `dom`、`page_api`、`canvas` 的全部组合；例如
+  `page_api_only` 表示只有页面显式 API 证据，`dom_and_page_api_and_canvas` 表示三路
+  都已进入后端。这些状态只描述证据通道，不代表坐标可以直接执行。
 - 低 DOM、无视觉区域且无原生 Canvas 像素时才启用整页兜底；它始终仅用于分析。
 - 普通文本页即使没有按钮，也应通过标题/正文回退产生少量 DOM 候选。
 - 视觉拓扑与 DOM 业务/动作绑定会并行保留；扩展不会执行点击，后续真实动作仍需
   业务资产绑定、重新校验和授权。
+- `source.kind=dom|page_api|vision` 是来源说明，不是权限证明；应结合
+  `interaction.status` 与 `can_click_now` 判断。当前没有任何节点能立即点击。
+- `ui_tree.tree_scope=semantic_projection` 表示它是受预算约束的语义树，不是完整原始
+  HTML 镜像；查看 `frame_roots`、父子引用、省略祖先计数和
+  `action_binding_complete` 判断结构与动作证据覆盖。
 
 
 ### 3.2 设备资产绑定与执行前复核
@@ -200,12 +244,16 @@ D:\yangzehui\FreeStyleCopilot\browser_extension
    伪 selector、全局按钮和伪造 owner 均拒绝。
 3. `shutdown_ap` 等高风险动作必须有严格机器 ID（如 `data-kt6-action="ap.shutdown"`），
    不能只根据“关闭”“disable”等文字或近义 ID 猜测。
-4. `prepare` 只生成待确认计划；`preflight` 要求不同且新鲜的二次页面采集、准确的
-   asset/action 确认、精确权限、资产状态/版本和完整 DOM 目标指纹一致。
-5. 复核通过后签发 15 秒有效、只能消费一次的随机令牌；并发消费只有一个成功。
-6. `execute` 当前只支持 dry-run；`dry_run=false` 固定返回
+4. `prepare` 生成六步 `operation_plan`：`bind_target`、`confirm_and_authorize`、
+   `fresh_capture_revalidation`、`final_revalidation`、`execute`、`verify_outcome`。
+5. `preflight` 要求不同且新鲜的二次页面采集、准确的 asset/action 确认、精确权限、
+   资产状态/版本和完整 DOM 目标指纹一致。
+6. 复核通过后签发 15 秒有效、只能消费一次的随机令牌；并发消费只有一个成功。
+   `GET /api/dom-actions/plans/{plan_id}` 会显示步骤推进、阻断和令牌到期后的过期状态。
+7. `execute` 当前只支持 dry-run；`dry_run=false` 固定返回
    `live_execution_channel_unavailable`。所有层级的 `safe_for_execution` 均为
-   `false`，复核结果只用 `preflight_verified=true` 表示。
+   `false`，复核结果只用 `preflight_verified=true` 表示；`verify_outcome` 在真实执行器
+   接入前不会伪装为已完成。
 
 接口：
 
@@ -213,6 +261,7 @@ D:\yangzehui\FreeStyleCopilot\browser_extension
 POST /api/dom-actions/prepare
 POST /api/dom-actions/preflight
 POST /api/dom-actions/execute
+GET  /api/dom-actions/plans/{plan_id}
 GET  /api/dom-actions/audit
 ```
 
@@ -403,14 +452,9 @@ pair-level 负证据与低于阈值的 CV 链路组合会真正 rejected；全�
 
 ### 7.1 自动化测试
 
-开发环境最后一次结果：
-
-```text
-329 项通过
-42 项跳过
-```
-
-跳过项来自开发环境缺少可选 RapidOCR/OpenCV 运行依赖，不是失败。
+2026-08-04 开发环境全量结果为 362 项通过、42 项跳过；后续通过、跳过和失败数量
+仍以当前命令输出为准。跳过项来自开发环境缺少可选 RapidOCR/OpenCV 运行依赖，
+不是测试失败。
 
 全量命令：
 
@@ -433,13 +477,17 @@ python -m unittest `
 
 ```powershell
 python -m unittest `
+  tests.test_page_capture_jobs `
   tests.test_browser_extension_assets `
   tests.test_asset_inventory `
   tests.test_dom_action_binding `
   tests.test_safe_dom_actions `
+  tests.test_safe_dom_action_plan `
   tests.test_asset_action_integration `
   tests.test_dom_action_api `
-  tests.test_page_perception
+  tests.test_page_perception `
+  tests.test_hybrid_canvas_vision `
+  tests.test_app
 ```
 
 ### 7.2 测试环境端到端命令
@@ -590,7 +638,8 @@ python -m kt6_backend.topology_hybrid_cli `
   `<text>` 只作文字证据。
 - 整页兜底可能包含页面中的非目标信息；当前只在 DOM 极少且没有其他像素证据时
   启用，并受截图大小、后端持久化和部署环境隐私策略约束。
-- open Shadow DOM 当前也未做递归采集；普通 DOM 证据不足时只能触发受限视觉兜底。
+- open Shadow Root 会被检测并计入覆盖统计；其内部当前不作为完整动作绑定证据，
+  `action_binding_complete=false`，不能因外层 DOM 看似完整而继续执行。
 - 当前尚未用真实 FEBS/NCE 在线页面完成扩展验证，不能把通用网页测试结果等同于
   目标系统已经适配。
 - 目标页面需要提供强资产身份；高风险动作还需要严格 `data-kt6-action`。无法修改
@@ -662,16 +711,21 @@ result/success 在截止线仍报 timeout
 SVG/地图页面原生 Canvas 为零，扩展只提交 DOM
 → 自动检测大尺寸 SVG/图形区域，单次可见标签页截图并裁剪为视觉主帧；视觉拓扑和
 DOM 绑定在后端并行保留
+
+扩展弹窗绑定同步长请求，关闭后丢失进度
+→ 后端异步 capture job 持续执行，`chrome.storage.local` 保存 job_id，弹窗重开恢复；
+同步接口继续保留给兼容调用
 ```
 
 ## 11. 后续建议
 
 按当前用户优先级排序：
 
-1. 在真实 NCE 在线页面重新加载扩展 v0.4，确认导航/表格走 DOM，地图/拓扑区域
-   产生一个视觉主帧，同时记录 `perception_decision`、frame/document/origin 和
-   ROI 状态；设备容器仍需强资产身份，动作控件仍需明确 DOM 祖先归属和高风险
-   `data-kt6-action`。
+1. 在真实 NCE 在线页面重新加载扩展 v0.5.1，确认导航/表格走 DOM，地图/拓扑区域
+   产生一个视觉主帧，关闭并重开弹窗后同一异步任务能恢复；同时记录
+   `source.kind`、`interaction`、`ui_tree.action_binding_complete`、
+   `perception_decision`、frame/document/origin 和 ROI 状态。设备容器仍需强资产身份，
+   动作控件仍需明确 DOM 祖先归属和高风险 `data-kt6-action`。
 2. 将 `JSONAssetInventoryAdapter` 替换成经过认证的 NCE/FEBS 资产查询，把权限、
    用户和 scope 换成服务端身份会话；完成受控执行器与回滚前继续保持 dry-run。
 3. 在测试环境同步当前修改，先跑资产绑定/API 定向测试，再依次复测
@@ -698,9 +752,9 @@ python -m unittest discover -s tests
 然后确认：
 
 - `review.md` 是否仍为未跟踪文件。
-- 扩展 `manifest.json` 是否为 v0.4，并在浏览器扩展管理页完成重新加载。
+- 扩展 `manifest.json` 是否为 v0.5.1，并在浏览器扩展管理页完成重新加载。
 - 目标系统源码目前并不在仓库中，不要误称已经完成 FEBS/NCE 页面内嵌集成。
-- 当前变更基于 `e26e07b`，提交/推送状态以后续 `git log`、`git status` 为准。
+- 当前提交/推送状态以 `git log`、`git status` 为准，不沿用本文中的历史哈希。
 - `main` 是否与 `origin/main` 一致。
 - 测试环境最新失败属于 CV、CodeAgent transport、模型协议还是融合阶段。
 - 不要在没有真实事件证据时继续放宽协议。

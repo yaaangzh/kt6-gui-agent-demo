@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Type
+from typing import Any, Type
 from urllib.parse import parse_qs, urlparse
 
 from .asset_inventory import (
@@ -19,6 +19,7 @@ from .http_canvas_vision import HTTPTopologyVisionAdapter
 from .hybrid_canvas_vision import HybridCanvasVisionAdapter
 from .local_cv_canvas_vision import LocalCVTopologyVisionAdapter
 from .memory import SQLiteMemoryStore
+from .page_capture_jobs import PageCaptureJobCapacityError, PageCaptureJobService
 from .page_perception import PagePerceptionService, SQLitePageCaptureStore
 from .perception import HybridPerception
 from .perception_runtime import PerceptionRuntime
@@ -207,6 +208,47 @@ def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | N
     return model_adapter
 
 
+def _canvas_vision_health(adapter: Any | None) -> dict[str, Any]:
+    if adapter is None:
+        return {
+            "configured": False,
+            "adapter_id": None,
+            "adapter_version": None,
+            "routing_mode": "evidence_only",
+            "timeout_seconds": None,
+        }
+
+    model_adapter = getattr(adapter, "model_adapter", None)
+    timeout_value = getattr(model_adapter or adapter, "timeout_seconds", None)
+    try:
+        timeout_seconds = float(timeout_value) if timeout_value is not None else None
+    except (TypeError, ValueError):
+        timeout_seconds = None
+    if timeout_seconds is not None and not math.isfinite(timeout_seconds):
+        timeout_seconds = None
+    hybrid = bool(
+        getattr(adapter, "local_adapter", None) is not None
+        and model_adapter is not None
+    )
+    result = {
+        "configured": True,
+        "adapter_id": str(getattr(adapter, "adapter_id", "unknown"))[:200],
+        "adapter_version": str(
+            getattr(adapter, "adapter_version", "unknown")
+        )[:100],
+        "routing_mode": "cv_first_adaptive" if hybrid else "single_adapter",
+        "timeout_seconds": timeout_seconds,
+    }
+    if hybrid:
+        result["local_adapter_id"] = str(
+            getattr(adapter.local_adapter, "adapter_id", "unknown")
+        )[:200]
+        result["model_adapter_id"] = str(
+            getattr(model_adapter, "adapter_id", "unknown")
+        )[:200]
+    return result
+
+
 @dataclass(frozen=True)
 class AppServices:
     memory: SQLiteMemoryStore
@@ -214,6 +256,7 @@ class AppServices:
     perception_runtime: PerceptionRuntime
     page_capture_store: SQLitePageCaptureStore
     page_perception: PagePerceptionService
+    page_capture_jobs: PageCaptureJobService
     asset_inventory: JSONAssetInventoryAdapter
     asset_resolver: AssetResolver
     dom_action_binding: DOMActionBindingService
@@ -239,6 +282,7 @@ def create_services(root: Path = ROOT) -> AppServices:
         canvas_vision=canvas_vision,
         text_recognizer=TopologyTextRecognizer(),
     )
+    page_capture_jobs = PageCaptureJobService(page_perception)
     asset_inventory = JSONAssetInventoryAdapter(root / "data" / "mock_assets.json")
     asset_resolver = AssetResolver(asset_inventory)
     dom_action_binding = DOMActionBindingService(asset_resolver)
@@ -255,6 +299,7 @@ def create_services(root: Path = ROOT) -> AppServices:
         perception_runtime=perception_runtime,
         page_capture_store=page_capture_store,
         page_perception=page_perception,
+        page_capture_jobs=page_capture_jobs,
         asset_inventory=asset_inventory,
         asset_resolver=asset_resolver,
         dom_action_binding=dom_action_binding,
@@ -318,7 +363,19 @@ class KT6Handler(SimpleHTTPRequestHandler):
         services = self.app
         runtime = services.runtime
         if path == "/api/health":
-            self._json(200, {"status": "ok"})
+            self._json(
+                200,
+                {
+                    "status": "ok",
+                    "vision": _canvas_vision_health(
+                        services.page_perception.canvas_vision
+                    ),
+                    "page_api": {
+                        "mode": "explicit_read_only_adapter",
+                        "arbitrary_network_interception": False,
+                    },
+                },
+            )
             return
         if path == "/api/playbooks":
             self._json(200, runtime.playbooks.list_playbooks())
@@ -357,8 +414,32 @@ class KT6Handler(SimpleHTTPRequestHandler):
             limit = int(parse_qs(parsed.query).get("limit", ["20"])[0])
             self._json(200, {"captures": services.page_perception.list_captures(limit=limit)})
             return
+        plan_prefix = "/api/dom-actions/plans/"
+        if path.startswith(plan_prefix):
+            plan_id = path[len(plan_prefix) :]
+            if not plan_id or "/" in plan_id:
+                self._json(404, {"error": "not found"})
+                return
+            plan = services.safe_dom_actions.get_plan(plan_id)
+            if plan.get("reason") == "plan_not_found":
+                self._json(404, plan)
+                return
+            self._json(200, plan)
+            return
         if path == "/api/dom-actions/audit":
             self._json(200, {"events": services.safe_dom_actions.audit_events()})
+            return
+        capture_job_prefix = "/api/perception/capture-jobs/"
+        if path.startswith(capture_job_prefix):
+            job_id = path[len(capture_job_prefix) :]
+            if not job_id or "/" in job_id:
+                self._json(404, {"error": "not found"})
+                return
+            job = services.page_capture_jobs.get(job_id)
+            if job is None:
+                self._json(404, {"error": "page capture job not found"})
+                return
+            self._json(200, job)
             return
         if path.startswith("/api/perception/captures/"):
             capture_id = path.split("/")[4]
@@ -408,6 +489,7 @@ class KT6Handler(SimpleHTTPRequestHandler):
         runtime = services.runtime
         known_path = (
             path in {
+                "/api/perception/capture-jobs",
                 "/api/perception/captures",
                 "/api/tasks",
                 "/api/dom-actions/prepare",
@@ -426,6 +508,20 @@ class KT6Handler(SimpleHTTPRequestHandler):
             return
         except ValueError as exc:
             self._json(400, {"error": str(exc)})
+            return
+        if path == "/api/perception/capture-jobs":
+            try:
+                job = services.page_capture_jobs.submit(
+                    client_request_id=payload.get("client_request_id"),
+                    payload=payload.get("payload"),
+                )
+            except PageCaptureJobCapacityError as exc:
+                self._json(503, {"error": str(exc)})
+                return
+            except (TypeError, ValueError) as exc:
+                self._json(400, {"error": str(exc)})
+                return
+            self._json(202, job)
             return
         if path == "/api/perception/captures":
             try:

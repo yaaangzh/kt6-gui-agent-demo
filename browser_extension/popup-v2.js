@@ -1,12 +1,20 @@
 "use strict";
 
-const CAPTURE_ENDPOINT = "http://127.0.0.1:8787/api/perception/captures";
+const CAPTURE_JOB_ENDPOINT =
+  "http://127.0.0.1:8787/api/perception/capture-jobs";
+const HEALTH_ENDPOINT = "http://127.0.0.1:8787/api/health";
+const PENDING_CAPTURE_STORAGE_KEY = "kt6_pending_capture_job_v1";
 const MAX_DOM_ELEMENTS = 500;
 const MAX_CANVASES = 4;
 const PREVIEW_LIMIT = 20;
 const MAX_VISIBLE_SCREENSHOTS = 1;
 const MAX_VISUAL_DATA_URL_LENGTH = 6_500_000;
 const MAX_VISUAL_PIXELS = 4_000_000;
+const DEFAULT_BACKEND_WAIT_MS = 330_000;
+const HEALTH_TIMEOUT_MS = 2_500;
+const CAPTURE_JOB_REQUEST_TIMEOUT_MS = 15_000;
+const CAPTURE_JOB_POLL_INTERVAL_MS = 1_000;
+let captureInFlight = false;
 
 function compactText(value, maximum = 120) {
   return String(value || "")
@@ -339,6 +347,469 @@ async function captureVisibleRegions(tab, topFrame, regions) {
   }
 }
 
+async function readBackendHealth() {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS);
+  try {
+    const response = await fetch(HEALTH_ENDPOINT, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch (_error) {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function readExplicitPageAdapter() {
+  const MAX_BYTES = 1_000_000;
+  const MAX_DEPTH = 8;
+  const SENSITIVE_KEY =
+    /(?:authorization|cookie|credential|password|secret|session|token|api[_-]?key|csrf|xsrf)/i;
+  const EXECUTION_CLAIMS = new Set([
+    "actionable",
+    "clickable",
+    "interaction",
+    "interaction_eligible",
+    "origin",
+    "safe_for_execution",
+  ]);
+  const ALLOWED_SCENE_KEYS = new Set([
+    "ui_version",
+    "topology_revision",
+    "site",
+    "floor",
+    "scene",
+    "canvas",
+    "objects",
+    "links",
+    "co_channel_relations",
+    "visual_grounding",
+    "view_transform",
+  ]);
+
+  function sanitize(value, depth = 0) {
+    if (depth > MAX_DEPTH || value === null) {
+      return value === null ? null : undefined;
+    }
+    if (typeof value === "string") return value.slice(0, 10_000);
+    if (typeof value === "number") return Number.isFinite(value) ? value : null;
+    if (typeof value === "boolean") return value;
+    if (Array.isArray(value)) {
+      return value.slice(0, 4_000).map((item) => sanitize(item, depth + 1));
+    }
+    if (typeof value !== "object") return undefined;
+    const clean = {};
+    for (const [rawKey, item] of Object.entries(value).slice(0, 200)) {
+      const key = String(rawKey).slice(0, 200);
+      if (SENSITIVE_KEY.test(key) || EXECUTION_CLAIMS.has(key)) continue;
+      const normalized = sanitize(item, depth + 1);
+      if (normalized !== undefined) clean[key] = normalized;
+    }
+    return clean;
+  }
+  let safePageUrl = "";
+  try {
+    const parsed = new URL(location.href);
+    parsed.search = "";
+    parsed.hash = "";
+    safePageUrl = parsed.toString();
+  } catch (_error) {
+    safePageUrl = String(location.origin || "").slice(0, 2048);
+  }
+
+
+  const adapter = globalThis.__KT6_PAGE_ADAPTER__;
+  if (!adapter || typeof adapter !== "object") {
+    return { status: "unavailable", page_url: safePageUrl };
+  }
+  const methodName = ["snapshot", "getSnapshot", "exportScene", "captureScene"].find(
+    (name) => typeof adapter[name] === "function",
+  );
+  let rawSnapshot;
+  try {
+    if (methodName) {
+      rawSnapshot = await Promise.race([
+        Promise.resolve(
+          adapter[methodName].call(adapter, {
+            mode: "read_only",
+            schema_version: "1",
+          }),
+        ),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("page adapter timeout")), 5_000),
+        ),
+      ]);
+    } else {
+      rawSnapshot = adapter.scene;
+    }
+  } catch (error) {
+    return {
+      status: "error",
+      page_url: safePageUrl,
+      error: error instanceof Error ? error.message.slice(0, 300) : "adapter failed",
+    };
+  }
+  const rawScene =
+    rawSnapshot && typeof rawSnapshot === "object" && rawSnapshot.scene
+      ? rawSnapshot.scene
+      : rawSnapshot;
+  if (!rawScene || typeof rawScene !== "object" || !Array.isArray(rawScene.objects)) {
+    return {
+      status: "invalid",
+      page_url: safePageUrl,
+      error: "page adapter did not return a scene with objects",
+    };
+  }
+  const scene = {};
+  for (const [key, value] of Object.entries(rawScene)) {
+    if (!ALLOWED_SCENE_KEYS.has(key)) continue;
+    const normalized = sanitize(value);
+    if (normalized !== undefined) scene[key] = normalized;
+  }
+  const objectIds = Array.isArray(scene.objects)
+    ? scene.objects.map((item) => String(item?.business_id || "").trim())
+    : [];
+  const objectIdSet = new Set(objectIds);
+  const validObjects =
+    objectIds.length > 0 &&
+    objectIdSet.size === objectIds.length &&
+    scene.objects.every((item, index) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+      if (!objectIds[index]) return false;
+      return ["x", "y", "width", "height"].every((field) => {
+        if (item[field] === undefined) return true;
+        const numeric = Number(item[field]);
+        if (!Number.isFinite(numeric)) return false;
+        return !["width", "height"].includes(field) || numeric > 0;
+      });
+    });
+  const validCanvas =
+    scene.canvas === undefined ||
+    (scene.canvas && typeof scene.canvas === "object" && !Array.isArray(scene.canvas));
+  const validRelations = ["links", "co_channel_relations"].every((field) => {
+    if (scene[field] === undefined) return true;
+    if (!Array.isArray(scene[field])) return false;
+    return scene[field].every((item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+      const source = String(item.source || "").trim();
+      const target = String(item.target || "").trim();
+      return objectIdSet.has(source) && objectIdSet.has(target);
+    });
+  });
+  if (!validObjects || !validCanvas || !validRelations) {
+    return {
+      status: "invalid",
+      page_url: safePageUrl,
+      error: "page adapter snapshot does not match the read-only scene contract",
+    };
+  }
+  const adapterId = String(
+    adapter.adapter_id || adapter.id || rawSnapshot?.adapter_id || "page-adapter",
+  ).slice(0, 200);
+  const adapterVersion = String(
+    adapter.adapter_version || adapter.version || rawSnapshot?.adapter_version || "unknown",
+  ).slice(0, 100);
+  scene.source_metadata = {
+    source_type: "explicit_page_adapter",
+    adapter_id: adapterId,
+    adapter_version: adapterVersion,
+    schema_version: "1",
+    captured_at: Date.now() / 1000,
+    page_url: safePageUrl,
+    snapshot_complete:
+      adapter.snapshot_complete === true || rawSnapshot?.snapshot_complete === true,
+    safe_for_execution: false,
+  };
+  const serialized = JSON.stringify(scene);
+  if (serialized.length > MAX_BYTES) {
+    return {
+      status: "too_large",
+      page_url: safePageUrl,
+      error: "page adapter snapshot exceeds 1 MB",
+    };
+  }
+  return {
+    status: "available",
+    page_url: safePageUrl,
+    adapter_scene: scene,
+  };
+}
+
+async function collectPageAdapterResults(tabId) {
+  try {
+    return await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      world: "MAIN",
+      func: readExplicitPageAdapter,
+    });
+  } catch (_allFramesError) {
+    try {
+      return await chrome.scripting.executeScript({
+        target: { tabId },
+        world: "MAIN",
+        func: readExplicitPageAdapter,
+      });
+    } catch (error) {
+      return [{
+        frameId: 0,
+        result: {
+          status: "error",
+          error: error instanceof Error ? error.message : "page adapter probe failed",
+        },
+      }];
+    }
+  }
+}
+
+function backendWaitMilliseconds(health) {
+  const configured = Number(health?.vision?.timeout_seconds);
+  if (!Number.isFinite(configured) || configured <= 0) {
+    return DEFAULT_BACKEND_WAIT_MS;
+  }
+  return Math.min(360_000, Math.max(30_000, (configured + 30) * 1000));
+}
+
+function visionConfigurationState(health) {
+  return typeof health?.vision?.configured === "boolean"
+    ? health.vision.configured
+    : null;
+}
+
+function createClientRequestId() {
+  let randomPart = "";
+  try {
+    randomPart = globalThis.crypto.randomUUID().replace(/-/g, "");
+  } catch (_error) {
+    randomPart = `${Math.random().toString(16).slice(2)}${Math.random()
+      .toString(16)
+      .slice(2)}`;
+  }
+  return `ext_${Date.now().toString(36)}_${randomPart.slice(0, 32)}`;
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function fetchJsonWithTimeout(url, options = {}, timeoutMs) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    return {
+      response,
+      result: await response.json().catch(() => ({})),
+    };
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      const timeoutError = new Error("连接本地 KT6 服务超时");
+      timeoutError.transient = true;
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function responseError(result, status) {
+  const rawError = result?.error;
+  const message =
+    typeof rawError === "string"
+      ? rawError
+      : rawError?.message || `KT6 返回 HTTP ${status}`;
+  const error = new Error(compactText(message, 500));
+  error.terminal = status >= 400 && status < 500;
+  error.httpStatus = Number(status);
+  error.status = Number(status);
+  return error;
+}
+
+async function createCaptureJob(payload, clientRequestId) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const { response, result } = await fetchJsonWithTimeout(
+        CAPTURE_JOB_ENDPOINT,
+        {
+          method: "POST",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            client_request_id: clientRequestId,
+            payload,
+          }),
+        },
+        CAPTURE_JOB_REQUEST_TIMEOUT_MS,
+      );
+      if (!response.ok) throw responseError(result, response.status);
+      const jobId = String(result.job_id || "").trim();
+      if (!jobId) throw new Error("KT6 未返回异步任务 ID");
+      return {
+        job_id: jobId,
+        status: String(result.status || "running"),
+      };
+    } catch (error) {
+      lastError = error;
+      if (error?.terminal || attempt === 1) throw error;
+    }
+  }
+  throw lastError || new Error("无法提交 KT6 异步识别任务");
+}
+
+async function readPendingCapture() {
+  const stored = await chrome.storage.local.get(PENDING_CAPTURE_STORAGE_KEY);
+  const pending = stored?.[PENDING_CAPTURE_STORAGE_KEY];
+  if (!pending || typeof pending !== "object") return null;
+  if (!String(pending.job_id || "").trim()) {
+    await chrome.storage.local.remove(PENDING_CAPTURE_STORAGE_KEY);
+    return null;
+  }
+  return pending;
+}
+
+async function savePendingCapture(pending) {
+  await chrome.storage.local.set({
+    [PENDING_CAPTURE_STORAGE_KEY]: pending,
+  });
+}
+
+async function clearPendingCapture(jobId) {
+  try {
+    const pending = await readPendingCapture();
+    if (!pending || String(pending.job_id) === String(jobId)) {
+      await chrome.storage.local.remove(PENDING_CAPTURE_STORAGE_KEY);
+    }
+  } catch (_error) {
+    // A completed backend job must still be shown even if local cleanup fails.
+  }
+}
+
+async function fetchCaptureJob(jobId) {
+  const { response, result } = await fetchJsonWithTimeout(
+    `${CAPTURE_JOB_ENDPOINT}/${encodeURIComponent(jobId)}`,
+    {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    },
+    CAPTURE_JOB_REQUEST_TIMEOUT_MS,
+  );
+  if (!response.ok) throw responseError(result, response.status);
+  return result;
+}
+
+function captureJobErrorMessage(job) {
+  const rawError = job?.error;
+  if (typeof rawError === "string") return compactText(rawError, 500);
+  if (rawError && typeof rawError === "object") {
+    return compactText(rawError.message || rawError.type, 500);
+  }
+  return "后端异步识别任务失败";
+}
+
+async function waitForCaptureJob(
+  pending,
+  health,
+  onStage,
+  {
+    pollIntervalMs = CAPTURE_JOB_POLL_INTERVAL_MS,
+    waitMs = backendWaitMilliseconds(health),
+  } = {},
+) {
+  const sessionStartedAt = Date.now();
+  const submittedAt = Number(pending.submitted_at_ms || sessionStartedAt);
+  let lastTransientError = null;
+  while (true) {
+    const elapsedSeconds = Math.max(
+      0,
+      Math.round((Date.now() - submittedAt) / 1000),
+    );
+    onStage("backend", {
+      elapsedSeconds,
+      visionConfigured: visionConfigurationState(health),
+      jobId: pending.job_id,
+      resumed: Boolean(pending.resumed),
+      connectionIssue: lastTransientError?.message || "",
+    });
+
+    try {
+      const job = await fetchCaptureJob(pending.job_id);
+      lastTransientError = null;
+      const status = String(job.status || "").toLowerCase();
+      if (status === "completed") {
+        if (!job.capture || typeof job.capture !== "object") {
+          const error = new Error("异步任务完成但未返回 Capture 结果");
+          error.terminal = true;
+          throw error;
+        }
+        await clearPendingCapture(pending.job_id);
+        return job.capture;
+      }
+      if (status === "error" || status === "failed") {
+        const error = new Error(captureJobErrorMessage(job));
+        error.terminal = true;
+        throw error;
+      }
+      if (!["accepted", "queued", "pending", "running"].includes(status)) {
+        const error = new Error(`KT6 返回未知任务状态：${status || "空"}`);
+        error.terminal = true;
+        throw error;
+      }
+    } catch (error) {
+      if (error?.httpStatus === 404) {
+        await clearPendingCapture(pending.job_id);
+        const expiredError = new Error(
+          "后端已重启或任务记录已过期，请重新采集",
+        );
+        expiredError.terminal = true;
+        expiredError.httpStatus = 404;
+        expiredError.status = 404;
+        throw expiredError;
+      }
+      if (error?.terminal) {
+        await clearPendingCapture(pending.job_id);
+        throw error;
+      }
+      lastTransientError = error;
+    }
+
+    if (Date.now() - sessionStartedAt >= waitMs) {
+      const error = new Error(
+        `等待任务 ${pending.job_id} 超过 ${Math.round(
+          waitMs / 1000,
+        )} 秒；任务仍保留在后台，关闭并重新打开扩展可继续查询`,
+      );
+      error.keepPending = true;
+      throw error;
+    }
+    await delay(Math.max(0, pollIntervalMs));
+  }
+}
+
+async function submitCapture(payload, health, onStage, context) {
+  const clientRequestId = createClientRequestId();
+  const job = await createCaptureJob(payload, clientRequestId);
+  const pending = {
+    schema_version: 1,
+    job_id: job.job_id,
+    client_request_id: clientRequestId,
+    submitted_at_ms: Date.now(),
+    context,
+  };
+  await savePendingCapture(pending);
+  return await waitForCaptureJob(pending, health, onStage);
+}
+
 async function collectFrameResults(tabId) {
   try {
     return await chrome.scripting.executeScript({
@@ -358,7 +829,9 @@ async function collectFrameResults(tabId) {
   }
 }
 
-async function captureActivePage() {
+async function captureActivePage({ onStage = () => {} } = {}) {
+  onStage("locating");
+  const healthPromise = readBackendHealth();
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || typeof tab.id !== "number") {
     throw new Error("未找到活动页面");
@@ -367,7 +840,11 @@ async function captureActivePage() {
     throw new Error("只能采集 HTTP(S) 页面");
   }
 
-  const frameResults = await collectFrameResults(tab.id);
+  onStage("dom");
+  const [frameResults, pageAdapterResults] = await Promise.all([
+    collectFrameResults(tab.id),
+    collectPageAdapterResults(tab.id),
+  ]);
   const capturedFrames = frameResults
     .filter((item) => item && item.result)
     .sort((left, right) => left.frameId - right.frameId);
@@ -381,9 +858,14 @@ async function captureActivePage() {
   const svgTextKeys = new Set();
   const stats = {
     frame_count: capturedFrames.length,
+    total_element_count: 0,
     scanned_element_count: 0,
+    scan_truncated: false,
     candidate_count: 0,
     captured_element_count: 0,
+    projected_parent_count: 0,
+    omitted_ancestor_count: 0,
+    open_shadow_root_count: 0,
     actionable_element_count: 0,
     fallback_text_count: 0,
     native_canvas_count: 0,
@@ -394,7 +876,29 @@ async function captureActivePage() {
     frame_collection_error: frameResults.collectionError || "",
     page_screenshot_fallback: false,
     truncated: false,
+    page_adapter_status: "unavailable",
+    page_adapter_frame_id: "",
   };
+  const pageAdapterCandidates = pageAdapterResults
+    .filter((item) => item?.result)
+    .sort((left, right) => Number(left.frameId || 0) - Number(right.frameId || 0));
+  const pageAdapterEntry =
+    pageAdapterCandidates.find((item) => item.result.status === "available") ||
+    pageAdapterCandidates[0] ||
+    null;
+  const pageAdapterScene = pageAdapterEntry?.result?.adapter_scene || null;
+  stats.page_adapter_status = pageAdapterEntry?.result?.status || "unavailable";
+  if (pageAdapterScene?.source_metadata) {
+    stats.page_adapter_frame_id = String(pageAdapterEntry.frameId ?? "0");
+    pageAdapterScene.source_metadata.frame_id = stats.page_adapter_frame_id;
+    pageAdapterScene.source_metadata.frame_url = String(
+      pageAdapterEntry.result.page_url || "",
+    ).slice(0, 2048);
+    pageAdapterScene.source_metadata.document_id = String(
+      pageAdapterEntry.documentId || "",
+    ).slice(0, 200);
+  }
+
 
   for (const frame of capturedFrames) {
     const frameId = String(frame.frameId);
@@ -402,13 +906,21 @@ async function captureActivePage() {
     const documentId = String(frame.documentId || "");
     const frameStats = frame.result.stats || {};
     const frameViewport = frame.result.page.viewport || {};
+    stats.total_element_count += Number(frameStats.total_element_count || 0);
     stats.scanned_element_count += Number(
       frameStats.scanned_element_count || 0,
     );
+    stats.scan_truncated =
+      stats.scan_truncated || Boolean(frameStats.scan_truncated);
     stats.candidate_count += Number(frameStats.candidate_count || 0);
     stats.captured_element_count += Number(
       frameStats.captured_element_count || 0,
     );
+    stats.projected_parent_count += Number(
+      frameStats.projected_parent_count || 0,
+    );
+    stats.omitted_ancestor_count += Number(frameStats.omitted_ancestor_count || 0);
+    stats.open_shadow_root_count += Number(frameStats.open_shadow_root_count || 0);
     stats.actionable_element_count += Number(
       frameStats.actionable_element_count || 0,
     );
@@ -420,7 +932,9 @@ async function captureActivePage() {
       frameStats.visual_region_count || frame.result.visual_regions?.length || 0,
     );
     stats.svg_region_count += Number(frameStats.svg_region_count || 0);
-    stats.truncated = stats.truncated || Boolean(frameStats.truncated);
+    stats.truncated =
+      stats.truncated ||
+      Boolean(frameStats.truncated || frameStats.scan_truncated);
 
     for (const item of frame.result.svg_element_texts || []) {
       if (svgElementTexts.length >= 1000) break;
@@ -533,6 +1047,7 @@ async function captureActivePage() {
       ]
     : visualRegions;
 
+  onStage("screenshot");
   const visibleCapture = await captureVisibleRegions(
     tab,
     topFrame,
@@ -558,34 +1073,32 @@ async function captureActivePage() {
   const payload = {
     page: {
       ...topFrame.result.page,
-      ui_version: "kt6-browser-extension-v0.4",
+      ui_version: "kt6-browser-extension-v0.5.1",
     },
-    dom: { elements },
+    dom: { elements, stats },
     canvases,
     svg_element_texts: svgElementTexts,
-    adapter_scene: null,
+    adapter_scene: pageAdapterScene,
     captured_at: Date.now() / 1000,
   };
-  const response = await fetch(CAPTURE_ENDPOINT, {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(result.error || `KT6 返回 HTTP ${response.status}`);
-  }
-  return {
-    result,
+  const health = await healthPromise;
+  const context = {
     stats,
     submittedElementCount: elements.length,
     nativeCanvasCount: stats.native_canvas_count,
     visibleScreenshotCount: stats.visible_screenshot_count,
     visualEvidenceCount: canvases.filter((item) => item.data_url).length,
     preview: buildPreview(elements),
+  };
+  onStage("backend", {
+    elapsedSeconds: 0,
+    visionConfigured: visionConfigurationState(health),
+  });
+  const result = await submitCapture(payload, health, onStage, context);
+  return {
+    result,
+    health,
+    ...context,
   };
 }
 
@@ -627,47 +1140,159 @@ function renderPreview(items) {
 globalThis.__KT6_VISUAL_CAPTURE_INTERNALS__ = Object.freeze({
   clippedRegion,
   sourcePixelRegionFor,
+  backendWaitMilliseconds,
+  visionConfigurationState,
+});
+globalThis.__KT6_CAPTURE_JOB_INTERNALS__ = Object.freeze({
+  visionConfigurationState,
+  createClientRequestId,
+  waitForCaptureJob,
+  readPendingCapture,
 });
 
 const captureButton = document.querySelector("#capture");
 const statusOutput = document.querySelector("#status");
 
-captureButton.addEventListener("click", async () => {
+function backendStageMessage(detail = {}) {
+  const visionNote =
+    detail.visionConfigured === true
+      ? ""
+      : detail.visionConfigured === false
+        ? "（视觉引擎未配置时仅保留证据）"
+        : "（视觉引擎配置状态未知）";
+  const connectionNote = detail.connectionIssue
+    ? `；连接重试中：${compactText(detail.connectionIssue, 100)}`
+    : "";
+  const action = detail.resumed ? "继续查询" : "正在识别";
+  const jobNote = detail.jobId ? ` · ${detail.jobId}` : "";
+  return `已提交后端${jobNote}，${action} ${Number(
+    detail.elapsedSeconds || 0,
+  )} 秒${visionNote}${connectionNote}；请勿重复点击`;
+}
+
+function updateCaptureStage(stage, detail = {}) {
+  const messages = {
+    locating: "正在确认活动页面…",
+    dom: "正在采集 DOM/ARIA、父子结构与页面适配器…",
+    screenshot: "正在截取 Canvas/SVG 视觉区域…",
+  };
+  statusOutput.textContent =
+    stage === "backend"
+      ? backendStageMessage(detail)
+      : messages[stage] || "正在采集…";
+}
+
+function renderCapture(capture, { resumed = false } = {}) {
+  const result = capture?.result || {};
+  const summary = result.summary || {};
+  const stats = capture?.stats || {};
+  const selectedMode = summary.selected_mode || "识别完成";
+  const resumedNote = resumed ? " · 已恢复后台任务" : "";
+  statusOutput.textContent = stats.visible_capture_error
+    ? `DOM 采集成功 · 视觉截图失败：${stats.visible_capture_error}${resumedNote}`
+    : stats.page_screenshot_fallback
+      ? `采集成功 · 全页视觉兜底（仅分析） · ${selectedMode}${resumedNote}`
+      : `采集成功 · ${selectedMode}${resumedNote}`;
+  statusOutput.dataset.state = "success";
+  setMetric("capture-id", result.capture_id || "-");
+  setMetric("frames", stats.frame_count ?? "-");
+  setMetric("scanned", stats.scanned_element_count ?? "-");
+  setMetric("candidates", stats.candidate_count ?? "-");
+  setMetric("submitted", capture?.submittedElementCount ?? "-");
+  setMetric("actionable", summary.dom_actionable_element_count ?? "-");
+  setMetric("native-canvas", capture?.nativeCanvasCount ?? "-");
+  setMetric("visual-regions", stats.visual_region_count ?? "-");
+  setMetric("visible-screenshot", capture?.visibleScreenshotCount ?? "-");
+  setMetric("visual-evidence", capture?.visualEvidenceCount ?? "-");
+  setMetric(
+    "perception-decision",
+    summary.perception_decision || "等待后端判断",
+  );
+  setMetric("page-adapter", stats.page_adapter_status || "-");
+  setMetric("truncated", stats.truncated === undefined ? "-" : stats.truncated ? "是" : "否");
+  renderPreview(Array.isArray(capture?.preview) ? capture.preview : []);
+  document.querySelector("#result").hidden = false;
+}
+
+async function resumePendingCapture(pending) {
+  const health = await readBackendHealth();
+  const resumedPending = { ...pending, resumed: true };
+  const result = await waitForCaptureJob(
+    resumedPending,
+    health,
+    updateCaptureStage,
+  );
+  return {
+    result,
+    health,
+    ...(pending.context && typeof pending.context === "object"
+      ? pending.context
+      : {}),
+  };
+}
+
+async function runCaptureOperation(operation, { resumed = false } = {}) {
+  if (captureInFlight) {
+    statusOutput.textContent = "已有采集请求正在处理，请勿重复提交";
+    return false;
+  }
+  captureInFlight = true;
   captureButton.disabled = true;
-  statusOutput.textContent = "正在并行采集 DOM/ARIA 与 Canvas/SVG 视觉区域…";
   statusOutput.dataset.state = "running";
   document.querySelector("#result").hidden = true;
   try {
-    const capture = await captureActivePage();
-    const summary = capture.result.summary;
-    statusOutput.textContent = capture.stats.visible_capture_error
-      ? `DOM 采集成功 · 视觉截图失败：${capture.stats.visible_capture_error}`
-      : capture.stats.page_screenshot_fallback
-        ? `采集成功 · 全页视觉兜底（仅分析） · ${summary.selected_mode}`
-        : `采集成功 · ${summary.selected_mode}`;
-    statusOutput.dataset.state = "success";
-    setMetric("capture-id", capture.result.capture_id);
-    setMetric("frames", capture.stats.frame_count);
-    setMetric("scanned", capture.stats.scanned_element_count);
-    setMetric("candidates", capture.stats.candidate_count);
-    setMetric("submitted", capture.submittedElementCount);
-    setMetric("actionable", summary.dom_actionable_element_count);
-    setMetric("native-canvas", capture.nativeCanvasCount);
-    setMetric("visual-regions", capture.stats.visual_region_count);
-    setMetric("visible-screenshot", capture.visibleScreenshotCount);
-    setMetric("visual-evidence", capture.visualEvidenceCount);
-    setMetric(
-      "perception-decision",
-      summary.perception_decision || "等待后端判断",
-    );
-    setMetric("truncated", capture.stats.truncated ? "是" : "否");
-    renderPreview(capture.preview);
-    document.querySelector("#result").hidden = false;
+    const capture = await operation();
+    renderCapture(capture, { resumed });
+    return true;
   } catch (error) {
-    statusOutput.textContent =
-      error instanceof Error ? `采集失败：${error.message}` : "采集失败";
-    statusOutput.dataset.state = "error";
+    const message = error instanceof Error ? error.message : "采集失败";
+    statusOutput.textContent = error?.keepPending
+      ? `后台任务仍在运行：${message}`
+      : `采集失败：${message}`;
+    statusOutput.dataset.state = error?.keepPending ? "running" : "error";
+    return false;
   } finally {
+    captureInFlight = false;
     captureButton.disabled = false;
   }
+}
+
+captureButton.addEventListener("click", async () => {
+  let pending = null;
+  try {
+    pending = await readPendingCapture();
+  } catch (error) {
+    statusOutput.textContent = `无法读取后台任务状态：${error.message}`;
+    statusOutput.dataset.state = "error";
+    return;
+  }
+  if (pending) {
+    await runCaptureOperation(() => resumePendingCapture(pending), {
+      resumed: true,
+    });
+    return;
+  }
+  await runCaptureOperation(
+    () => captureActivePage({ onStage: updateCaptureStage }),
+    { resumed: false },
+  );
 });
+
+async function resumePendingCaptureOnOpen() {
+  let pending = null;
+  try {
+    pending = await readPendingCapture();
+  } catch (error) {
+    statusOutput.textContent = `无法恢复后台任务：${error.message}`;
+    statusOutput.dataset.state = "error";
+    return;
+  }
+  if (!pending) return;
+  await runCaptureOperation(() => resumePendingCapture(pending), {
+    resumed: true,
+  });
+}
+
+if (globalThis.chrome?.storage?.local) {
+  void resumePendingCaptureOnOpen();
+}
