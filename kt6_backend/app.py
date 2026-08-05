@@ -19,6 +19,10 @@ from .http_canvas_vision import HTTPTopologyVisionAdapter
 from .hybrid_canvas_vision import HybridCanvasVisionAdapter
 from .local_cv_canvas_vision import LocalCVTopologyVisionAdapter
 from .memory import SQLiteMemoryStore
+from .omniparser_canvas_vision import (
+    DEFAULT_OMNIPARSER_TIMEOUT_SECONDS,
+    OmniParserCanvasVisionAdapter,
+)
 from .page_capture_jobs import PageCaptureJobCapacityError, PageCaptureJobService
 from .page_perception import PagePerceptionService, SQLitePageCaptureStore
 from .perception import HybridPerception
@@ -43,10 +47,13 @@ VISION_TIMEOUT_ENV = "KT6_VISION_TIMEOUT_SECONDS"
 CODEAGENT_EXECUTABLE_ENV = "KT6_CODEAGENT_EXECUTABLE"
 CODEAGENT_AGENT_ENV = "KT6_CODEAGENT_AGENT"
 HYBRID_MODEL_DRIVER_ENV = "KT6_HYBRID_MODEL_DRIVER"
+OMNIPARSER_ENDPOINT_ENV = "KT6_OMNIPARSER_ENDPOINT"
+OMNIPARSER_TIMEOUT_ENV = "KT6_OMNIPARSER_TIMEOUT_SECONDS"
 DEFAULT_VISION_TIMEOUT_SECONDS = 30.0
 DEFAULT_CODEAGENT_TIMEOUT_SECONDS = 120.0
 DEFAULT_CODEAGENT_EXECUTABLE = "codeagent"
 MAX_VISION_TIMEOUT_SECONDS = 300.0
+MAX_OMNIPARSER_TIMEOUT_SECONDS = 600.0
 MAX_JSON_REQUEST_BYTES = 32 * 1024 * 1024
 
 
@@ -72,6 +79,8 @@ def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | N
     codeagent_executable = _optional_env(CODEAGENT_EXECUTABLE_ENV)
     codeagent_agent = _optional_env(CODEAGENT_AGENT_ENV)
     hybrid_model_driver = _optional_env(HYBRID_MODEL_DRIVER_ENV)
+    omniparser_endpoint = _optional_env(OMNIPARSER_ENDPOINT_ENV)
+    omniparser_timeout_text = _optional_env(OMNIPARSER_TIMEOUT_ENV)
 
     if driver is None and (codeagent_executable is not None or codeagent_agent is not None):
         raise ValueError(
@@ -101,9 +110,16 @@ def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | N
         return None
 
     selected_driver = (driver or "http").strip().lower()
-    if selected_driver not in {"http", "codeagent_cli", "local_cv_ocr", "hybrid"}:
+    if selected_driver not in {
+        "http",
+        "codeagent_cli",
+        "local_cv_ocr",
+        "hybrid",
+        "omniparser",
+    }:
         raise ValueError(
-            f"{VISION_DRIVER_ENV} must be http, codeagent_cli, local_cv_ocr or hybrid"
+            f"{VISION_DRIVER_ENV} must be http, codeagent_cli, local_cv_ocr, "
+            "hybrid or omniparser"
         )
 
     if selected_driver == "local_cv_ocr":
@@ -125,10 +141,11 @@ def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | N
             )
         return LocalCVTopologyVisionAdapter()
 
-    if selected_driver == "hybrid":
+    if selected_driver in {"hybrid", "omniparser"}:
         if hybrid_model_driver is None:
             raise ValueError(
-                f"{HYBRID_MODEL_DRIVER_ENV} is required for the hybrid vision driver"
+                f"{HYBRID_MODEL_DRIVER_ENV} is required for the "
+                "hybrid/omniparser vision driver"
             )
         effective_driver = hybrid_model_driver.strip().lower()
         if effective_driver not in {"http", "codeagent_cli"}:
@@ -138,9 +155,32 @@ def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | N
     else:
         if hybrid_model_driver is not None:
             raise ValueError(
-                f"{HYBRID_MODEL_DRIVER_ENV} requires {VISION_DRIVER_ENV}=hybrid"
+                f"{HYBRID_MODEL_DRIVER_ENV} requires {VISION_DRIVER_ENV}=hybrid "
+                "or omniparser"
             )
         effective_driver = selected_driver
+
+    omniparser_timeout_seconds = DEFAULT_OMNIPARSER_TIMEOUT_SECONDS
+    if selected_driver == "omniparser" and omniparser_timeout_text is not None:
+        try:
+            omniparser_timeout_seconds = float(omniparser_timeout_text)
+        except ValueError:
+            raise ValueError(
+                f"{OMNIPARSER_TIMEOUT_ENV} must be a finite number in (0, "
+                f"{MAX_OMNIPARSER_TIMEOUT_SECONDS:g}]"
+            ) from None
+        if not math.isfinite(omniparser_timeout_seconds) or not (
+            0 < omniparser_timeout_seconds <= MAX_OMNIPARSER_TIMEOUT_SECONDS
+        ):
+            raise ValueError(
+                f"{OMNIPARSER_TIMEOUT_ENV} must be a finite number in (0, "
+                f"{MAX_OMNIPARSER_TIMEOUT_SECONDS:g}]"
+            )
+    if selected_driver == "omniparser" and omniparser_endpoint is None:
+        raise ValueError(
+            f"{OMNIPARSER_ENDPOINT_ENV} is required for the omniparser "
+            "vision driver"
+        )
 
     default_timeout = (
         DEFAULT_CODEAGENT_TIMEOUT_SECONDS
@@ -188,6 +228,13 @@ def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | N
                 local_adapter=LocalCVTopologyVisionAdapter(),
                 model_adapter=model_adapter,
             )
+        if selected_driver == "omniparser":
+            return OmniParserCanvasVisionAdapter(
+                model_adapter=model_adapter,
+                endpoint=omniparser_endpoint,
+                workdir=Path(root).resolve() / "runtime_data" / "omniparser_som",
+                timeout_seconds=omniparser_timeout_seconds,
+            )
         return model_adapter
 
     if codeagent_executable is not None or codeagent_agent is not None:
@@ -206,6 +253,13 @@ def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | N
         return HybridCanvasVisionAdapter(
             local_adapter=LocalCVTopologyVisionAdapter(),
             model_adapter=model_adapter,
+        )
+    if selected_driver == "omniparser":
+        return OmniParserCanvasVisionAdapter(
+            model_adapter=model_adapter,
+            endpoint=omniparser_endpoint,
+            workdir=Path(root).resolve() / "runtime_data" / "omniparser_som",
+            timeout_seconds=omniparser_timeout_seconds,
         )
     return model_adapter
 
@@ -247,6 +301,11 @@ def _canvas_vision_health(adapter: Any | None) -> dict[str, Any]:
         )[:200]
         result["model_adapter_id"] = str(
             getattr(model_adapter, "adapter_id", "unknown")
+        )[:200]
+    if getattr(adapter, "adapter_id", "") == "omniparser-structured-multimodal":
+        result["marking_mode"] = "omniparser_som"
+        result["omniparser_endpoint"] = str(
+            getattr(adapter, "endpoint", "unknown")
         )[:200]
     return result
 
