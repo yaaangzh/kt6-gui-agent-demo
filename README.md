@@ -10,6 +10,10 @@
 [CODEX_HANDOFF.md](./CODEX_HANDOFF.md)；其中记录了当前工作目录、分阶段拓扑链路、
 CodeAgentCLI 的 Windows 启动方式、真实图片验证结论、已知限制和下一步建议。
 
+多源 UI Graph、Playwright/CDP 只读采集和内部 GLM5.1 操作规划的设计、安全边界与
+使用方式见 [docs/ui-graph-architecture.md](./docs/ui-graph-architecture.md)。该路径参考
+TextFlow 的中间文本图分层思想，当前不包含 OmniParser。
+
 ## 已实现能力
 
 | 能力 | 当前实现 |
@@ -22,7 +26,9 @@ CodeAgentCLI 的 Windows 启动方式、真实图片验证结论、已知限制�
 | 执行安全 | `solution_id`、场景版本、资源锁、执行前 checkpoint 与动作后置条件校验 |
 | 步骤扩展 | 按诊断/动作 phase 和 step ID 注册处理器，校验步骤 type、state 与必填字段 |
 | 页面感知 | DOM/ARIA、Canvas 截图、渲染器 Scene、拓扑文本重建及 Local CV/HTTP/CodeAgent CanvasVision Adapter |
-| 在线页面采集 | Chrome/Edge 扩展 v0.5.1，并行采集 DOM/ARIA 与 Canvas/SVG 可见区域截图；耗时识别由后端异步任务执行，弹窗重开可恢复进度 |
+| 多源 UI Graph | 汇合 DOM/CDP/page_api/vision/text，保留节点来源、父子/owner/action/semantic 边及交互候选 |
+| 内部 GLM 结构规划 | 测试区 GLM5.1 只提出 `locate/click/wait/verify` DAG；严格验证后仍为不可执行 dry-run |
+| 在线页面采集 | Chrome/Edge 扩展 v0.5.2，并行采集 DOM/ARIA 与 Canvas/SVG 可见区域截图；耗时识别由后端异步任务执行，弹窗重开可恢复进度 |
 | DOM 安全动作 | 权威资产解析、设备与控件双重绑定、六步操作计划、新鲜页面复核、一次性令牌和 dry-run；真实点击尚未接入 |
 | 感知缓存 | Scene Graph 缓存、`scene_revision`、`HIT/MISS/INCREMENTAL` |
 | 拓扑变化检测 | 节点、位置、链路增删及链路语义属性变化检测；关键变化触发重规划 |
@@ -93,7 +99,12 @@ flowchart LR
 - **Runtime**：管理状态、上下文、事件、锁、检查点、授权与重规划。
 - **Tool Registry / Adapter**：隔离 Runtime 与具体业务查询、设备操作接口。
 - **Page Perception**：并行保留 DOM 操作证据和 Canvas/SVG 视觉证据，再转换为统一 Scene Graph。
+- **UI Graph Planning**：把 DOM/CDP/page_api/vision/text 转成可审计文本图，交给测试区内部 GLM5.1 提出操作 DAG，再由确定性验证器 fail closed。
 - **Frontend**：采集当前页面，消费 Runtime 事件并执行可视化原子操作。
+
+UI Graph 规划不替代现有 DOM 安全动作链。只有 DOM/CDP 节点可以成为点击提案候选，
+页面 API、视觉和文本节点不能授权点击；所有规划结果固定为 `dry_run_only=true`、
+`safe_for_execution=false`，真实操作仍需独立的实时复核、权限确认和执行授权。
 
 ## 页面感知现状
 
@@ -115,7 +126,7 @@ flowchart LR
 -> Runtime 定位目标并在执行前重新校验
 ```
 
-同步 `POST /api/perception/captures` 仍作为兼容和诊断接口保留；扩展 v0.5.1 默认走
+同步 `POST /api/perception/captures` 仍作为兼容和诊断接口保留；扩展 v0.5.2 默认走
 异步任务，避免弹窗生命周期和耗时视觉识别绑在同一个 HTTP 请求上。
 
 系统按页面开放程度使用不同路径：
@@ -123,7 +134,7 @@ flowchart LR
 | 路径 | 适用页面 | 当前状态 |
 |---|---|---|
 | DOM 感知 | 按钮、表格、表单等可访问 DOM/ARIA 的页面 | 已完成第一期 |
-| 浏览器视觉区域截图 | 在线页面中的 Canvas、SVG、WebGL 或组合渲染地图 | 扩展 v0.5.1 已接入；未验证整页回退固定 analysis-only |
+| 浏览器视觉区域截图 | 在线页面中的 Canvas、SVG、WebGL 或组合渲染地图 | 扩展 v0.5.2 已接入；未验证整页回退固定 analysis-only |
 | 显式页面 API / Renderer Adapter | 页面主动暴露只读 `nodes/edges` 快照的 Canvas | 当前 Demo 已使用；不拦截页面网络请求 |
 | Topology Text Recognizer | 人工 ASCII 或外部 OCR 已转写出的结构化拓扑文本 | 已完成首个严格样例 |
 | Canvas Vision Adapter | 只能获得截图、图片、远程桌面或封闭 Canvas | 本地 RapidOCR/OpenCV、HTTP 服务与 CodeAgent read-tool 三种驱动、严格协议和 pixels-only CLI 已完成 |
@@ -136,7 +147,7 @@ flowchart LR
 的 `edge://extensions` 打开开发者模式，加载本仓库的 `browser_extension` 目录。
 扩展更新后必须在扩展管理页点击刷新，再回到目标页面重新采集。
 
-扩展 v0.5.1 使用 DOM 与视觉分治。DOM 路径优先保留业务 ID、资产 ID、管理 IP、
+扩展 v0.5.2 使用 DOM 与视觉分治。DOM 路径优先保留业务 ID、资产 ID、管理 IP、
 序列号、站点、资产版本、动作 ID、控件归属、按钮、菜单、表格、树、标题和可点击
 卡片，并过滤可点击父元素内部继承 `cursor:pointer` 的重复图标与文本。没有交互控件
 时会回退采集标题和短正文；SVG `<text>` 与“数字 + 单位/比例”的统计卡片会作为
@@ -515,6 +526,9 @@ GET  /api/perception/capture-jobs/{job_id}
 GET  /api/perception/captures?limit={n}
 GET  /api/perception/captures/{capture_id}
 GET  /api/perception/cache
+GET  /api/ui-graphs/{capture_id}
+
+POST /api/ui-operations/plan
 
 POST /api/dom-actions/prepare
 POST /api/dom-actions/preflight
@@ -594,6 +608,11 @@ kt6_backend/
   tools.py                     当前 Mock 业务适配器
   page_perception.py           实时页面采集、持久化和 Scene 规范化
   page_capture_jobs.py         脱离扩展弹窗生命周期的异步页面采集任务
+  cdp_snapshot.py              CDP DOMSnapshot 与 AXTree 的只读合并规范化
+  ui_graph.py                  多源 UI Graph 构建与有界文本序列化
+  ui_graph_reasoner.py         测试区内部 GLM HTTP 推理契约
+  ui_operation_graph.py        locate/click/wait/verify DAG 严格校验
+  ui_graph_planning.py         不可执行的 UI Graph 规划服务
   asset_inventory.py           权威资产适配接口、JSON Demo Adapter 与唯一性解析
   dom_action_binding.py        设备主体和所属 DOM 动作控件的双重绑定
   safe_dom_actions.py          新鲜页面复核、一次性令牌、审计与 dry-run 门禁
@@ -620,8 +639,10 @@ kt6_backend/
 
 playbooks/                     诊断和动作任务链
 data/                          Mock 业务数据
-browser_extension/             Chrome/Edge DOM + Canvas/SVG 分治采集扩展 v0.5.1
+browser_extension/             Chrome/Edge DOM + Canvas/SVG 分治采集扩展 v0.5.2
+browser_sidecar/               Playwright/CDP 只读采集 Sidecar
 demo/                          LUI-GUI Web 界面
+docs/                          架构与运维说明
 tests/                         自动化测试
 ```
 

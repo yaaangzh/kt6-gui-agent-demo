@@ -317,12 +317,24 @@ class KT6Runtime:
     def _record_perception(self, task: Task, topology: dict[str, Any]) -> None:
         perception_meta = topology.get("perception_meta", {})
         focus = topology.get("focus", {})
+        ui_graph_ref = topology.get("ui_graph_ref")
+        if not isinstance(ui_graph_ref, dict):
+            ui_graph_ref = {}
         self._update_context(
             task,
             topology=topology,
             ui_perception=topology["ui_perception"],
             dom_action_bindings=topology.get("dom_action_bindings", {}),
             perception_meta=perception_meta,
+            ui_graph_ref={
+                "schema_version": ui_graph_ref.get("schema_version"),
+                "graph_id": ui_graph_ref.get("graph_id"),
+                "capture_id": ui_graph_ref.get("capture_id"),
+                "node_count": ui_graph_ref.get("node_count", 0),
+                "edge_count": ui_graph_ref.get("edge_count", 0),
+                "truncated": ui_graph_ref.get("truncated") is True,
+                "safe_for_execution": False,
+            },
             scene_ref={
                 "scene_key": perception_meta.get("scene_key"),
                 "revision": perception_meta.get("scene_revision", 0),

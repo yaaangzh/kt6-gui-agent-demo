@@ -29,6 +29,13 @@ from .safe_dom_actions import SafeDOMActionService
 from .scene_store import SQLiteSceneStore
 from .topology_text_recognizer import TopologyTextRecognizer
 from .tools import MockBusinessTools
+from .ui_graph_planning import (
+    UIGraphNotFoundError,
+    UIGraphProjectionError,
+    UIGraphPlanningService,
+    UIGraphReasonerNotConfiguredError,
+)
+from .ui_graph_reasoner import HTTPUIGraphReasoner, UIGraphReasoningError
 from .vision_recognition import CanvasVisionAdapter
 from .vision_cache_coordinator import VisionCacheCoordinator
 from .vision_result_cache import SQLiteVisionResultCacheStore
@@ -43,11 +50,17 @@ VISION_TIMEOUT_ENV = "KT6_VISION_TIMEOUT_SECONDS"
 CODEAGENT_EXECUTABLE_ENV = "KT6_CODEAGENT_EXECUTABLE"
 CODEAGENT_AGENT_ENV = "KT6_CODEAGENT_AGENT"
 HYBRID_MODEL_DRIVER_ENV = "KT6_HYBRID_MODEL_DRIVER"
+UI_GRAPH_REASONER_ENDPOINT_ENV = "KT6_UI_GRAPH_REASONER_ENDPOINT"
+UI_GRAPH_REASONER_API_KEY_ENV = "KT6_UI_GRAPH_REASONER_API_KEY"
+UI_GRAPH_REASONER_ALLOWED_HOSTS_ENV = "KT6_UI_GRAPH_REASONER_ALLOWED_HOSTS"
+UI_GRAPH_REASONER_TIMEOUT_ENV = "KT6_UI_GRAPH_REASONER_TIMEOUT_SECONDS"
 DEFAULT_VISION_TIMEOUT_SECONDS = 30.0
 DEFAULT_CODEAGENT_TIMEOUT_SECONDS = 120.0
+DEFAULT_UI_GRAPH_REASONER_TIMEOUT_SECONDS = 60.0
 DEFAULT_CODEAGENT_EXECUTABLE = "codeagent"
 MAX_VISION_TIMEOUT_SECONDS = 300.0
 MAX_JSON_REQUEST_BYTES = 32 * 1024 * 1024
+MAX_UI_GRAPH_REASONER_TIMEOUT_SECONDS = 300.0
 
 
 class RequestBodyTooLarge(ValueError):
@@ -251,6 +264,59 @@ def _canvas_vision_health(adapter: Any | None) -> dict[str, Any]:
     return result
 
 
+def _create_ui_graph_reasoner_from_env() -> HTTPUIGraphReasoner | None:
+    """Build the internal GLM adapter without exposing its endpoint or token."""
+
+    endpoint = _optional_env(UI_GRAPH_REASONER_ENDPOINT_ENV)
+    api_key = _optional_env(UI_GRAPH_REASONER_API_KEY_ENV)
+    timeout_text = _optional_env(UI_GRAPH_REASONER_TIMEOUT_ENV)
+    allowed_hosts_text = _optional_env(UI_GRAPH_REASONER_ALLOWED_HOSTS_ENV)
+    allowed_hosts = tuple(
+        host.strip()
+        for host in (allowed_hosts_text or "").split(",")
+        if host.strip()
+    )
+    if endpoint is None:
+        companions = [
+            name
+            for name, value in (
+                (UI_GRAPH_REASONER_API_KEY_ENV, api_key),
+                (UI_GRAPH_REASONER_TIMEOUT_ENV, timeout_text),
+                (UI_GRAPH_REASONER_ALLOWED_HOSTS_ENV, allowed_hosts_text),
+            )
+            if value is not None
+        ]
+        if companions:
+            raise ValueError(
+                f"{UI_GRAPH_REASONER_ENDPOINT_ENV} is required when "
+                f"{', '.join(companions)} is configured"
+            )
+        return None
+
+    timeout_seconds = DEFAULT_UI_GRAPH_REASONER_TIMEOUT_SECONDS
+    if timeout_text is not None:
+        try:
+            timeout_seconds = float(timeout_text)
+        except ValueError:
+            raise ValueError(
+                f"{UI_GRAPH_REASONER_TIMEOUT_ENV} must be a finite number in (0, "
+                f"{MAX_UI_GRAPH_REASONER_TIMEOUT_SECONDS:g}]"
+            ) from None
+        if not math.isfinite(timeout_seconds) or not (
+            0 < timeout_seconds <= MAX_UI_GRAPH_REASONER_TIMEOUT_SECONDS
+        ):
+            raise ValueError(
+                f"{UI_GRAPH_REASONER_TIMEOUT_ENV} must be a finite number in (0, "
+                f"{MAX_UI_GRAPH_REASONER_TIMEOUT_SECONDS:g}]"
+            )
+    return HTTPUIGraphReasoner(
+        endpoint=endpoint,
+        api_key=api_key,
+        allowed_hosts=allowed_hosts,
+        timeout_seconds=timeout_seconds,
+    )
+
+
 @dataclass(frozen=True)
 class AppServices:
     memory: SQLiteMemoryStore
@@ -263,6 +329,7 @@ class AppServices:
     asset_resolver: AssetResolver
     dom_action_binding: DOMActionBindingService
     safe_dom_actions: SafeDOMActionService
+    ui_graph_planning: UIGraphPlanningService
     tools: MockBusinessTools
     runtime: KT6Runtime
 
@@ -270,6 +337,7 @@ class AppServices:
 def create_services(root: Path = ROOT) -> AppServices:
     root = root.resolve()
     canvas_vision = _create_canvas_vision_from_env(root)
+    ui_graph_reasoner = _create_ui_graph_reasoner_from_env()
     runtime_dir = root / "runtime_data"
     memory = SQLiteMemoryStore(runtime_dir / "kt6_memory.sqlite3")
     scene_store = SQLiteSceneStore(runtime_dir / "kt6_scene.sqlite3")
@@ -294,6 +362,7 @@ def create_services(root: Path = ROOT) -> AppServices:
     asset_resolver = AssetResolver(asset_inventory)
     dom_action_binding = DOMActionBindingService(asset_resolver)
     safe_dom_actions = SafeDOMActionService(dom_action_binding, page_perception)
+    ui_graph_planning = UIGraphPlanningService(page_perception, ui_graph_reasoner)
     tools = MockBusinessTools(
         root / "data",
         perception_runtime=perception_runtime,
@@ -311,6 +380,7 @@ def create_services(root: Path = ROOT) -> AppServices:
         asset_resolver=asset_resolver,
         dom_action_binding=dom_action_binding,
         safe_dom_actions=safe_dom_actions,
+        ui_graph_planning=ui_graph_planning,
         tools=tools,
         runtime=runtime,
     )
@@ -381,6 +451,7 @@ class KT6Handler(SimpleHTTPRequestHandler):
                         "mode": "explicit_read_only_adapter",
                         "arbitrary_network_interception": False,
                     },
+                    "ui_graph_reasoning": services.ui_graph_planning.health(),
                 },
             )
             return
@@ -420,6 +491,19 @@ class KT6Handler(SimpleHTTPRequestHandler):
         if path == "/api/perception/captures":
             limit = int(parse_qs(parsed.query).get("limit", ["20"])[0])
             self._json(200, {"captures": services.page_perception.list_captures(limit=limit)})
+            return
+        graph_prefix = "/api/ui-graphs/"
+        if path.startswith(graph_prefix):
+            capture_id = path[len(graph_prefix) :]
+            if not capture_id or "/" in capture_id:
+                self._json(404, {"error": "not found"})
+                return
+            try:
+                graph = services.ui_graph_planning.get_graph(capture_id)
+            except UIGraphNotFoundError as exc:
+                self._json(404, {"error": str(exc)})
+                return
+            self._json(200, graph)
             return
         plan_prefix = "/api/dom-actions/plans/"
         if path.startswith(plan_prefix):
@@ -502,6 +586,7 @@ class KT6Handler(SimpleHTTPRequestHandler):
                 "/api/dom-actions/prepare",
                 "/api/dom-actions/preflight",
                 "/api/dom-actions/execute",
+                "/api/ui-operations/plan",
             }
             or (path.startswith("/api/tasks/") and path.endswith("/actions"))
         )
@@ -537,6 +622,53 @@ class KT6Handler(SimpleHTTPRequestHandler):
                 self._json(400, {"error": str(exc)})
                 return
             self._json(201, capture)
+            return
+        if path == "/api/ui-operations/plan":
+            raw_capture_id = payload.get("page_capture_id")
+            raw_instruction = payload.get("instruction")
+            if not isinstance(raw_capture_id, str) or not isinstance(
+                raw_instruction, str
+            ):
+                self._json(
+                    400,
+                    {"error": "page_capture_id and instruction must be strings"},
+                )
+                return
+            capture_id = raw_capture_id.strip()
+            instruction = raw_instruction.strip()
+            if not capture_id or not instruction:
+                self._json(
+                    400,
+                    {"error": "page_capture_id and instruction are required"},
+                )
+                return
+            if len(capture_id) > 200 or len(instruction) > 8_000:
+                self._json(400, {"error": "page_capture_id or instruction is too long"})
+                return
+            try:
+                proposal = services.ui_graph_planning.plan(
+                    capture_id=capture_id,
+                    instruction=instruction,
+                )
+            except UIGraphNotFoundError as exc:
+                self._json(404, {"error": str(exc)})
+                return
+            except UIGraphReasonerNotConfiguredError as exc:
+                self._json(503, {"error": str(exc)})
+                return
+            except UIGraphProjectionError as exc:
+                self._json(422, {"error": str(exc)})
+                return
+            except UIGraphReasoningError as exc:
+                self._json(502, {"error": str(exc)})
+                return
+            except ValueError as exc:
+                self._json(400, {"error": str(exc)})
+                return
+            self._json(
+                200 if proposal["status"] == "planned" else 422,
+                proposal,
+            )
             return
         if path == "/api/dom-actions/prepare":
             asset_reference = payload.get("asset_reference")

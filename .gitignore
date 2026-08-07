@@ -17,3 +17,7 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# Test scratch directories
+.test-tmp/
+.test-tmp-codex/

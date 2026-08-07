@@ -28,7 +28,7 @@ cv-result.json + model-result.json
 模型提供语义、层级、连接和结构判断，最后通过确定性算法互补融合。
 
 同时已经增加在线页面 DOM 路线。由于当前仓库没有 FEBS/NCE 前端源码，暂不做
-嵌入式 SDK 集成；现阶段使用 Chrome/Edge 扩展 v0.5.1，由用户显式采集普通
+嵌入式 SDK 集成；现阶段使用 Chrome/Edge 扩展 v0.5.2，由用户显式采集普通
 HTTP(S) 页面中的 DOM/ARIA、iframe 上下文和稳定选择器，并自动检测可见的
 Canvas/SVG/图形区域。扩展每次采集至多截取一个视觉主帧，与 DOM 证据一起提交给
 本机 KT6。耗时识别由后端异步 capture job 执行，扩展把待完成 `job_id` 保存到
@@ -185,7 +185,7 @@ tests/fixtures/extension_canvas_page.html
 - 扩展权限保持为 `activeTab` + `scripting` + `storage`，没有申请 `<all_urls>`；
   `storage` 仅用于恢复待完成的本机 capture job。
 
-### 3.1 在线页面 DOM + 视觉分治扩展 v0.5.1
+### 3.1 在线页面 DOM + 视觉分治扩展 v0.5.2
 
 启动本机后端：
 
@@ -721,7 +721,7 @@ DOM 绑定在后端并行保留
 
 按当前用户优先级排序：
 
-1. 在真实 NCE 在线页面重新加载扩展 v0.5.1，确认导航/表格走 DOM，地图/拓扑区域
+1. 在真实 NCE 在线页面重新加载扩展 v0.5.2，确认导航/表格走 DOM，地图/拓扑区域
    产生一个视觉主帧，关闭并重开弹窗后同一异步任务能恢复；同时记录
    `source.kind`、`interaction`、`ui_tree.action_binding_complete`、
    `perception_decision`、frame/document/origin 和 ROI 状态。设备容器仍需强资产身份，
@@ -752,7 +752,7 @@ python -m unittest discover -s tests
 然后确认：
 
 - `review.md` 是否仍为未跟踪文件。
-- 扩展 `manifest.json` 是否为 v0.5.1，并在浏览器扩展管理页完成重新加载。
+- 扩展 `manifest.json` 是否为 v0.5.2，并在浏览器扩展管理页完成重新加载。
 - 目标系统源码目前并不在仓库中，不要误称已经完成 FEBS/NCE 页面内嵌集成。
 - 当前提交/推送状态以 `git log`、`git status` 为准，不沿用本文中的历史哈希。
 - `main` 是否与 `origin/main` 一致。

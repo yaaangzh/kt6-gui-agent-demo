@@ -15,7 +15,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from .cdp_snapshot import (
+    MAX_NODE_COUNT as MAX_CDP_NODE_COUNT,
+    MAX_RELATION_COUNT as MAX_CDP_RELATION_COUNT,
+    normalize_cdp_snapshot,
+)
 from .perception_runtime import PerceptionRuntime
+from .ui_graph import build_ui_graph
 from .vision_cache_coordinator import VisionCacheCoordinator
 from .vision_recognition import CanvasFrame, CanvasVisionAdapter
 
@@ -140,6 +146,9 @@ class SQLitePageCaptureStore:
 
 
 class PagePerceptionService:
+    CDP_PAGE_SNAPSHOT_SCHEMA_VERSION = "kt6.cdp-page-snapshot.v1"
+    MAX_CDP_NODE_COUNT = MAX_CDP_NODE_COUNT
+    MAX_CDP_RELATION_COUNT = MAX_CDP_RELATION_COUNT
     MAX_DOM_ELEMENTS = 1000
     MAX_CANVASES = 4
     MAX_SVG_ELEMENT_TEXTS = 1000
@@ -227,6 +236,10 @@ class PagePerceptionService:
     def ingest(self, payload: dict[str, Any]) -> dict[str, Any]:
         capture_id = f"capture_{uuid.uuid4().hex[:12]}"
         page = self._normalize_page(payload.get("page", {}))
+        cdp_perception = self._normalize_cdp_snapshot_envelope(
+            payload.get("cdp_snapshot"),
+            page,
+        )
         dom = self._normalize_dom(payload.get("dom", {}))
         canvases = self._normalize_canvases(capture_id, payload.get("canvases", []))
         svg_element_texts = (
@@ -238,6 +251,7 @@ class PagePerceptionService:
         topology_text = self._normalize_topology_text(payload.get("topology_text"))
         capture = {
             "page": page,
+            "cdp_perception": cdp_perception,
             "dom": dom,
             "canvases": canvases,
             "adapter_scene": adapter_scene,
@@ -267,6 +281,8 @@ class PagePerceptionService:
             "canvas": canvas_scene["input"],
             "text": text_scene["input"],
         }
+        if cdp_perception is not None:
+            raw_scenes["cdp"] = copy.deepcopy(cdp_perception)
         if svg_element_texts is not None:
             raw_scenes["svg_element_texts"] = copy.deepcopy(svg_element_texts)
         perception = {
@@ -278,10 +294,12 @@ class PagePerceptionService:
                 "canvas": canvas_scene,
                 "page_api": page_api_scene,
                 "text": text_scene,
+                "cdp": copy.deepcopy(cdp_perception),
             },
             "dom_perception": dom_scene,
             "canvas_perception": canvas_scene,
             "page_api_perception": page_api_scene,
+            "cdp_perception": copy.deepcopy(cdp_perception),
             "scene": selected,
             "business_object_bindings": selected["business_object_bindings"],
             "dom_business_object_bindings": dom_scene["business_object_bindings"],
@@ -294,6 +312,14 @@ class PagePerceptionService:
                 perception_decision=evidence_decision,
             ),
         }
+        ui_graph = build_ui_graph(
+            {
+                "capture_id": capture_id,
+                "capture": capture,
+                "result": {"perception": perception},
+            }
+        )
+        perception["ui_graph"] = ui_graph
 
         template_hash = self._template_hash(capture, selected)
         content_hash = self._content_hash(capture, selected)
@@ -315,6 +341,16 @@ class PagePerceptionService:
             ),
             "canvas_count": len(canvases),
             "canvas_screenshot_count": sum(1 for canvas in canvases if canvas.get("screenshot_path")),
+            "cdp_snapshot_available": cdp_perception is not None,
+            "cdp_node_count": int((cdp_perception or {}).get("node_count", 0)),
+            "cdp_relation_count": int((cdp_perception or {}).get("relation_count", 0)),
+            "cdp_candidate_count": int((cdp_perception or {}).get("candidate_count", 0)),
+            "cdp_frame_count": len((cdp_perception or {}).get("frames", [])),
+            "cdp_schema_version": (
+                (cdp_perception or {}).get("capture_metadata", {}).get("schema_version")
+            ),
+            "cdp_actionable_grounding": False,
+            "cdp_safe_for_execution": False,
             "adapter_scene_available": adapter_scene is not None,
             "adapter_snapshot_complete": bool(
                 adapter_scene
@@ -330,6 +366,14 @@ class PagePerceptionService:
             "semantic_source": result["perception"]["scene"].get("provenance", {}).get(
                 "semantic_source", "unknown"
             ),
+            "ui_graph_schema_version": ui_graph["schema_version"],
+            "ui_graph_id": ui_graph["graph_id"],
+            "ui_graph_node_count": ui_graph["stats"]["node_count"],
+            "ui_graph_edge_count": ui_graph["stats"]["edge_count"],
+            "ui_graph_issue_count": ui_graph["stats"]["issue_count"],
+            "ui_graph_truncated": ui_graph["stats"]["truncated"],
+            "ui_graph_analysis_only": True,
+            "ui_graph_safe_for_execution": False,
         }
         if adapter_scene and adapter_scene.get("source_metadata"):
             summary["adapter_source_metadata"] = copy.deepcopy(
@@ -362,6 +406,13 @@ class PagePerceptionService:
     def get_result(self, capture_id: str) -> dict[str, Any] | None:
         record = self.store.get(capture_id)
         return copy.deepcopy(record["result"]) if record else None
+
+    def get_ui_graph(self, capture_id: str) -> dict[str, Any] | None:
+        record = self.store.get(capture_id)
+        if not record:
+            return None
+        graph = record["result"]["perception"].get("ui_graph")
+        return copy.deepcopy(graph) if isinstance(graph, dict) else None
 
     def get_action_snapshot(self, capture_id: str) -> dict[str, Any] | None:
         """Return immutable evidence for asset/action preflight validation."""
@@ -396,14 +447,22 @@ class PagePerceptionService:
             **record["summary"],
         }
         perception = result["perception"]
-        topology["raw_scenes"] = perception["raw_scenes"]
-        topology["ui_perception_candidates"] = perception["candidates"]
+        raw_scenes = copy.deepcopy(perception["raw_scenes"])
+        raw_scenes.pop("cdp", None)
+        topology["raw_scenes"] = raw_scenes
+        perception_candidates = copy.deepcopy(perception["candidates"])
+        perception_candidates.pop("cdp", None)
+        topology["ui_perception_candidates"] = perception_candidates
         topology["ui_perception"] = perception["scene"]
         topology["dom_perception"] = copy.deepcopy(perception["dom_perception"])
         topology["canvas_perception"] = copy.deepcopy(perception["canvas_perception"])
         topology["page_api_perception"] = copy.deepcopy(
             perception.get("page_api_perception")
         )
+        topology["cdp_perception_ref"] = self._cdp_perception_ref(
+            perception.get("cdp_perception")
+        )
+        topology["ui_graph_ref"] = self._ui_graph_ref(perception.get("ui_graph"))
         topology["dom_business_object_bindings"] = copy.deepcopy(
             perception.get("dom_business_object_bindings", {})
         )
@@ -430,6 +489,12 @@ class PagePerceptionService:
             "page_api_perception": copy.deepcopy(
                 record["result"]["perception"].get("page_api_perception")
             ),
+            "cdp_perception": copy.deepcopy(
+                record["result"]["perception"].get("cdp_perception")
+            ),
+            "ui_graph_ref": self._ui_graph_ref(
+                record["result"]["perception"].get("ui_graph")
+            ),
             "dom_business_object_bindings": copy.deepcopy(
                 record["result"]["perception"].get("dom_business_object_bindings", {})
             ),
@@ -437,6 +502,41 @@ class PagePerceptionService:
                 record["result"]["perception"].get("dom_action_bindings", {})
             ),
             "created_at": record["created_at"],
+        }
+
+    @staticmethod
+    def _ui_graph_ref(value: Any) -> dict[str, Any]:
+        graph = value if isinstance(value, dict) else {}
+        stats = graph.get("stats")
+        stats = stats if isinstance(stats, dict) else {}
+        return {
+            "schema_version": graph.get("schema_version"),
+            "graph_id": graph.get("graph_id"),
+            "capture_id": graph.get("capture_id"),
+            "node_count": stats.get("node_count", 0),
+            "edge_count": stats.get("edge_count", 0),
+            "issue_count": stats.get("issue_count", 0),
+            "truncated": stats.get("truncated") is True,
+            "analysis_only": True,
+            "safe_for_execution": False,
+        }
+
+    @staticmethod
+    def _cdp_perception_ref(value: Any) -> dict[str, Any]:
+        scene = value if isinstance(value, dict) else {}
+        metadata = scene.get("capture_metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        frames = scene.get("frames")
+        return {
+            "schema_version": scene.get("schema_version"),
+            "capture_schema_version": metadata.get("schema_version"),
+            "page_route": metadata.get("page_route"),
+            "node_count": scene.get("node_count", 0),
+            "relation_count": scene.get("relation_count", 0),
+            "candidate_count": scene.get("candidate_count", 0),
+            "frame_count": len(frames) if isinstance(frames, list) else 0,
+            "analysis_only": True,
+            "safe_for_execution": False,
         }
 
     def _normalize_page(self, page: dict[str, Any]) -> dict[str, Any]:
@@ -455,6 +555,126 @@ class PagePerceptionService:
                 "device_pixel_ratio": float(viewport.get("device_pixel_ratio", 1)),
             },
         }
+
+    def _normalize_cdp_snapshot_envelope(
+        self,
+        value: Any,
+        page: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError("cdp_snapshot must be an object")
+        schema_version = str(value.get("schema_version", "")).strip()
+        if schema_version != self.CDP_PAGE_SNAPSHOT_SCHEMA_VERSION:
+            raise ValueError(
+                "cdp_snapshot.schema_version must be "
+                f"{self.CDP_PAGE_SNAPSHOT_SCHEMA_VERSION}"
+            )
+        envelope_page = value.get("page")
+        if not isinstance(envelope_page, dict):
+            raise ValueError("cdp_snapshot.page must be an object")
+        source_url = str(envelope_page.get("url", "")).strip()
+        parsed_source = urlsplit(source_url)
+        if (
+            parsed_source.scheme.casefold() not in {"http", "https"}
+            or not parsed_source.netloc
+        ):
+            raise ValueError("cdp_snapshot.page.url must be an HTTP(S) URL")
+        page_route = self._page_route(page["url"])
+        if self._page_route(source_url) != page_route:
+            raise ValueError("cdp_snapshot page route mismatch")
+
+        dom_snapshot = value.get("dom_snapshot")
+        if not isinstance(dom_snapshot, dict):
+            raise ValueError("cdp_snapshot.dom_snapshot must be an object")
+        ax_tree = value.get("ax_tree")
+        if not isinstance(ax_tree, (dict, list)):
+            raise ValueError("cdp_snapshot.ax_tree must be an object or list")
+        frame_errors = value.get("frame_errors", [])
+        if not isinstance(frame_errors, list):
+            raise ValueError("cdp_snapshot.frame_errors must be a list")
+
+        normalized = normalize_cdp_snapshot(dom_snapshot, ax_tree)
+        node_count = int(normalized.get("node_count", 0))
+        relation_count = int(normalized.get("relation_count", 0))
+        if node_count > self.MAX_CDP_NODE_COUNT:
+            raise ValueError(
+                f"cdp_snapshot exceeds {self.MAX_CDP_NODE_COUNT} normalized nodes"
+            )
+        if relation_count > self.MAX_CDP_RELATION_COUNT:
+            raise ValueError(
+                f"cdp_snapshot exceeds {self.MAX_CDP_RELATION_COUNT} relations"
+            )
+
+        captured_at = value.get("captured_at")
+        normalized_captured_at = None
+        if not isinstance(captured_at, bool):
+            try:
+                numeric_captured_at = float(captured_at)
+            except (TypeError, ValueError, OverflowError):
+                numeric_captured_at = -1.0
+            if math.isfinite(numeric_captured_at) and numeric_captured_at >= 0:
+                normalized_captured_at = numeric_captured_at
+        source_metadata = value.get("source_metadata")
+        if not isinstance(source_metadata, dict):
+            source_metadata = {}
+        normalized["capture_metadata"] = {
+            "schema_version": schema_version,
+            "page_route": page_route,
+            "captured_at": normalized_captured_at,
+            "frame_error_count": len(frame_errors),
+            "source_type": str(
+                source_metadata.get("source_type", "playwright_cdp_sidecar")
+            )[:100],
+            "browser_product": str(source_metadata.get("browser_product", ""))[:200],
+            "protocol_version": str(source_metadata.get("protocol_version", ""))[:100],
+            "capture_only": True,
+            "actionable_grounding": False,
+            "safe_for_execution": False,
+        }
+        normalized["object_count"] = node_count
+        normalized["business_object_bindings"] = {}
+        normalized["dom_action_bindings"] = {}
+        normalized["requires_vision_model"] = False
+        normalized["usable_for_actions"] = False
+        normalized["execution_grounding"] = {
+            "status": "candidate_only",
+            "safe_for_execution": False,
+            "reason": "cdp_snapshot_requires_live_target_revalidation",
+        }
+        normalized.setdefault("limitations", []).append(
+            "CDP DOM/AX 快照仅用于候选分析，不是实时执行授权或可直接点击的目标"
+        )
+        self._force_cdp_analysis_only(normalized)
+        return normalized
+
+    @staticmethod
+    def _force_cdp_analysis_only(scene: dict[str, Any]) -> None:
+        scene["actionable"] = False
+        scene["actionable_grounding"] = False
+        scene["safe_for_execution"] = False
+        scene["usable_for_actions"] = False
+        provenance = scene.setdefault("provenance", {})
+        provenance["actionable_grounding"] = False
+        provenance["safe_for_execution"] = False
+        for node in scene.get("nodes", []):
+            if not isinstance(node, dict):
+                continue
+            candidate = node.get("interaction_candidate") is True
+            node["actionable"] = False
+            node["interaction_eligible"] = False
+            node["actionable_grounding"] = False
+            node["safe_for_execution"] = False
+            interaction = node.setdefault("interaction", {})
+            interaction["status"] = "candidate_only" if candidate else "analysis_only"
+            interaction["candidate"] = candidate
+            interaction["can_click_now"] = False
+            interaction["preflight_required"] = False
+            interaction["safe_for_execution"] = False
+            node_provenance = node.setdefault("provenance", {})
+            node_provenance["actionable_grounding"] = False
+            node_provenance["safe_for_execution"] = False
 
     def _normalize_dom(self, dom: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(dom, dict):
@@ -2403,6 +2623,11 @@ class PagePerceptionService:
             "canvas_structure": canvas_structure,
             "adapter_ui_version": (adapter_scene or {}).get("ui_version"),
         }
+        cdp_perception = capture.get("cdp_perception")
+        if isinstance(cdp_perception, dict):
+            payload["cdp_structure"] = self._cdp_template_signature(
+                cdp_perception
+            )
         if selected["mode"] in {"canvas_vision_adapter", "topology_text_reconstruction"}:
             provenance = selected.get("provenance", {})
             payload["recognition_pipeline"] = {
@@ -2505,7 +2730,123 @@ class PagePerceptionService:
                 "dom": capture["dom"]["elements"],
                 "canvas_hashes": [item.get("screenshot_sha256") for item in capture["canvases"]],
             }
+        cdp_perception = capture.get("cdp_perception")
+        if isinstance(cdp_perception, dict):
+            payload = {
+                "selected": payload,
+                "cdp": self._cdp_content_signature(cdp_perception),
+            }
         return self._hash(payload)
+
+    def _cdp_template_signature(self, scene: dict[str, Any]) -> dict[str, Any]:
+        nodes = []
+        for node in scene.get("nodes", []):
+            if not isinstance(node, dict):
+                continue
+            parent_links = [
+                {
+                    "node_id": str(link.get("node_id", "")),
+                    "relation": str(link.get("relation", "")),
+                    "source": str(link.get("source", "")),
+                }
+                for link in node.get("parent_links", [])
+                if isinstance(link, dict)
+            ]
+            parent_links.sort(
+                key=lambda item: (
+                    item["relation"],
+                    item["node_id"],
+                    item["source"],
+                )
+            )
+            nodes.append(
+                {
+                    "node_id": str(node.get("node_id", "")),
+                    "frame_id": str(node.get("frame_id", "")),
+                    "backend_node_id": node.get("backend_node_id"),
+                    "dom_node_type": node.get("dom_node_type"),
+                    "dom_node_name": str(node.get("dom_node_name", "")),
+                    "role": str(node.get("role", "")),
+                    "shadow_root_type": node.get("shadow_root_type"),
+                    "parent_links": parent_links,
+                }
+            )
+        nodes.sort(key=lambda item: item["node_id"])
+        relations = [
+            {
+                "type": str(relation.get("type", "")),
+                "source": str(relation.get("source", "")),
+                "target": str(relation.get("target", "")),
+                "details": copy.deepcopy(relation.get("details", {})),
+            }
+            for relation in scene.get("relations", [])
+            if isinstance(relation, dict)
+        ]
+        relations.sort(
+            key=lambda item: (
+                item["type"],
+                item["source"],
+                item["target"],
+            )
+        )
+        frames = [
+            {
+                "frame_id": str(frame.get("frame_id", "")),
+                "parent_frame_id": frame.get("parent_frame_id"),
+                "owner_node_id": frame.get("owner_node_id"),
+                "root_node_id": frame.get("root_node_id"),
+            }
+            for frame in scene.get("frames", [])
+            if isinstance(frame, dict)
+        ]
+        frames.sort(key=lambda item: item["frame_id"])
+        return {
+            "schema_version": scene.get("schema_version"),
+            "nodes": nodes,
+            "relations": relations,
+            "frames": frames,
+        }
+
+    def _cdp_content_signature(self, scene: dict[str, Any]) -> dict[str, Any]:
+        signature = self._cdp_template_signature(scene)
+        nodes = []
+        for node in scene.get("nodes", []):
+            if not isinstance(node, dict):
+                continue
+            nodes.append(
+                {
+                    "node_id": str(node.get("node_id", "")),
+                    "dom_node_value": str(node.get("dom_node_value", "")),
+                    "role": str(node.get("role", "")),
+                    "name": str(node.get("name", "")),
+                    "description": str(node.get("description", "")),
+                    "value": str(node.get("value", "")),
+                    "disabled": node.get("disabled") is True,
+                    "focusable": node.get("focusable") is True,
+                    "is_clickable": node.get("is_clickable") is True,
+                    "ignored": node.get("ignored") is True,
+                    "bounds": copy.deepcopy(node.get("bounds")),
+                    "center": copy.deepcopy(node.get("center")),
+                    "attributes": copy.deepcopy(node.get("attributes", {})),
+                    "interaction_candidate": node.get("interaction_candidate") is True,
+                }
+            )
+        nodes.sort(key=lambda item: item["node_id"])
+        signature["content_nodes"] = nodes
+        signature["candidate_count"] = int(scene.get("candidate_count", 0))
+        signature["frame_documents"] = sorted(
+            [
+                {
+                    "frame_id": str(frame.get("frame_id", "")),
+                    "document_url": str(frame.get("document_url", "")),
+                    "title": str(frame.get("title", "")),
+                }
+                for frame in scene.get("frames", [])
+                if isinstance(frame, dict)
+            ],
+            key=lambda item: item["frame_id"],
+        )
+        return signature
 
     def _scene_key(self, page: dict[str, Any], template_hash: str) -> str:
         route_hash = hashlib.sha256(self._page_route(page["url"]).encode("utf-8")).hexdigest()[:12]

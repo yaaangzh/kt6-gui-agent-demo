@@ -1,0 +1,13 @@
+{
+  "name": "kt6-playwright-cdp-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only Playwright/CDP collector for KT6 UI Graph experiments",
+  "scripts": {
+    "check": "node --check capture-ui-graph.mjs"
+  },
+  "dependencies": {
+    "playwright-core": "1.49.0"
+  }
+}
