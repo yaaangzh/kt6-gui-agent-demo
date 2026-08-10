@@ -17,7 +17,7 @@
 | 分组 | 分支 | 提交 | 用途 |
 |---|---|---|---|
 | A 组 | `main` | `dd0aca6` | 当前基线：已有 DOM、Canvas、OpenCV/OCR 与安全动作链 |
-| B 组 | `ui-graph-textflow-cdp` | `63f66ed` | 新增 Playwright/CDP、多源 UI Graph、内部 GLM 规划和 DAG 校验 |
+| B 组 | `ui-graph-textflow-cdp` | 以 `git rev-parse --short HEAD` 为准 | 新增 Playwright/CDP、多源 UI Graph、内部 GLM 规划和 DAG 校验 |
 
 `br_omniParser` 不参与本轮测试。当前 B 组只生成并校验 dry-run 操作计划，不执行真实点击。
 
@@ -28,7 +28,8 @@ git show-ref --heads main ui-graph-textflow-cdp
 git rev-list --left-right --count main...ui-graph-textflow-cdp
 ```
 
-预期两个分支相差一个提交，输出计数为 `0 1`。
+预期左侧计数为 `0`，表示 B 组包含当前 A 组基线；右侧计数应至少为 `1`。文档更新
+也会增加右侧计数，因此不要把固定提交数量作为验收条件。
 
 ## 2. 测试边界
 
@@ -114,8 +115,8 @@ git switch ui-graph-textflow-cdp
 python -m unittest discover -s tests
 ```
 
-提交 `63f66ed` 的参考结果是 444 项测试通过、46 项按环境条件跳过。后续测试数量可能变化，
-验收应以当前命令返回 `OK` 为准，不要只核对固定数量。
+2026-08-07 B 组参考结果是 444 项测试通过、46 项按环境条件跳过。后续测试数量可能
+变化，验收应以当前检出提交和命令返回 `OK` 为准，不要只核对历史哈希或固定数量。
 
 ### 4.3 B 组定向回归
 

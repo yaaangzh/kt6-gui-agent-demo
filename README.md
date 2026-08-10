@@ -4,7 +4,9 @@
 
 这不是纯前端动画演示：前端负责采集页面和呈现事件，后端负责意图路由、任务状态、业务步骤、方案授权、资源锁、场景校验、执行结果与运行记忆。
 
-当前阶段结论：**KT6 核心架构、端到端 PoC 和三种 Canvas 像素识别驱动已完成；真实业务系统、真实图片准确率评测和真实设备下发尚未完成。**
+当前阶段结论：**KT6 核心架构、端到端 PoC、三种 Canvas 像素识别驱动，以及 B 组
+多源 UI Graph dry-run 规划已完成；真实业务系统 A/B、真实图片准确率评测和真实设备
+下发尚未完成。**
 
 供其他 Codex 或新开发环境接手时，请同时阅读
 [CODEX_HANDOFF.md](./CODEX_HANDOFF.md)；其中记录了当前工作目录、分阶段拓扑链路、
@@ -13,6 +15,21 @@ CodeAgentCLI 的 Windows 启动方式、真实图片验证结论、已知限制�
 多源 UI Graph、Playwright/CDP 只读采集和内部 GLM5.1 操作规划的设计、安全边界与
 使用方式见 [docs/ui-graph-architecture.md](./docs/ui-graph-architecture.md)。该路径参考
 TextFlow 的中间文本图分层思想，当前不包含 OmniParser。
+
+UI Graph 新方案当前保留在 `ui-graph-textflow-cdp` 分支，与 `main` 基线分开进行
+A/B 验证。测试区环境准备、CDP 采集、内部 GLM 配置、接口检查、指标和通过条件见
+[test.md](./test.md)。当前代码只生成并验证不可执行的 dry-run 操作计划。
+
+## 当前 A/B 状态
+
+| 分组 | 分支 | 当前用途 |
+|---|---|---|
+| A 组 | `main` | 现有 DOM、Canvas、OpenCV/OCR 和安全动作链基线 |
+| B 组 | `ui-graph-textflow-cdp` | Playwright/CDP、多源 UI Graph、内部 GLM5.1 DAG 规划 |
+
+B 组自动化回归已通过，下一阶段是在测试区使用真实 Chromium/CDP、真实 NCE/FEBS
+页面和内部 GLM5.1 endpoint 采集 A/B 数据。当前尚未接入真实浏览器点击执行器，
+也不能把合成测试结果等同于目标系统现场验收。
 
 ## 已实现能力
 
@@ -34,7 +51,7 @@ TextFlow 的中间文本图分层思想，当前不包含 OmniParser。
 | 拓扑变化检测 | 节点、位置、链路增删及链路语义属性变化检测；关键变化触发重规划 |
 | 运行记忆 | SQLite 持久化任务、事件、检查点、场景和业务处理结果 |
 | KT5 接入基础 | 感知拓扑与生成拓扑共用统一 Scene Graph 契约 |
-| 自动化测试 | 2026-08-04 开发环境全量 362 项通过、42 项跳过；已覆盖页面异步任务、DOM/视觉分治、资产绑定与安全动作等链路 |
+| 自动化测试 | 2026-08-07 B 组全量 444 项通过、46 项跳过；新增覆盖 CDP、UI Graph、GLM reasoner、DAG 校验和 API |
 
 ## 业务场景
 
@@ -652,8 +669,9 @@ tests/                         自动化测试
 python -m unittest discover -s tests
 ```
 
-2026-08-04 开发环境全量结果为 362 项通过、42 项跳过；后续仍以当前命令输出为准。
-跳过项来自开发环境缺少可选 RapidOCR/OpenCV 运行依赖，不是测试失败。覆盖范围包括
+2026-08-07 `ui-graph-textflow-cdp` 分支开发环境全量结果为 444 项通过、46 项跳过；
+后续仍以当前命令输出为准。跳过项来自开发环境缺少可选 RapidOCR/OpenCV 运行依赖，
+不是测试失败。完整的 A/B 测试步骤见 [test.md](./test.md)。覆盖范围包括
 异步 capture job、
 弹窗重开恢复、显式页面 API、节点来源/交互契约、DOM 语义投影、六步操作计划、
 权威资产唯一性解析、
@@ -669,6 +687,28 @@ DOM/ARIA `ui_tree`、文本拓扑重建、本地 RapidOCR/OpenCV、密集星型�
 歧义 ID fail-closed、bbox 中心派生、共享契约、TLS/图片完整性、pixels-only CLI、
 DOM-like 语义树、不可执行 grounding 门禁、
 缓存命中、并行链路变化、重新绑定和重新规划。
+
+UI Graph/CDP/GLM 定向回归：
+
+```powershell
+python -m unittest `
+  tests.test_cdp_sidecar_assets `
+  tests.test_cdp_snapshot `
+  tests.test_page_perception_cdp `
+  tests.test_page_perception_ui_graph `
+  tests.test_ui_graph `
+  tests.test_ui_graph_reasoner `
+  tests.test_ui_operation_graph `
+  tests.test_ui_graph_planning `
+  tests.test_ui_graph_api
+```
+
+Sidecar 语法检查：
+
+```powershell
+cd .\browser_sidecar
+npm run check
+```
 
 本轮页面感知与安全动作定向测试：
 

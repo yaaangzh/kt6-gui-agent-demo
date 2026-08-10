@@ -4,9 +4,47 @@
 和 [README.md](./README.md)，再检查 Git 状态和最近提交，不要仅依据旧对话继续
 修改。
 
+## 0. 2026-08-10 当前接手摘要
+
+当前工作已从单纯拓扑图片识别扩展到“多源页面结构理解 + 内部模型操作规划”，
+并刻意保留为 A/B 分支，不应在测试完成前合入 `main`：
+
+| 分组 | 分支 | 本地提交 | 状态 |
+|---|---|---|---|
+| A 组 | `main` | `dd0aca6` | 现有 DOM、Canvas、OpenCV/OCR 与安全动作链基线 |
+| B 组 | `ui-graph-textflow-cdp` | 以 `git log -1` 为准 | 新增 Playwright/CDP、多源 UI Graph、内部 GLM5.1 DAG 规划 |
+
+当前 B 组已推送为 `origin/ui-graph-textflow-cdp` 并设置 upstream。是否与远端最新
+提交同步，以及 `main` 与 `origin/main` 的关系，必须以当前 `git status -sb`、
+`git branch -vv` 和 `git fetch` 结果为准。
+
+B 组已经实现：
+
+- `dom/cdp/page_api/vision/text` 五类来源的统一 UI Graph。
+- 节点来源、稳定引用、frame/document、字段 provenance 和冲突审计。
+- DOM/CDP 点击候选门禁；候选不等于实时可点击或执行授权。
+- Playwright/CDP 只读 Sidecar，采集 DOMSnapshot、AXTree、iframe 和 Shadow DOM。
+- 内部 GLM5.1 有界请求契约，以及 `locate/click/wait/verify` 操作 DAG。
+- `capture_id/graph_id` 绑定、模型投影约束和确定性 fail-closed 校验。
+- `parent_of/owner_of/claims_business_object/supports_action/semantic_relation` 关系。
+- `GET /api/ui-graphs/{capture_id}` 与 `POST /api/ui-operations/plan`。
+
+2026-08-07 B 组完整回归为 444 项通过、46 项跳过，关键 smoke 回归 31 项通过。
+这只证明开发环境自动化路径通过；真实 Chromium/CDP、真实 NCE/FEBS 页面和测试区
+内部 GLM5.1 endpoint 尚未现场验收。当前计划始终为 `dry_run_only=true`、
+`safe_for_execution=false`，没有真实浏览器点击执行器。
+
+详细设计见 [docs/ui-graph-architecture.md](./docs/ui-graph-architecture.md)，完整 A/B
+测试手册见 [test.md](./test.md)。TextFlow 只作为“输入 → 中间文本图 → 推理器”的
+架构参考，实际 DOM 采集底座是开源 Playwright/CDP；不要声称集成了 TextFlow 的
+DOM 解析代码。
+
+`review.md` 是用户未跟踪文件，不得暂存或提交。OmniParser 试点改动仍应保持独立，
+不参与本轮 A/B；是否存在对应 stash 必须以 `git stash list` 为准。
+
 ## 1. 当前阶段目标
 
-当前优先级是先稳定打通拓扑图片的完整处理链路：
+历史阶段已经稳定打通拓扑图片的分阶段处理链路：
 
 ```text
 原始拓扑图片
@@ -24,8 +62,9 @@ cv-result.json + model-result.json
    └─ fused-result.json
 ```
 
-当前不以单一算法达到 100% 准确率为目标。CV 提供坐标、OCR 置信度和像素连线，
-模型提供语义、层级、连接和结构判断，最后通过确定性算法互补融合。
+当前页面方向的优先级是完成 A/B 实机验证，而不是继续引入新的视觉模型。CV 提供
+坐标、OCR 置信度和像素连线；DOM、CDP、页面 API 提供结构证据；内部 GLM5.1
+只提出操作计划，最后由确定性算法校验。
 
 同时已经增加在线页面 DOM 路线。由于当前仓库没有 FEBS/NCE 前端源码，暂不做
 嵌入式 SDK 集成；现阶段使用 Chrome/Edge 扩展 v0.5.2，由用户显式采集普通
@@ -47,8 +86,9 @@ Canvas/SVG/图形区域。扩展每次采集至多截取一个视觉主帧，与
 一次性令牌和 dry-run；计划与令牌过期可通过查询接口观察。扩展仍不直接点击页面，
 服务端也没有真实设备动作通道。
 
-用户已明确：先把链路打通，真实图片准确率、批量评测、复杂图片超长 timeout
-和更深层模型优化之后再处理。
+用户已明确：新 UI Graph 方案必须保留在独立分支，与 `main` 做 A/B 对比；先验证
+真实页面识别效率、来源标记、父子关系、点击候选和内部 GLM 编排，再决定是否合入
+主干或继续开发真实执行器。
 
 ## 2. 仓库与工作目录
 
@@ -58,7 +98,9 @@ Canvas/SVG/图形区域。扩展每次采集至多截取一个视觉主帧，与
 开发目录：D:\yangzehui\FreeStyleCopilot
 测试目录（另一台测试机）：D:\04project\FreeStyle_Copilot_KT6_demo
 GitHub：git@github.com:yaaangzh/kt6-gui-agent-demo.git
-分支：main
+基线分支（A 组）：main
+方案分支（B 组）：ui-graph-textflow-cdp
+当前检出分支：以 `git branch --show-current` 为准
 当前本地 HEAD 与远端状态：以 `git log`、`git status` 和 `git fetch` 的结果为准
 ```
 
@@ -75,11 +117,15 @@ git log -1 --oneline --decorate
 - 当前网络下 GitHub SSH 22 端口可能不可用；远端状态以 `git fetch` 后结果为准。
 - 本轮 README/交接文档修改是否已提交，必须以 `git status` 和 `git log` 为准。
 - `review.md` 是用户的未跟踪文件，不得加入提交。
-- 用户说“提交”时，默认同时 commit 和 push，除非明确要求仅本地提交。
-- 当前工作直接更新 `main`，没有使用 PR。
-- 最近为了把修复合并到同一提交，多次执行过 amend 和
-  `--force-with-lease`。测试环境同步旧历史时，先确认没有本地代码修改，再
-  `git fetch origin main` 和 `git reset --hard origin/main`。
+- B 组已跟踪 `origin/ui-graph-textflow-cdp`；只有 `git push` 成功且状态没有 ahead
+  提示时，才能说明当前本地提交已经上传。
+- A/B 测试结束并得到用户确认前，不要把 B 组快进合入 `main`。
+- 本地 `main` 与缓存的 `origin/main` 当前不一致；联网后先 `git fetch`，再判断远端
+  实际状态，不要直接 reset 或改写历史。
+- OmniParser 旧修改保存在独立 stash 中；接手时用 `git stash list` 核对，不要混入
+  本轮 UI Graph A/B 分支。
+- 用户明确要求 push 时才上传；认证或网络失败必须明确报告，不能只以本地 commit
+  代替 push。
 - 不要无依据清理 `runtime_data/`；其中可能保留耗时数分钟的真实模型结果。
 
 ## 3. 当前代码状态
@@ -97,14 +143,22 @@ kt6_backend/topology_fusion_cli.py
 kt6_backend/codeagent_canvas_vision.py
 kt6_backend/page_perception.py
 kt6_backend/page_capture_jobs.py
+kt6_backend/cdp_snapshot.py
+kt6_backend/ui_graph.py
+kt6_backend/ui_graph_reasoner.py
+kt6_backend/ui_operation_graph.py
+kt6_backend/ui_graph_planning.py
 kt6_backend/asset_inventory.py
 kt6_backend/dom_action_binding.py
 kt6_backend/safe_dom_actions.py
 kt6_backend/runtime.py
+browser_sidecar/capture-ui-graph.mjs
 browser_extension/manifest.json
 browser_extension/content-collector.js
 browser_extension/popup-v2.js
 browser_extension/popup.html
+docs/ui-graph-architecture.md
+test.md
 ```
 
 测试文件：
@@ -116,6 +170,15 @@ tests/test_topology_artifact_clis.py
 tests/test_topology_fusion.py
 tests/test_page_perception.py
 tests/test_page_capture_jobs.py
+tests/test_cdp_sidecar_assets.py
+tests/test_cdp_snapshot.py
+tests/test_page_perception_cdp.py
+tests/test_page_perception_ui_graph.py
+tests/test_ui_graph.py
+tests/test_ui_graph_reasoner.py
+tests/test_ui_operation_graph.py
+tests/test_ui_graph_planning.py
+tests/test_ui_graph_api.py
 tests/test_asset_inventory.py
 tests/test_dom_action_binding.py
 tests/test_safe_dom_actions.py
@@ -185,7 +248,37 @@ tests/fixtures/extension_canvas_page.html
 - 扩展权限保持为 `activeTab` + `scripting` + `storage`，没有申请 `<all_urls>`；
   `storage` 仅用于恢复待完成的本机 capture job。
 
-### 3.1 在线页面 DOM + 视觉分治扩展 v0.5.2
+### 3.1 多源 UI Graph、Playwright/CDP 与内部 GLM5.1
+
+B 组在现有 DOM/OCR/OpenCV 路线之外增加一层“中间文本图表示”，但不引入新的视觉
+大模型。它参考 TextFlow 的图式中间表示思想，实际页面采集和浏览器协议由
+Playwright/CDP sidecar 完成：
+
+1. `dom`、`cdp`、显式 `page_api`、`vision`、`text` 节点统一进入 UI Graph；每个节点
+   保留 `source.kind`、`source_ref` 和来源证据，避免模型把推断内容当成页面事实。
+2. `interaction.candidate` 只表示“可以进入点击提案校验”，不是授权。DOM 必须有稳定
+   selector/ref，CDP 必须有可重新绑定的 backend node id；OCR/视觉/模型推断节点不能
+   直接获得点击资格。
+3. 页面 API 只读取页面显式提供、可审计的 adapter 快照，不拦截任意网络请求，也不
+   monkey-patch `fetch`/XHR。没有站点 adapter 时继续使用 DOM/CDP/OCR/视觉来源。
+4. 内部 GLM5.1 只输出 `locate/click/wait/verify` 操作 DAG；确定性验证器检查目标来源、
+   可点击资格、依赖关系、重绑定信息和循环，失败时 fail closed。
+5. `parent`、`owner`、`business`、`action`、`semantic` 边保留父子和业务归属，支持后续
+   “定位设备容器 -> 选择子控件 -> 点击 -> 等待 -> 验证”的联动编排。
+6. 当前规划 API 只有 dry-run，不包含真实点击执行器，也不替代原有资产绑定、权限、
+   二次采集和执行前复核链路。
+
+接口：
+
+```text
+GET  /api/ui-graphs/{capture_id}
+POST /api/ui-operations/plan
+```
+
+设计与安全边界见 `docs/ui-graph-architecture.md`；完整 A/B 准备、命令、样例和验收指标
+见根目录 `test.md`。
+
+### 3.2 在线页面 DOM + 视觉分治扩展 v0.5.2
 
 启动本机后端：
 
@@ -233,7 +326,7 @@ D:\yangzehui\FreeStyleCopilot\browser_extension
   `action_binding_complete` 判断结构与动作证据覆盖。
 
 
-### 3.2 设备资产绑定与执行前复核
+### 3.3 设备资产绑定与执行前复核
 
 当前完成的是可测试、默认拒绝的 dry-run 安全骨架：
 
@@ -452,9 +545,10 @@ pair-level 负证据与低于阈值的 CV 链路组合会真正 rejected；全�
 
 ### 7.1 自动化测试
 
-2026-08-04 开发环境全量结果为 362 项通过、42 项跳过；后续通过、跳过和失败数量
-仍以当前命令输出为准。跳过项来自开发环境缺少可选 RapidOCR/OpenCV 运行依赖，
-不是测试失败。
+2026-08-07 B 组开发环境全量结果为 444 项通过、46 项跳过；关键 smoke
+回归另有 31 项通过。后续通过、跳过和失败数量仍以当前命令输出为准。跳过项主要
+来自开发环境缺少可选 RapidOCR/OpenCV 运行依赖，不是测试失败。A/B 环境准备、样例
+和人工验收步骤统一以根目录 `test.md` 为准。
 
 全量命令：
 
@@ -488,6 +582,24 @@ python -m unittest `
   tests.test_page_perception `
   tests.test_hybrid_canvas_vision `
   tests.test_app
+```
+
+UI Graph、CDP 与 GLM 规划定向命令：
+
+```powershell
+python -m unittest `
+  tests.test_cdp_sidecar_assets `
+  tests.test_cdp_snapshot `
+  tests.test_page_perception_cdp `
+  tests.test_page_perception_ui_graph `
+  tests.test_ui_graph `
+  tests.test_ui_graph_reasoner `
+  tests.test_ui_operation_graph `
+  tests.test_ui_graph_planning `
+  tests.test_ui_graph_api
+
+cd .\browser_sidecar
+npm run check
 ```
 
 ### 7.2 测试环境端到端命令
@@ -648,6 +760,20 @@ python -m kt6_backend.topology_hybrid_cli `
 - 原始 `dom_action_bindings` 始终只是观察证据，`actionable_grounding=false`，
   所有安全链路结果也保持 `safe_for_execution=false`。视觉截图不绕过该限制。
 
+### 9.6 UI Graph、CDP 与内部 GLM5.1
+
+- 当前只通过单元测试和本地样例验证，尚未在真实测试区 Chromium/CDP 环境跑完 A/B。
+- 内部 GLM5.1 的实际 endpoint、模型响应格式、耗时和稳定性仍需在测试区联调；没有
+  GLM 时可以使用确定性/fixture 规划验证图构建和安全校验，但不能代表模型效果。
+- CDP sidecar 当前是只读快照入口；没有浏览器动作执行器，也没有通过 runtime
+  JavaScript 或网络拦截读取任意页面内部状态。
+- `page_api` 只有站点显式提供受信任 adapter 时才可用；不能把页面自报字段直接提升为
+  可点击或可执行证据。
+- `interaction.candidate=true` 不是“可以立即点击”。操作仍需稳定 rebind、确定性 DAG
+  校验，以及原有资产、权限、二次采集和 preflight 安全链路。
+- UI Graph 与模型请求/响应可能包含页面文本和业务标识；测试区落盘、日志和导出需按
+  数据隔离要求处理，不能未经确认上传外部服务。
+
 ## 10. 近期已解决问题
 
 ```text
@@ -715,28 +841,41 @@ DOM 绑定在后端并行保留
 扩展弹窗绑定同步长请求，关闭后丢失进度
 → 后端异步 capture job 持续执行，`chrome.storage.local` 保存 job_id，弹窗重开恢复；
 同步接口继续保留给兼容调用
+
+DOM、OCR、视觉和页面 API 结果各自孤立，模型无法稳定理解结构
+→ 统一构建带来源、父子、owner、business、action 和 semantic 边的多源 UI Graph
+
+模型或原始 `actionable` 字段可能把观察节点误授予点击资格
+→ 只接受精确的 `interaction.candidate=true`，并要求 DOM 稳定 ref 或 CDP backend id；
+`@capture:` 等临时标记、仅业务 ID/element ID 和大小写变体全部 fail closed
+
+GLM 输出可以直接描述任意点击目标或产生循环依赖
+→ 先投影有界文本图，再对 `locate/click/wait/verify` DAG 做目标、依赖、重绑定和环校验
+
+节点已识别但父子与业务归属丢失，后续操作只能扁平猜测
+→ 显式保留 parent/owner/business/action/semantic 关系，支持容器到子控件的联动规划
 ```
 
 ## 11. 后续建议
 
 按当前用户优先级排序：
 
-1. 在真实 NCE 在线页面重新加载扩展 v0.5.2，确认导航/表格走 DOM，地图/拓扑区域
-   产生一个视觉主帧，关闭并重开弹窗后同一异步任务能恢复；同时记录
-   `source.kind`、`interaction`、`ui_tree.action_binding_complete`、
-   `perception_decision`、frame/document/origin 和 ROI 状态。设备容器仍需强资产身份，
-   动作控件仍需明确 DOM 祖先归属和高风险 `data-kt6-action`。
-2. 将 `JSONAssetInventoryAdapter` 替换成经过认证的 NCE/FEBS 资产查询，把权限、
-   用户和 scope 换成服务端身份会话；完成受控执行器与回滚前继续保持 dry-run。
-3. 在测试环境同步当前修改，先跑资产绑定/API 定向测试，再依次复测
-   `1.png`、`2.png`、`3.png`，确认自动重试、
-   grounded/display/semantic 计数、disputed/rejected 状态及坐标映射。
-4. 建立三张真实图片的人工节点/链路真值，不再用“链接越多越好”判断准确率。
-5. 后续再拆分 HTTP timeout 和超过 900 秒的离线任务总预算。
-6. 增加正式 events 恢复 CLI，避免成功结果因后处理失败而重新调用模型。
-7. 建立多图片黄金数据集，统计节点、连接、层级、厂商和型号准确率。
-8. 需要 GLM 直连或多模型路由时，再抽象 `TopologyModelHarness`；当前无需引入
-   大型 Harness 框架。
+1. 严格按 `test.md` 保持 A 组 `main` 与 B 组 `ui-graph-textflow-cdp` 分离，在相同
+   页面、相同任务、相同机器上完成对比，禁止在测试前把 B 合入 A。
+2. 在真实测试区启动 Chromium remote debugging 和 Playwright/CDP sidecar，验证 DOM、
+   CDP、page_api、vision、text 来源标记、父子/owner 边和交互候选是否符合页面事实。
+3. 接入测试区内部 GLM5.1，记录 UI Graph 构建耗时、prompt/response 耗时、任务成功率、
+   目标命中率、无效计划率和安全拒绝率；同时保留原方案的同口径数据。
+4. 用代表性任务验证“定位父容器 -> 子控件 -> 点击提案 -> 等待 -> 结果验证”DAG；当前
+   只验证规划和 dry-run，不执行真实点击。A/B 达标后再由用户决定是否合入 `main`。
+5. 规划结果需要接执行链时，只桥接已有 DOM 安全动作链，并继续要求强资产身份、稳定
+   rebind、服务端权限、二次采集和 preflight；不要让 GLM 或 UI Graph 直接执行动作。
+6. 将 `JSONAssetInventoryAdapter` 替换成经过认证的 NCE/FEBS 资产查询，把权限、用户和
+   scope 换成服务端身份会话；完成受控执行器与回滚前继续保持 dry-run。
+7. 继续复测 `1.png`、`2.png`、`3.png` 并建立人工节点/链路真值和多图片黄金数据集，
+   不再用“链接越多越好”判断准确率。
+8. 后续再处理超过 900 秒的离线任务预算和正式 events 恢复 CLI；不要让这些工作阻塞
+   当前 UI Graph A/B 验证。
 
 ## 12. 新 Codex 接手检查清单
 
@@ -745,19 +884,27 @@ DOM 绑定在后端并行保留
 ```powershell
 cd D:\yangzehui\FreeStyleCopilot
 git status --short
+git branch --show-current
 git log -5 --oneline --decorate
+git branch -vv
+git stash list
 python -m unittest discover -s tests
 ```
 
 然后确认：
 
 - `review.md` 是否仍为未跟踪文件。
+- 当前是否仍检出 `ui-graph-textflow-cdp`；不要在未完成 A/B 前切到 `main` 合并方案。
+- B 组是否仍跟踪 `origin/ui-graph-textflow-cdp`，以及本地是否存在尚未 push 的 ahead
+  提交；只有远端命令成功后才能说当前代码已经上传。
+- 联网后用 `git fetch` 重新确认 `main`、B 组和 `origin/*`，不要依据缓存状态改写历史。
+- OmniParser WIP 是否仍保存在独立 stash，且没有混入 UI Graph 分支。
 - 扩展 `manifest.json` 是否为 v0.5.2，并在浏览器扩展管理页完成重新加载。
 - 目标系统源码目前并不在仓库中，不要误称已经完成 FEBS/NCE 页面内嵌集成。
 - 当前提交/推送状态以 `git log`、`git status` 为准，不沿用本文中的历史哈希。
-- `main` 是否与 `origin/main` 一致。
+- UI Graph 设计读 `docs/ui-graph-architecture.md`，A/B 执行读根目录 `test.md`。
 - 测试环境最新失败属于 CV、CodeAgent transport、模型协议还是融合阶段。
 - 不要在没有真实事件证据时继续放宽协议。
 - 不要为了准确率问题破坏已经通过的路径安全和严格 JSON 校验。
 - 修改完成后运行定向测试和全量测试。
-- 用户要求提交时同时推送。
+- 用户要求 commit 或 push 时严格按当次指令执行；认证/网络失败要明确报告。
