@@ -1,0 +1,2 @@
+# Isolated UI-TARS browser-operator environment.
+playwright==1.49.1
