@@ -1142,6 +1142,8 @@ class EvaluationReportTest(unittest.TestCase):
                     "1",
                     "--repetitions",
                     "1",
+                    "--planner-provider",
+                    "deepseek",
                     "--planner-model",
                     "deepseek-test-model",
                     "--environment-id",
