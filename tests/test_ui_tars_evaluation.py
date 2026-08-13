@@ -222,7 +222,7 @@ class UITarsEvaluationTest(unittest.TestCase):
                     "name": "KT6 UI-TARS API",
                     "version": "1.0",
                     "revision": "abc123",
-                    "branch": "eval-ui-tars-api",
+                    "branch": "eval-ui-tars",
                 },
                 environment={
                     "environment_id": "test-env",

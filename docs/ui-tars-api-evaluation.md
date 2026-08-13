@@ -1,6 +1,6 @@
 # DeepSeek + UI-TARS API 对照组
 
-本分支 `eval-ui-tars-api` 实现第三套对照方案：DeepSeek API 生成当前步骤目标，UI-TARS
+本分支 `eval-ui-tars` 实现第三套对照方案：DeepSeek API 生成当前步骤目标，UI-TARS
 OpenAI-compatible API 基于当前截图返回一个坐标动作，Playwright 只负责截图和执行该
 动作。这样三组都使用相同 DeepSeek 规划模型，同时单独测量 UI-TARS 的视觉定位能力。
 

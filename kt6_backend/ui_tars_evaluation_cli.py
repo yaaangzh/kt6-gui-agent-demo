@@ -53,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--viewport-height", type=int, default=1080)
     parser.add_argument("--implementation-version", default="ui-tars-api-v1")
     parser.add_argument("--implementation-revision", required=True)
-    parser.add_argument("--implementation-branch", default="eval-ui-tars-api")
+    parser.add_argument("--implementation-branch", default="eval-ui-tars")
     parser.add_argument("--environment-id", required=True)
     parser.add_argument("--browser-label", default="Playwright Chromium 1.49.1")
     return parser
