@@ -59,15 +59,23 @@ python -m browser_use install
 
 ## 3. API 配置
 
-API key 只从环境变量读取，不进入命令行、suite、运行 JSON 或报告：
+先创建一次根目录 `.env`，后续运行 CLI 会自动读取。API key 不进入命令行、suite、
+运行 JSON 或报告：
 
 ```powershell
-$env:KT6_MODEL_API_PROVIDER = '<供应商或内网网关标识>'
-$env:KT6_MODEL_API_BASE_URL = 'https://<获批网关>/v1'
-$env:KT6_MODEL_API_KEY = '<只在当前测试窗口设置>'
-$env:KT6_MODEL_API_MODEL = '<评测统一的精确模型名>'
-$env:KT6_MODEL_API_ALLOWED_HOSTS = '<获批网关的精确主机名>'
-$env:KT6_BROWSER_USE_CDP_URL = 'http://127.0.0.1:9222'
+Copy-Item .\.env.example .\.env
+notepad .\.env
+```
+
+在 `.env` 中填写：
+
+```dotenv
+KT6_MODEL_API_PROVIDER=<供应商或内网网关标识>
+KT6_MODEL_API_BASE_URL=https://<获批网关>/v1
+KT6_MODEL_API_KEY=<只在本机.env保存>
+KT6_MODEL_API_MODEL=<评测统一的精确模型名>
+KT6_MODEL_API_ALLOWED_HOSTS=<获批网关的精确主机名>
+KT6_BROWSER_USE_CDP_URL=http://127.0.0.1:9222
 ```
 
 远程 endpoint 必须同时满足 HTTPS、精确主机白名单和命令行

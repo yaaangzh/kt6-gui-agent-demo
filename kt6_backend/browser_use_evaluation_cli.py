@@ -21,7 +21,11 @@ from .evaluation_executor import (
     optional_env,
     required_env,
 )
+from .env_config import load_project_env
 from .evaluation_report import EvaluationDataError
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -66,6 +70,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     stage = "configuration"
     try:
+        load_project_env(PROJECT_ROOT)
         task = load_execution_task(args.task)
         suite = load_suite_and_task(args.suite, task)
         base_url = args.api_base_url or required_env("KT6_MODEL_API_BASE_URL")
