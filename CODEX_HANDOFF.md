@@ -396,14 +396,14 @@ Manifest 与文件 SHA-256；有规划模型调用时要求 `planner_result` 绑
 Graph 内容 ID，再严格追加 JSONL。报告前
 重新计算所有哈希，并检查
 缺失运行、同方案实现版本、统一
-DeepSeek 模型/提示/环境，聚合完成率/耗时/步骤/命中/误点/循环/模型分阶段调用、
+规划模型/提示/环境，聚合完成率/耗时/步骤/命中/误点/循环/模型分阶段调用、
 Token/成本/安全和证据完整率，输出 `report.json`、`metrics.csv`、`runs.csv`、
 `report.md`、`report.html`、`issues.md` 和 `conclusion.md`。缺失运行按未完成计入严格
 完成率；同一模型自评、模型/环境不一致、证据缺失或哈希异常都会阻断自动排名；有安全
 违规的方案不参与推荐。展示报告不复制 `failure.reason`、`notes` 或本地验证引用等自由
 文本，完整原始信息只保留在测试区证据归档中。
 
-报告模块完全离线，不会调用 DeepSeek、Browser Use、UI-TARS 或控制浏览器。三套真实
+报告模块完全离线，不会调用任何模型 API、Browser Use、UI-TARS 或控制浏览器。三套真实
 执行器仍需在获批环境中分别生成 `kt6.evaluation-run.v1` 结果和对应原始证据，不能把
 归档/报告工具的合成单元测试写成真实28项对比已经完成。完整证据矩阵、归档命令和数据
 安全边界见 `docs/evaluation-reporting.md`。
