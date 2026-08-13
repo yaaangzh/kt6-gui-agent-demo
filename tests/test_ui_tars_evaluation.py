@@ -340,7 +340,12 @@ class UITarsEvaluationTest(unittest.TestCase):
             },
             clear=True,
         ):
-            with patch("sys.stderr") as stderr:
+            with (
+                patch(
+                    "kt6_backend.ui_tars_evaluation_cli.load_project_env"
+                ) as load_env,
+                patch("sys.stderr") as stderr,
+            ):
                 status = cli_main(
                     [
                         "--suite",
@@ -361,6 +366,7 @@ class UITarsEvaluationTest(unittest.TestCase):
                 )
         output = "".join(str(call) for call in stderr.write.call_args_list)
         self.assertEqual(status, 3)
+        load_env.assert_called_once()
         self.assertNotIn("SECRET", output)
         self.assertNotIn(str(self.root), output)
 

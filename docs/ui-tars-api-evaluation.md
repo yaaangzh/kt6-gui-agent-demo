@@ -31,18 +31,27 @@ python -m playwright install chromium
 
 ## 2. 两个 API
 
-```powershell
-$env:KT6_MODEL_API_PROVIDER = '<规划模型供应商或内网网关标识>'
-$env:KT6_MODEL_API_BASE_URL = 'https://<获批规划模型网关>/v1'
-$env:KT6_MODEL_API_KEY = '<仅当前测试窗口>'
-$env:KT6_MODEL_API_MODEL = '<三组统一的精确模型名>'
-$env:KT6_MODEL_API_ALLOWED_HOSTS = '<获批规划模型网关主机>'
+先创建一次根目录 `.env`，以后运行评测 CLI 会自动读取：
 
-$env:KT6_UI_TARS_API_BASE_URL = 'https://<批准的UI-TARS服务>/v1'
-$env:KT6_UI_TARS_API_KEY = '<仅当前测试窗口>'
-$env:KT6_UI_TARS_API_PROVIDER = 'ui-tars'
-$env:KT6_UI_TARS_MODEL = '<UI-TARS精确模型名>'
-$env:KT6_UI_TARS_API_ALLOWED_HOSTS = '<批准的UI-TARS服务主机>'
+```powershell
+Copy-Item .\.env.example .\.env
+notepad .\.env
+```
+
+在 `.env` 中填写：
+
+```dotenv
+KT6_MODEL_API_PROVIDER=<规划模型供应商或内网网关标识>
+KT6_MODEL_API_BASE_URL=https://<获批规划模型网关>/v1
+KT6_MODEL_API_KEY=<仅保存在本机.env>
+KT6_MODEL_API_MODEL=<三组统一的精确模型名>
+KT6_MODEL_API_ALLOWED_HOSTS=<获批规划模型网关主机>
+
+KT6_UI_TARS_API_BASE_URL=https://<批准的UI-TARS服务>/v1
+KT6_UI_TARS_API_KEY=<仅保存在本机.env>
+KT6_UI_TARS_API_PROVIDER=ui-tars
+KT6_UI_TARS_MODEL=<UI-TARS精确模型名>
+KT6_UI_TARS_API_ALLOWED_HOSTS=<批准的UI-TARS服务主机>
 ```
 
 两个远程 endpoint 都要求 HTTPS、精确主机白名单和各自的显式放行参数。规划模型接收

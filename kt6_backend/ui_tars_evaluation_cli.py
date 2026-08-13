@@ -15,12 +15,16 @@ from .evaluation_executor import (
     optional_env,
     required_env,
 )
+from .env_config import load_project_env
 from .evaluation_report import EvaluationDataError, load_json_object, validate_suite
 from .ui_tars_evaluation import (
     ModelEndpointConfig,
     UITarsEvaluationConfig,
     run_ui_tars_evaluation,
 )
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -65,6 +69,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     stage = "configuration"
     try:
+        load_project_env(PROJECT_ROOT)
         task = load_execution_task(args.task)
         suite = validate_suite(load_json_object(args.suite))
         if suite["suite_id"] != task.suite_id:

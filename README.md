@@ -10,6 +10,10 @@
 [CODEX_HANDOFF.md](./CODEX_HANDOFF.md)；其中记录了当前工作目录、分阶段拓扑链路、
 CodeAgentCLI 的 Windows 启动方式、真实图片验证结论、已知限制和下一步建议。
 
+本地运行配置可统一写入根目录 `.env`：复制 `.env.example` 后填写当前方案需要的配置，
+启动后端或评测 CLI 时会自动读取；已在终端、服务或密钥系统设置的同名环境变量优先。
+`.env` 已被 Git 忽略，`.env.example` 只保存字段模板，不能写入真实密钥。
+
 UI-TARS 对照执行器保留在 `eval-ui-tars` 分支：规划模型可接任意获批的
 OpenAI-compatible API，视觉定位单独调用 UI-TARS API；配置和安全边界见
 [docs/ui-tars-api-evaluation.md](./docs/ui-tars-api-evaluation.md)。
