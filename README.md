@@ -35,6 +35,10 @@ B 组自动化回归已通过，下一阶段是在测试区使用真实 Chromium
 页面和内部 GLM5.1 endpoint 采集 A/B 数据。当前尚未接入真实浏览器点击执行器，
 也不能把合成测试结果等同于目标系统现场验收。
 
+公共配置、评测框架和配套文档会同步维护到所有实验分支；各分支只隔离方案执行器。
+分支职责、统一测试入口和开发约束分别见 [test.md](./test.md) 与
+[AGENTS.md](./AGENTS.md)。
+
 ## 已实现能力
 
 | 能力 | 当前实现 |
@@ -56,7 +60,7 @@ B 组自动化回归已通过，下一阶段是在测试区使用真实 Chromium
 | 运行记忆 | SQLite 持久化任务、事件、检查点、场景和业务处理结果 |
 | KT5 接入基础 | 感知拓扑与生成拓扑共用统一 Scene Graph 契约 |
 | 三方案评测报告 | 统一归档现有方案、Browser Use、UI-TARS 的截图、感知结果和操作轨迹，使用 Manifest/SHA-256 校验证据完整性，再检查覆盖率、公平性并生成 JSON/CSV/Markdown/HTML 报告 |
-| 自动化测试 | 2026-08-13 当前分支全量 487 项通过、46 项跳过；新增覆盖 CDP、UI Graph、GLM reasoner、DAG 校验、API 和评测证据链/报告流程 |
+| 自动化测试 | 2026-08-13 `ui-graph-textflow-cdp` 全量 507 项通过、46 项跳过；各分支结果见 `test.md` |
 
 ## 业务场景
 
@@ -677,7 +681,7 @@ tests/                         自动化测试
 python -m unittest discover -s tests
 ```
 
-2026-08-13 `ui-graph-textflow-cdp` 分支开发环境全量结果为 487 项通过、46 项跳过；
+2026-08-13 `ui-graph-textflow-cdp` 分支全量结果为 507 项通过、46 项跳过；
 后续仍以当前命令输出为准。跳过项来自开发环境缺少可选 RapidOCR/OpenCV 运行依赖，
 不是测试失败。完整的 A/B 测试步骤见 [test.md](./test.md)。覆盖范围包括
 异步 capture job、
