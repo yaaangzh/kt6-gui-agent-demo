@@ -82,10 +82,12 @@ python -m unittest discover -s tests
 
 | 分支 | 结果 |
 |---|---|
-| `main` | 433 tests OK，46 skipped |
+| `main` | 450 tests OK，46 skipped |
 | `eval-current` | 517 tests OK，46 skipped |
 | `eval-browser-use` | 455 tests OK，46 skipped |
 | `eval-ui-tars` | 457 tests OK，46 skipped |
+| `ui-graph-textflow-cdp` | 507 tests OK，46 skipped |
+| `br_omniParser` | 460 tests OK，46 skipped |
 
 测试数量会随公共同步增加，以当前命令最终 `OK` 为准。公共配置和报告定向测试：
 
