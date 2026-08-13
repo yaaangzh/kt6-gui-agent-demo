@@ -15,6 +15,7 @@ from .asset_inventory import (
 )
 from .codeagent_canvas_vision import CodeAgentCanvasVisionAdapter
 from .dom_action_binding import DOMActionBindingService
+from .env_config import load_project_env
 from .http_canvas_vision import HTTPTopologyVisionAdapter
 from .hybrid_canvas_vision import HybridCanvasVisionAdapter
 from .local_cv_canvas_vision import LocalCVTopologyVisionAdapter
@@ -269,6 +270,7 @@ class AppServices:
 
 def create_services(root: Path = ROOT) -> AppServices:
     root = root.resolve()
+    load_project_env(root)
     canvas_vision = _create_canvas_vision_from_env(root)
     runtime_dir = root / "runtime_data"
     memory = SQLiteMemoryStore(runtime_dir / "kt6_memory.sqlite3")
