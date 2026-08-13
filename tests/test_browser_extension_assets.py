@@ -17,7 +17,7 @@ class BrowserExtensionAssetsTest(unittest.TestCase):
         )
 
         self.assertEqual(manifest["manifest_version"], 3)
-        self.assertEqual(manifest["version"], "0.5.1")
+        self.assertEqual(manifest["version"], "0.5.2")
         self.assertEqual(
             set(manifest["permissions"]), {"activeTab", "scripting", "storage"}
         )
@@ -48,7 +48,7 @@ class BrowserExtensionAssetsTest(unittest.TestCase):
         self.assertIn("createImageBitmap", popup_script)
         self.assertIn("capture_visible_tab_crop", popup_script)
         self.assertIn('roi_status: "unverified"', popup_script)
-        self.assertIn('ui_version: "kt6-browser-extension-v0.5.1"', popup_script)
+        self.assertIn('ui_version: "kt6-browser-extension-v0.5.2"', popup_script)
         self.assertIn("svg_element_texts: svgElementTexts", popup_script)
         self.assertIn(
             "const canvases = primaryEvidence ? [primaryEvidence] : [];",
@@ -72,7 +72,7 @@ class BrowserExtensionAssetsTest(unittest.TestCase):
         self.assertIn("captureInFlight", popup_script)
         self.assertIn("backendWaitMilliseconds", popup_script)
         self.assertIn('data-metric="page-adapter"', popup_html)
-        self.assertIn("v0.5.1", popup_html)
+        self.assertIn("v0.5.2", popup_html)
         self.assertIn("/api/perception/capture-jobs", popup_script)
         self.assertIn("client_request_id: clientRequestId", popup_script)
         self.assertIn("chrome.storage.local", popup_script)
