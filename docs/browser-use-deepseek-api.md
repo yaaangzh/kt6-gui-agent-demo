@@ -1,6 +1,6 @@
 # Browser Use + DeepSeek API 对照组
 
-本分支 `eval-browser-use-deepseek-api` 实现第二套对照方案：Browser Use 负责 DOM/CDP
+本分支 `eval-browser-use` 实现第二套对照方案：Browser Use 负责 DOM/CDP
 感知与浏览器动作，DeepSeek 的 OpenAI-compatible API 负责每一步操作规划；成功与否由
 本地确定性页面条件判断，不使用 Browser Use 自带的模型裁判。
 

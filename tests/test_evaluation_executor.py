@@ -125,7 +125,7 @@ class EvaluationExecutorTest(unittest.TestCase):
                 "name": "Browser Use API",
                 "version": "1.0",
                 "revision": "abc123",
-                "branch": "eval-browser-use-deepseek-api",
+                "branch": "eval-browser-use",
             },
             planner={
                 "provider": "deepseek",

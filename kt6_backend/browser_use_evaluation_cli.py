@@ -53,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--implementation-version", default="browser-use-0.13.7")
     parser.add_argument("--implementation-revision", required=True)
     parser.add_argument(
-        "--implementation-branch", default="eval-browser-use-deepseek-api"
+        "--implementation-branch", default="eval-browser-use"
     )
     parser.add_argument("--environment-id", required=True)
     parser.add_argument("--browser-label", default="Chromium via Browser Use 0.13.7")

@@ -139,7 +139,7 @@ class BrowserUseEvaluationTest(unittest.TestCase):
                     "name": "KT6 Browser Use DeepSeek API",
                     "version": "browser-use-0.13.7",
                     "revision": "abc123",
-                    "branch": "eval-browser-use-deepseek-api",
+                    "branch": "eval-browser-use",
                 },
                 environment={
                     "environment_id": "test-env",
