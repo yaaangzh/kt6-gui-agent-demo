@@ -10,6 +10,11 @@ __pycache__/
 # Runtime data (logs, database)
 runtime_data/
 
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
 # Virtual environment
 venv/
 .venv/
