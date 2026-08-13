@@ -153,6 +153,32 @@ UI Graph 统一 `dom/cdp/page_api/vision/text` 来源，并生成 `locate/click/
 - 前端优先立即反馈，耗时采集和识别放到异步任务，避免重复采集、重复渲染和阻塞主线程。
 - 修改主链路时必须检查响应耗时和调用次数；性能优化不能绕过既有安全与数据边界。
 
+### 5.2 Engineering design principles
+
+- Do not preserve backward compatibility. Remove obsolete paths instead of
+  adding compatibility layers, fallbacks, or migrations.
+
+- Choose the simplest implementation that fully meets the current
+  requirements. Avoid speculative abstractions, configuration, and
+  indirection.
+
+- Grow the system in layers. Start from the smallest version that works end
+  to end, and add each new capability on top of a product that already
+  works. Never trade a working product for unfinished complexity.
+
+- Keep components modular and concerns clearly separated.
+
+- Prefer established, well-maintained libraries when they reduce overall
+  complexity or improve reliability. Do not reimplement common
+  functionality without a clear reason.
+
+- Lean on the dependencies already in the project before writing your own
+  implementation or adding packages. Do not assume a library lacks a
+  capability without checking its documentation and types.
+
+- Make architectural decisions for the long term. Do not accept a stopgap
+  that only works for now and is meant to be replaced later.
+
 ## 6. 公共评测框架
 
 `evaluation_artifacts.py` 归档显式证据并生成 SHA-256 Manifest；
