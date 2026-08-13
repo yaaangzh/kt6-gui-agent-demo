@@ -152,6 +152,19 @@ CodeAgent CLI Adapter。因此：
 控件归属、新鲜页面复核、一次性令牌和审计。当前只有 dry-run，没有真实浏览器点击或
 设备下发通道。
 
+### 2.7 三方案评测报告
+
+`evaluation_artifacts.py` 为每次运行显式归档截图、CV 元数据、CV/模型/路由/融合 JSON、
+DOM/CDP、UI Graph、操作轨迹和验证结果，生成带 SHA-256 的 Manifest，并校验截图到融合
+的跨文件绑定、逐调用/逐步骤 envelope 和 UI Graph 内容 ID。视觉模型调用必须用
+`vision_model_call` ledger 记录成功、超时或无效响应；UI-TARS 按 artifact ID 逐调用绑定
+截图，SHA-256 只负责完整性；`evaluation_report.py` 和
+`evaluation_report_cli.py` 统一导入现有方案、Browser Use、UI-TARS 的
+`kt6.evaluation-run.v1` 结果，在重新校验证据后检查覆盖率、统一模型/提示/环境、安全
+违规和同模型自评偏差，并生成 JSON、CSV、Markdown、HTML、问题清单与结论。证据不全
+或哈希异常必须阻断排名。模块只处理本地文件，不调用模型或浏览器；真实三方案执行器
+尚需分别接入统一结果和证据契约。使用方法见 `docs/evaluation-reporting.md`。
+
 ## 3. 关键约束
 
 ### 3.1 数据与模型
@@ -215,7 +228,7 @@ git stash list
 python -m unittest discover -s tests
 ```
 
-当前 B 组参考基线：444 项通过、46 项按环境跳过；以当前输出 `OK` 为准。
+2026-08-13 当前分支参考基线：487 项通过、46 项按环境跳过；以当前输出 `OK` 为准。
 
 ```powershell
 python -m unittest `
@@ -302,6 +315,25 @@ git status -sb
 
 文档变更不需要重复跑全部代码测试，但必须检查 Markdown 围栏、相对链接和过时的
 分支/测试状态。
+
+### 4.8 评测报告定向测试
+
+```powershell
+python -m unittest `
+  tests.test_evaluation_artifacts `
+  tests.test_evaluation_report
+```
+
+评测 suite、runs、`artifacts/` 和报告必须放在 `runtime_data/` 或测试区专用目录；
+`record` 只允许显式 `--artifact role=path`，不得递归收集运行目录。不要提交真实运行
+结果、页面证据、模型原始输出、Manifest 或 API key。报告前必须重新校验 Manifest 和
+所有文件哈希及语义绑定；证据不完整或已改变时不能排名。有规划模型调用必须归档绑定
+run/call、生产者和同包输入的 `planner_result`；`action_trace` 必须绑定 run 并覆盖
+`step_count`；现有方案视觉调用必须归档成功/失败 ledger，UI-TARS 响应必须绑定
+call/step、截图 artifact ID 和哈希。所有图片必须有可解析尺寸和完整容器。报告不得复制
+`failure.reason`、`notes` 或本地验证引用等自由文本。
+suite、run、Manifest 和证据 JSON 必须使用严格 JSON：重复键、`NaN`、`Infinity` 一律
+拒绝，不能让后值覆盖前值改变完成率或安全指标。
 
 ## 5. 容易踩坑的地方
 

@@ -51,7 +51,8 @@ B 组自动化回归已通过，下一阶段是在测试区使用真实 Chromium
 | 拓扑变化检测 | 节点、位置、链路增删及链路语义属性变化检测；关键变化触发重规划 |
 | 运行记忆 | SQLite 持久化任务、事件、检查点、场景和业务处理结果 |
 | KT5 接入基础 | 感知拓扑与生成拓扑共用统一 Scene Graph 契约 |
-| 自动化测试 | 2026-08-07 B 组全量 444 项通过、46 项跳过；新增覆盖 CDP、UI Graph、GLM reasoner、DAG 校验和 API |
+| 三方案评测报告 | 统一归档现有方案、Browser Use、UI-TARS 的截图、感知结果和操作轨迹，使用 Manifest/SHA-256 校验证据完整性，再检查覆盖率、公平性并生成 JSON/CSV/Markdown/HTML 报告 |
+| 自动化测试 | 2026-08-13 当前分支全量 487 项通过、46 项跳过；新增覆盖 CDP、UI Graph、GLM reasoner、DAG 校验、API 和评测证据链/报告流程 |
 
 ## 业务场景
 
@@ -650,6 +651,9 @@ kt6_backend/
   perception.py                DOM / Canvas Mock 感知适配器
   perception_runtime.py        Scene 缓存、revision 与外部场景注册
   topology_change_detector.py  拓扑差异检测
+  evaluation_artifacts.py      单次运行原始证据归档、Manifest 和 SHA-256 校验
+  evaluation_report.py         三方案运行契约、指标聚合、公平性校验和报告渲染
+  evaluation_report_cli.py     初始化、记录、验证及生成评测报告的 CLI
   scene_store.py               Scene Graph 持久化
   memory.py                    任务、事件、checkpoint 和业务记忆
   models.py                    Task 与 RuntimeEvent 模型
@@ -669,7 +673,7 @@ tests/                         自动化测试
 python -m unittest discover -s tests
 ```
 
-2026-08-07 `ui-graph-textflow-cdp` 分支开发环境全量结果为 444 项通过、46 项跳过；
+2026-08-13 `ui-graph-textflow-cdp` 分支开发环境全量结果为 487 项通过、46 项跳过；
 后续仍以当前命令输出为准。跳过项来自开发环境缺少可选 RapidOCR/OpenCV 运行依赖，
 不是测试失败。完整的 A/B 测试步骤见 [test.md](./test.md)。覆盖范围包括
 异步 capture job、
@@ -709,6 +713,27 @@ Sidecar 语法检查：
 cd .\browser_sidecar
 npm run check
 ```
+
+三方案证据归档与评测报告定向测试：
+
+```powershell
+python -m unittest `
+  tests.test_evaluation_artifacts `
+  tests.test_evaluation_report
+```
+
+报告流程不会调用公网模型或启动真实页面操作。每次运行需显式归档原始截图、CV 结果及
+元数据、模型 JSON、路由和融合结果、UI Graph/DOM/CDP、操作轨迹和确定性验证结果；
+现有方案使用 `vision_model_call` ledger 保存每次视觉调用的成功、超时或无效响应，失败
+调用没有合法 `model_result` 也能如实进入完成率。Planner/UI-TARS 调用使用带 run、
+调用/步骤序号和输入引用的 envelope；UI-TARS 逐条绑定具体截图 artifact ID 与哈希，
+允许不同步骤画面相同但不允许拿未使用截图凑数。框架会核对截图 artifact→CV→路由→
+模型调用→融合的身份/哈希链、图片完整结构并重算 UI Graph 内容 ID。
+Manifest、文件或这些语义绑定有缺失/改动时，该运行不能参与排名；报告只输出脱敏指标
+和失败类别，不复制运行自由文本。
+初始化28项任务、逐次归档和生成 `report.json`、`metrics.csv`、`report.md`、
+`report.html`、`issues.md`、`conclusion.md` 的完整说明见
+[docs/evaluation-reporting.md](./docs/evaluation-reporting.md)。
 
 本轮页面感知与安全动作定向测试：
 

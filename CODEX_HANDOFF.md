@@ -28,8 +28,12 @@ B 组已经实现：
 - `capture_id/graph_id` 绑定、模型投影约束和确定性 fail-closed 校验。
 - `parent_of/owner_of/claims_business_object/supports_action/semantic_relation` 关系。
 - `GET /api/ui-graphs/{capture_id}` 与 `POST /api/ui-operations/plan`。
+- 现有方案、Browser Use、UI-TARS 的统一离线评测结果契约、逐次原始证据归档、
+Manifest/SHA-256 完整性校验、覆盖率/公平性/安全门禁，以及 JSON、CSV、Markdown、
+HTML 报告生成流程。
 
-2026-08-07 B 组完整回归为 444 项通过、46 项跳过，关键 smoke 回归 31 项通过。
+2026-08-13 当前分支完整回归为 487 项通过、46 项跳过；本轮评测证据归档与报告定向
+回归为43项通过；此前 NCE Adapter 和 UI Graph 专项回归为68项通过。
 这只证明开发环境自动化路径通过；真实 Chromium/CDP、真实 NCE/FEBS 页面和测试区
 内部 GLM5.1 endpoint 尚未现场验收。当前计划始终为 `dry_run_only=true`、
 `safe_for_execution=false`，没有真实浏览器点击执行器。
@@ -148,6 +152,9 @@ kt6_backend/ui_graph.py
 kt6_backend/ui_graph_reasoner.py
 kt6_backend/ui_operation_graph.py
 kt6_backend/ui_graph_planning.py
+kt6_backend/evaluation_artifacts.py
+kt6_backend/evaluation_report.py
+kt6_backend/evaluation_report_cli.py
 kt6_backend/asset_inventory.py
 kt6_backend/dom_action_binding.py
 kt6_backend/safe_dom_actions.py
@@ -187,6 +194,8 @@ tests/test_asset_action_integration.py
 tests/test_dom_action_api.py
 tests/test_browser_extension_assets.py
 tests/test_hybrid_canvas_vision.py
+tests/test_evaluation_artifacts.py
+tests/test_evaluation_report.py
 tests/fixtures/extension_plain_page.html
 tests/fixtures/extension_complex_page.html
 tests/fixtures/extension_canvas_page.html
@@ -357,6 +366,32 @@ POST /api/dom-actions/execute
 GET  /api/dom-actions/plans/{plan_id}
 GET  /api/dom-actions/audit
 ```
+
+### 3.4 三方案评测报告
+
+`kt6_backend.evaluation_artifacts` 和 `kt6_backend.evaluation_report_cli` 已完成报告侧
+闭环：创建28项三组 suite 草稿、生成单次 run 模板、按显式白名单归档原始截图、CV
+结果及元数据、模型/路由/融合 JSON、DOM/CDP、UI Graph、操作轨迹和验证结果，生成
+Manifest 与文件 SHA-256；有规划模型调用时要求 `planner_result` 绑定 run/call、生产者
+和同包输入，操作轨迹必须绑定 run 并覆盖全部步骤。现有方案通过
+`vision_model_call` ledger 保存视觉调用成功、超时、传输错误和无效响应；成功调用绑定
+合法 `model_result`，失败调用即使没有模型结果也能进入完成率。UI-TARS 响应按调用绑定
+具体截图 artifact ID 和 SHA，允许两个独立步骤画面相同，但不能拿未引用截图凑数量。
+归档会校验图片完整结构并交叉核对截图 artifact→CV→路由→模型调用→融合，重算 UI
+Graph 内容 ID，再严格追加 JSONL。报告前
+重新计算所有哈希，并检查
+缺失运行、同方案实现版本、统一
+DeepSeek 模型/提示/环境，聚合完成率/耗时/步骤/命中/误点/循环/模型分阶段调用、
+Token/成本/安全和证据完整率，输出 `report.json`、`metrics.csv`、`runs.csv`、
+`report.md`、`report.html`、`issues.md` 和 `conclusion.md`。缺失运行按未完成计入严格
+完成率；同一模型自评、模型/环境不一致、证据缺失或哈希异常都会阻断自动排名；有安全
+违规的方案不参与推荐。展示报告不复制 `failure.reason`、`notes` 或本地验证引用等自由
+文本，完整原始信息只保留在测试区证据归档中。
+
+报告模块完全离线，不会调用 DeepSeek、Browser Use、UI-TARS 或控制浏览器。三套真实
+执行器仍需在获批环境中分别生成 `kt6.evaluation-run.v1` 结果和对应原始证据，不能把
+归档/报告工具的合成单元测试写成真实28项对比已经完成。完整证据矩阵、归档命令和数据
+安全边界见 `docs/evaluation-reporting.md`。
 
 Demo 资产来自 `data/mock_assets.json`。生产必须将 `JSONAssetInventoryAdapter`
 替换为经过认证的 NCE/FEBS 查询 Adapter，并把权限、用户、scope 与页面采集来源
@@ -545,8 +580,9 @@ pair-level 负证据与低于阈值的 CV 链路组合会真正 rejected；全�
 
 ### 7.1 自动化测试
 
-2026-08-07 B 组开发环境全量结果为 444 项通过、46 项跳过；关键 smoke
-回归另有 31 项通过。后续通过、跳过和失败数量仍以当前命令输出为准。跳过项主要
+2026-08-13 当前分支开发环境全量结果为 487 项通过、46 项跳过；本轮评测证据归档与报告
+定向回归为43项通过，此前 NCE Adapter 和 UI Graph 专项回归为68项通过。后续通过、跳过
+和失败数量仍以当前命令输出为准。跳过项主要
 来自开发环境缺少可选 RapidOCR/OpenCV 运行依赖，不是测试失败。A/B 环境准备、样例
 和人工验收步骤统一以根目录 `test.md` 为准。
 
