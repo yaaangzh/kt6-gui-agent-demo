@@ -139,6 +139,27 @@ class VisionCacheCoordinatorTest(unittest.TestCase):
         self.assertEqual(self.adapter.calls, 3)
         self.assertEqual(forced["vision_cache"]["status"], "miss")
 
+    def test_model_and_prompt_identity_change_invalidates_cache(self):
+        frame = self.frame("frame.png", b"pixels")
+
+        class ConfiguredAdapter(RecordingAdapter):
+            def __init__(self, model, prompt_version):
+                super().__init__()
+                self.model = model
+                self.prompt_version = prompt_version
+
+        first = ConfiguredAdapter("deepseek-a", "prompt-v1")
+        second = ConfiguredAdapter("deepseek-b", "prompt-v1")
+        third = ConfiguredAdapter("deepseek-b", "prompt-v2")
+        coordinator = self.coordinator()
+        coordinator.recognize(adapter=first, page=self.page, frames=(frame,))
+        coordinator.recognize(adapter=second, page=self.page, frames=(frame,))
+        coordinator.recognize(adapter=third, page=self.page, frames=(frame,))
+
+        self.assertEqual(first.calls, 1)
+        self.assertEqual(second.calls, 1)
+        self.assertEqual(third.calls, 1)
+
     def test_concurrent_identical_requests_are_coalesced(self):
         frame = self.frame("frame.png", b"pixels")
         coordinator = self.coordinator(wait_timeout_seconds=2)

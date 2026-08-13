@@ -1,0 +1,80 @@
+# 现有方案：OpenCV/OCR + DeepSeek API
+
+本分支 `eval-current-deepseek-api` 保留当前方案的本地几何识别、路由、确定性融合、
+UI Graph 和安全校验，只将模型补充层改为 OpenAI-compatible Chat Completions。
+
+## 数据链路
+
+```text
+Canvas/SVG 截图
+→ 本地 OpenCV/OCR
+→ 场景路由
+→ 有界 CV/OCR JSON（不含截图、Base64、本地路径和完整页面 URL）
+→ DeepSeek API 语义标准化
+→ TopologyModelContract 严格校验
+→ 确定性融合 / UI Graph / dry-run DAG 校验
+```
+
+官方 DeepSeek Chat Completions 在本实现中按文本接口使用。截图 SHA-256 只用于数据
+血缘，`screenshot_sent_to_model=false`；不得把这条路线描述为 DeepSeek 直接看图。
+
+## 配置
+
+PowerShell 示例：
+
+```powershell
+$env:KT6_VISION_DRIVER = 'hybrid'
+$env:KT6_HYBRID_MODEL_DRIVER = 'openai_compatible'
+$env:KT6_MODEL_API_BASE_URL = 'https://api.deepseek.com'
+$env:KT6_MODEL_API_ALLOWED_HOSTS = 'api.deepseek.com'
+$env:KT6_MODEL_API_KEY = '<从测试区密钥服务或当前会话注入>'
+$env:KT6_MODEL_API_MODEL = '<当前实际可用的精确模型名>'
+$env:KT6_MODEL_API_MAX_TOKENS = '4096'
+$env:KT6_VISION_TIMEOUT_SECONDS = '60'
+```
+
+如需让 UI Graph 规划也走同一个 API：
+
+```powershell
+$env:KT6_UI_GRAPH_REASONER_DRIVER = 'openai_compatible'
+$env:KT6_UI_GRAPH_REASONER_TIMEOUT_SECONDS = '60'
+```
+
+不要同时配置 `KT6_VISION_ENDPOINT`、`KT6_VISION_API_KEY` 或 CodeAgent 参数。远程 API
+只允许 HTTPS，并且 host 必须精确出现在 `KT6_MODEL_API_ALLOWED_HOSTS`；客户端禁止
+重定向、压缩响应、重复 JSON key、NaN/Infinity 和 `finish_reason=length`。
+
+## 启动与检查
+
+```powershell
+python -m kt6_backend.app
+```
+
+```powershell
+$health = Invoke-RestMethod -Uri 'http://127.0.0.1:8787/api/health'
+$health.canvas_vision
+$health.ui_graph_reasoning
+```
+
+画布结果仍通过现有扩展异步采集入口产生；UI Graph 规划仍必须保持
+`dry_run_only=true`、`safe_for_execution=false`。
+
+## 自动化测试
+
+```powershell
+python -m unittest `
+  tests.test_openai_compatible_api `
+  tests.test_deepseek_topology_model `
+  tests.test_openai_compatible_ui_graph_reasoner `
+  tests.test_hybrid_canvas_vision `
+  tests.test_vision_cache_coordinator `
+  tests.test_app
+```
+
+单元测试使用注入的假 HTTP transport，不会请求真实 API。真实联调前必须确认任务文本、
+DOM 和 CV/OCR 业务标识允许发送到目标 endpoint；测试区数据不能直接发送到公网服务。
+
+参考：
+
+- [DeepSeek Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion)
+- [DeepSeek JSON Output](https://api-docs.deepseek.com/guides/json_mode/)

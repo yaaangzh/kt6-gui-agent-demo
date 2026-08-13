@@ -321,6 +321,10 @@ class VisionCacheCoordinator:
                 "endpoint",
                 "executable",
                 "agent",
+                "model",
+                "provider",
+                "prompt_version",
+                "input_mode",
                 "timeout_seconds",
             ):
                 setting = getattr(value, name, None)

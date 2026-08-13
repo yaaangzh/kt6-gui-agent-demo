@@ -298,6 +298,123 @@ class AppFactoryTest(unittest.TestCase):
             model_adapter=model_adapter,
         )
 
+    def test_create_services_builds_hybrid_deepseek_cv_text_semantics(self):
+        local_adapter = object()
+        client = object()
+        model_adapter = object()
+        hybrid_adapter = object()
+        environment = {
+            "KT6_VISION_DRIVER": "hybrid",
+            "KT6_HYBRID_MODEL_DRIVER": "openai_compatible",
+            "KT6_MODEL_API_BASE_URL": "https://api.deepseek.test/v1",
+            "KT6_MODEL_API_KEY": "secret",
+            "KT6_MODEL_API_MODEL": "deepseek-test",
+            "KT6_MODEL_API_ALLOWED_HOSTS": "api.deepseek.test",
+            "KT6_MODEL_API_MAX_TOKENS": "2048",
+            "KT6_VISION_TIMEOUT_SECONDS": "45",
+        }
+        with (
+            patch.dict(os.environ, environment, clear=True),
+            patch.object(
+                app, "LocalCVTopologyVisionAdapter", return_value=local_adapter
+            ) as local_constructor,
+            patch.object(
+                app, "OpenAICompatibleChatClient", return_value=client
+            ) as client_constructor,
+            patch.object(
+                app, "DeepSeekTopologySemanticAdapter", return_value=model_adapter
+            ) as model_constructor,
+            patch.object(
+                app, "HybridCanvasVisionAdapter", return_value=hybrid_adapter
+            ) as hybrid_constructor,
+            tempfile.TemporaryDirectory() as temp_dir,
+        ):
+            services = app.create_services(Path(temp_dir))
+
+        self.assertIs(services.page_perception.canvas_vision, hybrid_adapter)
+        local_constructor.assert_called_once_with()
+        client_constructor.assert_called_once_with(
+            base_url="https://api.deepseek.test/v1",
+            api_key="secret",
+            model="deepseek-test",
+            timeout_seconds=45.0,
+            max_tokens=2048,
+            allowed_hosts=("api.deepseek.test",),
+        )
+        model_constructor.assert_called_once_with(client)
+        hybrid_constructor.assert_called_once_with(
+            local_adapter=local_adapter,
+            model_adapter=model_adapter,
+        )
+
+    def test_deepseek_model_api_requires_complete_isolated_configuration(self):
+        base = {
+            "KT6_VISION_DRIVER": "hybrid",
+            "KT6_HYBRID_MODEL_DRIVER": "openai_compatible",
+            "KT6_MODEL_API_BASE_URL": "https://api.deepseek.test/v1",
+            "KT6_MODEL_API_KEY": "secret",
+            "KT6_MODEL_API_MODEL": "deepseek-test",
+            "KT6_MODEL_API_ALLOWED_HOSTS": "api.deepseek.test",
+        }
+        for missing in (
+            "KT6_MODEL_API_BASE_URL",
+            "KT6_MODEL_API_KEY",
+            "KT6_MODEL_API_MODEL",
+            "KT6_MODEL_API_ALLOWED_HOSTS",
+        ):
+            environment = {key: value for key, value in base.items() if key != missing}
+            with self.subTest(missing=missing), patch.dict(
+                os.environ, environment, clear=True
+            ), tempfile.TemporaryDirectory() as temp_dir, self.assertRaises(ValueError):
+                app.create_services(Path(temp_dir))
+
+        for conflict in (
+            {"KT6_VISION_ENDPOINT": "https://other.test/v1"},
+            {"KT6_CODEAGENT_EXECUTABLE": "codeagent"},
+        ):
+            with self.subTest(conflict=conflict), patch.dict(
+                os.environ, {**base, **conflict}, clear=True
+            ), tempfile.TemporaryDirectory() as temp_dir, self.assertRaisesRegex(
+                ValueError, "must not be configured"
+            ):
+                app.create_services(Path(temp_dir))
+
+    def test_create_services_builds_openai_compatible_ui_graph_reasoner(self):
+        client = object()
+        reasoner = object()
+        environment = {
+            "KT6_UI_GRAPH_REASONER_DRIVER": "openai_compatible",
+            "KT6_UI_GRAPH_REASONER_TIMEOUT_SECONDS": "55",
+            "KT6_MODEL_API_BASE_URL": "https://api.deepseek.test/v1",
+            "KT6_MODEL_API_KEY": "secret",
+            "KT6_MODEL_API_MODEL": "deepseek-test",
+            "KT6_MODEL_API_ALLOWED_HOSTS": "api.deepseek.test",
+            "KT6_MODEL_API_MAX_TOKENS": "3072",
+        }
+        with (
+            patch.dict(os.environ, environment, clear=True),
+            patch.object(
+                app, "OpenAICompatibleChatClient", return_value=client
+            ) as client_constructor,
+            patch.object(
+                app, "OpenAICompatibleUIGraphReasoner", return_value=reasoner
+            ) as reasoner_constructor,
+            tempfile.TemporaryDirectory() as temp_dir,
+        ):
+            services = app.create_services(Path(temp_dir))
+
+        self.assertIsNone(services.page_perception.canvas_vision)
+        self.assertIs(services.ui_graph_planning.reasoner, reasoner)
+        client_constructor.assert_called_once_with(
+            base_url="https://api.deepseek.test/v1",
+            api_key="secret",
+            model="deepseek-test",
+            allowed_hosts=("api.deepseek.test",),
+            timeout_seconds=55.0,
+            max_tokens=3072,
+        )
+        reasoner_constructor.assert_called_once_with(client)
+
     def test_hybrid_vision_requires_an_explicit_supported_model_driver(self):
         for environment in (
             {"KT6_VISION_DRIVER": "hybrid"},

@@ -20,6 +20,10 @@ UI Graph 新方案当前保留在 `ui-graph-textflow-cdp` 分支，与 `main` �
 A/B 验证。测试区环境准备、CDP 采集、内部 GLM 配置、接口检查、指标和通过条件见
 [test.md](./test.md)。当前代码只生成并验证不可执行的 dry-run 操作计划。
 
+现有方案的 DeepSeek API 实验实现在 `eval-current-deepseek-api` 分支：OpenCV/OCR 仍在
+本地执行，API 只接收有界的 CV/OCR JSON；配置和边界见
+[docs/current-deepseek-api.md](./docs/current-deepseek-api.md)。
+
 ## 当前 A/B 状态
 
 | 分组 | 分支 | 当前用途 |

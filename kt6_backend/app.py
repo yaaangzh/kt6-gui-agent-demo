@@ -14,11 +14,14 @@ from .asset_inventory import (
     JSONAssetInventoryAdapter,
 )
 from .codeagent_canvas_vision import CodeAgentCanvasVisionAdapter
+from .deepseek_topology_model import DeepSeekTopologySemanticAdapter
 from .dom_action_binding import DOMActionBindingService
 from .http_canvas_vision import HTTPTopologyVisionAdapter
 from .hybrid_canvas_vision import HybridCanvasVisionAdapter
 from .local_cv_canvas_vision import LocalCVTopologyVisionAdapter
 from .memory import SQLiteMemoryStore
+from .openai_compatible_api import OpenAICompatibleChatClient
+from .openai_compatible_ui_graph_reasoner import OpenAICompatibleUIGraphReasoner
 from .page_capture_jobs import PageCaptureJobCapacityError, PageCaptureJobService
 from .page_perception import PagePerceptionService, SQLitePageCaptureStore
 from .perception import HybridPerception
@@ -35,7 +38,11 @@ from .ui_graph_planning import (
     UIGraphPlanningService,
     UIGraphReasonerNotConfiguredError,
 )
-from .ui_graph_reasoner import HTTPUIGraphReasoner, UIGraphReasoningError
+from .ui_graph_reasoner import (
+    HTTPUIGraphReasoner,
+    UIGraphReasoner,
+    UIGraphReasoningError,
+)
 from .vision_recognition import CanvasVisionAdapter
 from .vision_cache_coordinator import VisionCacheCoordinator
 from .vision_result_cache import SQLiteVisionResultCacheStore
@@ -50,7 +57,13 @@ VISION_TIMEOUT_ENV = "KT6_VISION_TIMEOUT_SECONDS"
 CODEAGENT_EXECUTABLE_ENV = "KT6_CODEAGENT_EXECUTABLE"
 CODEAGENT_AGENT_ENV = "KT6_CODEAGENT_AGENT"
 HYBRID_MODEL_DRIVER_ENV = "KT6_HYBRID_MODEL_DRIVER"
+MODEL_API_BASE_URL_ENV = "KT6_MODEL_API_BASE_URL"
+MODEL_API_KEY_ENV = "KT6_MODEL_API_KEY"
+MODEL_API_MODEL_ENV = "KT6_MODEL_API_MODEL"
+MODEL_API_ALLOWED_HOSTS_ENV = "KT6_MODEL_API_ALLOWED_HOSTS"
+MODEL_API_MAX_TOKENS_ENV = "KT6_MODEL_API_MAX_TOKENS"
 UI_GRAPH_REASONER_ENDPOINT_ENV = "KT6_UI_GRAPH_REASONER_ENDPOINT"
+UI_GRAPH_REASONER_DRIVER_ENV = "KT6_UI_GRAPH_REASONER_DRIVER"
 UI_GRAPH_REASONER_API_KEY_ENV = "KT6_UI_GRAPH_REASONER_API_KEY"
 UI_GRAPH_REASONER_ALLOWED_HOSTS_ENV = "KT6_UI_GRAPH_REASONER_ALLOWED_HOSTS"
 UI_GRAPH_REASONER_TIMEOUT_ENV = "KT6_UI_GRAPH_REASONER_TIMEOUT_SECONDS"
@@ -85,6 +98,23 @@ def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | N
     codeagent_executable = _optional_env(CODEAGENT_EXECUTABLE_ENV)
     codeagent_agent = _optional_env(CODEAGENT_AGENT_ENV)
     hybrid_model_driver = _optional_env(HYBRID_MODEL_DRIVER_ENV)
+    model_api_base_url = _optional_env(MODEL_API_BASE_URL_ENV)
+    model_api_key = _optional_env(MODEL_API_KEY_ENV)
+    model_api_model = _optional_env(MODEL_API_MODEL_ENV)
+    model_api_allowed_hosts = _optional_env(MODEL_API_ALLOWED_HOSTS_ENV)
+    model_api_max_tokens = _optional_env(MODEL_API_MAX_TOKENS_ENV)
+    model_api_companions = (
+        (MODEL_API_BASE_URL_ENV, model_api_base_url),
+        (MODEL_API_KEY_ENV, model_api_key),
+        (MODEL_API_MODEL_ENV, model_api_model),
+        (MODEL_API_ALLOWED_HOSTS_ENV, model_api_allowed_hosts),
+        (MODEL_API_MAX_TOKENS_ENV, model_api_max_tokens),
+    )
+    ui_graph_reasoner_driver = _optional_env(UI_GRAPH_REASONER_DRIVER_ENV)
+    model_api_is_for_reasoner = (
+        ui_graph_reasoner_driver is not None
+        and ui_graph_reasoner_driver.casefold() == "openai_compatible"
+    )
 
     if driver is None and (codeagent_executable is not None or codeagent_agent is not None):
         raise ValueError(
@@ -95,6 +125,15 @@ def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | N
         raise ValueError(
             f"{VISION_DRIVER_ENV}=hybrid is required when "
             f"{HYBRID_MODEL_DRIVER_ENV} is configured"
+        )
+    if (
+        driver is None
+        and not model_api_is_for_reasoner
+        and any(value is not None for _, value in model_api_companions)
+    ):
+        raise ValueError(
+            f"{VISION_DRIVER_ENV}=hybrid and "
+            f"{HYBRID_MODEL_DRIVER_ENV}=openai_compatible are required for model API configuration"
         )
 
     if driver is None and endpoint is None:
@@ -129,6 +168,7 @@ def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | N
                 (CODEAGENT_EXECUTABLE_ENV, codeagent_executable),
                 (CODEAGENT_AGENT_ENV, codeagent_agent),
                 (HYBRID_MODEL_DRIVER_ENV, hybrid_model_driver),
+                *( () if model_api_is_for_reasoner else model_api_companions ),
             )
             if value is not None
         ]
@@ -144,9 +184,9 @@ def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | N
                 f"{HYBRID_MODEL_DRIVER_ENV} is required for the hybrid vision driver"
             )
         effective_driver = hybrid_model_driver.strip().lower()
-        if effective_driver not in {"http", "codeagent_cli"}:
+        if effective_driver not in {"http", "codeagent_cli", "openai_compatible"}:
             raise ValueError(
-                f"{HYBRID_MODEL_DRIVER_ENV} must be http or codeagent_cli"
+                f"{HYBRID_MODEL_DRIVER_ENV} must be http, codeagent_cli or openai_compatible"
             )
     else:
         if hybrid_model_driver is not None:
@@ -183,6 +223,7 @@ def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | N
             for name, value in (
                 (VISION_ENDPOINT_ENV, endpoint),
                 (VISION_API_KEY_ENV, api_key),
+                *( () if model_api_is_for_reasoner else model_api_companions ),
             )
             if value is not None
         ]
@@ -203,10 +244,66 @@ def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | N
             )
         return model_adapter
 
+    if effective_driver == "openai_compatible":
+        conflicting = [
+            name
+            for name, value in (
+                (VISION_ENDPOINT_ENV, endpoint),
+                (VISION_API_KEY_ENV, api_key),
+                (CODEAGENT_EXECUTABLE_ENV, codeagent_executable),
+                (CODEAGENT_AGENT_ENV, codeagent_agent),
+            )
+            if value is not None
+        ]
+        if conflicting:
+            raise ValueError(
+                f"{', '.join(conflicting)} must not be configured for openai_compatible"
+            )
+        required = [
+            name
+            for name, value in model_api_companions[:4]
+            if value is None
+        ]
+        if required:
+            raise ValueError(
+                f"{', '.join(required)} are required for openai_compatible"
+            )
+        max_tokens = 4096
+        if model_api_max_tokens is not None:
+            try:
+                max_tokens = int(model_api_max_tokens)
+            except ValueError:
+                raise ValueError(f"{MODEL_API_MAX_TOKENS_ENV} must be an integer") from None
+        allowed_hosts = tuple(
+            host.strip()
+            for host in (model_api_allowed_hosts or "").split(",")
+            if host.strip()
+        )
+        client = OpenAICompatibleChatClient(
+            base_url=model_api_base_url or "",
+            api_key=model_api_key or "",
+            model=model_api_model or "",
+            timeout_seconds=timeout_seconds,
+            max_tokens=max_tokens,
+            allowed_hosts=allowed_hosts,
+        )
+        return HybridCanvasVisionAdapter(
+            local_adapter=LocalCVTopologyVisionAdapter(),
+            model_adapter=DeepSeekTopologySemanticAdapter(client),
+        )
+
     if codeagent_executable is not None or codeagent_agent is not None:
         raise ValueError(
             f"{CODEAGENT_EXECUTABLE_ENV} and {CODEAGENT_AGENT_ENV} require "
             f"{VISION_DRIVER_ENV}=codeagent_cli"
+        )
+    configured_model_api = [
+        name for name, value in model_api_companions if value is not None
+    ]
+    if configured_model_api and not model_api_is_for_reasoner:
+        raise ValueError(
+            f"{', '.join(configured_model_api)} require "
+            f"{HYBRID_MODEL_DRIVER_ENV}=openai_compatible"
         )
     if endpoint is None:
         raise ValueError(f"{VISION_ENDPOINT_ENV} is required for the http vision driver")
@@ -264,9 +361,10 @@ def _canvas_vision_health(adapter: Any | None) -> dict[str, Any]:
     return result
 
 
-def _create_ui_graph_reasoner_from_env() -> HTTPUIGraphReasoner | None:
+def _create_ui_graph_reasoner_from_env() -> UIGraphReasoner | None:
     """Build the internal GLM adapter without exposing its endpoint or token."""
 
+    driver = _optional_env(UI_GRAPH_REASONER_DRIVER_ENV)
     endpoint = _optional_env(UI_GRAPH_REASONER_ENDPOINT_ENV)
     api_key = _optional_env(UI_GRAPH_REASONER_API_KEY_ENV)
     timeout_text = _optional_env(UI_GRAPH_REASONER_TIMEOUT_ENV)
@@ -276,6 +374,65 @@ def _create_ui_graph_reasoner_from_env() -> HTTPUIGraphReasoner | None:
         for host in (allowed_hosts_text or "").split(",")
         if host.strip()
     )
+    selected_driver = (driver or ("http" if endpoint is not None else "")).casefold()
+    if selected_driver not in {"", "http", "openai_compatible"}:
+        raise ValueError(
+            f"{UI_GRAPH_REASONER_DRIVER_ENV} must be http or openai_compatible"
+        )
+    if selected_driver == "openai_compatible":
+        conflicting = [
+            name
+            for name, value in (
+                (UI_GRAPH_REASONER_ENDPOINT_ENV, endpoint),
+                (UI_GRAPH_REASONER_API_KEY_ENV, api_key),
+                (UI_GRAPH_REASONER_ALLOWED_HOSTS_ENV, allowed_hosts_text),
+            )
+            if value is not None
+        ]
+        if conflicting:
+            raise ValueError(
+                f"{', '.join(conflicting)} must not be configured for openai_compatible"
+            )
+        base_url = _optional_env(MODEL_API_BASE_URL_ENV)
+        model_api_key = _optional_env(MODEL_API_KEY_ENV)
+        model = _optional_env(MODEL_API_MODEL_ENV)
+        model_hosts_text = _optional_env(MODEL_API_ALLOWED_HOSTS_ENV)
+        max_tokens_text = _optional_env(MODEL_API_MAX_TOKENS_ENV)
+        required = [
+            name
+            for name, value in (
+                (MODEL_API_BASE_URL_ENV, base_url),
+                (MODEL_API_KEY_ENV, model_api_key),
+                (MODEL_API_MODEL_ENV, model),
+                (MODEL_API_ALLOWED_HOSTS_ENV, model_hosts_text),
+            )
+            if value is None
+        ]
+        if required:
+            raise ValueError(
+                f"{', '.join(required)} are required for openai_compatible"
+            )
+        timeout_seconds = _parse_ui_graph_reasoner_timeout(timeout_text)
+        max_tokens = 4096
+        if max_tokens_text is not None:
+            try:
+                max_tokens = int(max_tokens_text)
+            except ValueError:
+                raise ValueError(f"{MODEL_API_MAX_TOKENS_ENV} must be an integer") from None
+        client = OpenAICompatibleChatClient(
+            base_url=base_url or "",
+            api_key=model_api_key or "",
+            model=model or "",
+            allowed_hosts=tuple(
+                host.strip()
+                for host in (model_hosts_text or "").split(",")
+                if host.strip()
+            ),
+            timeout_seconds=timeout_seconds,
+            max_tokens=max_tokens,
+        )
+        return OpenAICompatibleUIGraphReasoner(client)
+
     if endpoint is None:
         companions = [
             name
@@ -293,6 +450,16 @@ def _create_ui_graph_reasoner_from_env() -> HTTPUIGraphReasoner | None:
             )
         return None
 
+    timeout_seconds = _parse_ui_graph_reasoner_timeout(timeout_text)
+    return HTTPUIGraphReasoner(
+        endpoint=endpoint,
+        api_key=api_key,
+        allowed_hosts=allowed_hosts,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def _parse_ui_graph_reasoner_timeout(timeout_text: str | None) -> float:
     timeout_seconds = DEFAULT_UI_GRAPH_REASONER_TIMEOUT_SECONDS
     if timeout_text is not None:
         try:
@@ -309,12 +476,7 @@ def _create_ui_graph_reasoner_from_env() -> HTTPUIGraphReasoner | None:
                 f"{UI_GRAPH_REASONER_TIMEOUT_ENV} must be a finite number in (0, "
                 f"{MAX_UI_GRAPH_REASONER_TIMEOUT_SECONDS:g}]"
             )
-    return HTTPUIGraphReasoner(
-        endpoint=endpoint,
-        api_key=api_key,
-        allowed_hosts=allowed_hosts,
-        timeout_seconds=timeout_seconds,
-    )
+    return timeout_seconds
 
 
 @dataclass(frozen=True)
