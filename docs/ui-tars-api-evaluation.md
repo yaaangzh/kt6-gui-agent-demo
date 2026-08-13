@@ -1,12 +1,13 @@
-# DeepSeek + UI-TARS API 对照组
+# 大模型 API + UI-TARS API 对照组
 
-本分支 `eval-ui-tars` 实现第三套对照方案：DeepSeek API 生成当前步骤目标，UI-TARS
-OpenAI-compatible API 基于当前截图返回一个坐标动作，Playwright 只负责截图和执行该
-动作。这样三组都使用相同 DeepSeek 规划模型，同时单独测量 UI-TARS 的视觉定位能力。
+本分支 `eval-ui-tars` 实现第三套对照方案：可配置的大模型 API 生成当前步骤目标，
+UI-TARS OpenAI-compatible API 基于当前截图返回一个坐标动作，Playwright 只负责截图
+和执行该动作。三组评测应使用 suite 指定的同一供应商和精确规划模型，同时单独测量
+UI-TARS 的视觉定位能力。
 
 ```text
 Playwright 当前截图
-  -> DeepSeek API 生成当前子目标（不接收图片）
+  -> 可配置大模型 API 生成当前子目标（不接收图片）
   -> UI-TARS API 接收子目标和截图，返回一个动作
   -> 严格动作语法和坐标边界校验
   -> Playwright 执行一个动作
@@ -31,20 +32,22 @@ python -m playwright install chromium
 ## 2. 两个 API
 
 ```powershell
-$env:KT6_DEEPSEEK_API_BASE_URL = 'https://api.deepseek.com/v1'
-$env:KT6_DEEPSEEK_API_KEY = '<仅当前测试窗口>'
-$env:KT6_DEEPSEEK_MODEL = '<三组统一的精确模型名>'
-$env:KT6_DEEPSEEK_API_ALLOWED_HOSTS = 'api.deepseek.com'
+$env:KT6_MODEL_API_PROVIDER = '<规划模型供应商或内网网关标识>'
+$env:KT6_MODEL_API_BASE_URL = 'https://<获批规划模型网关>/v1'
+$env:KT6_MODEL_API_KEY = '<仅当前测试窗口>'
+$env:KT6_MODEL_API_MODEL = '<三组统一的精确模型名>'
+$env:KT6_MODEL_API_ALLOWED_HOSTS = '<获批规划模型网关主机>'
 
 $env:KT6_UI_TARS_API_BASE_URL = 'https://<批准的UI-TARS服务>/v1'
 $env:KT6_UI_TARS_API_KEY = '<仅当前测试窗口>'
+$env:KT6_UI_TARS_API_PROVIDER = 'ui-tars'
 $env:KT6_UI_TARS_MODEL = '<UI-TARS精确模型名>'
 $env:KT6_UI_TARS_API_ALLOWED_HOSTS = '<批准的UI-TARS服务主机>'
 ```
 
-两个远程 endpoint 都要求 HTTPS、精确主机白名单和各自的显式放行参数。DeepSeek 接收
+两个远程 endpoint 都要求 HTTPS、精确主机白名单和各自的显式放行参数。规划模型接收
 任务、截图哈希和历史动作；UI-TARS 会接收页面截图。受限测试区数据未经批准不得发送到
-公网 endpoint，应改用内网兼容服务。API key 不写命令行、证据或报告。
+任何公网 endpoint，应改用内网兼容服务。API key 不写命令行、证据或报告。
 
 ## 3. 动作安全边界
 
@@ -68,7 +71,7 @@ type / hotkey / scroll / wait / finished / call_user
 
 任务 JSON 与 Browser Use 分支使用同一 `kt6.evaluation-execution-task.v1` 格式，并在
 `validation.assertions` 中给出本地确定性条件。支持 `url_equals`、`url_contains`、
-`title_contains`、`text_contains`。UI-TARS 或 DeepSeek 声称完成不算成功；只有模型返回
+`title_contains`、`text_contains`。UI-TARS 或规划模型声称完成不算成功；只有模型返回
 `finished()`、断言全部通过、且真实执行已显式授权时才计为成功。
 
 ## 5. 执行一次
@@ -95,7 +98,7 @@ loopback。默认启动隔离 Chromium，viewport 为 `1920x1080`。
 每一步都会归档一张 `original_screenshot`，即使连续两步像素完全相同也保留两个独立
 artifact ID。另保存：
 
-- `planner_result`：同一 DeepSeek 模型的逐步子目标；
+- `planner_result`：suite 指定的统一规划模型逐步子目标，含真实供应商和模型名；
 - `ui_tars_response`：模型原始 prediction、严格解析后的动作、截图 ID 和 SHA-256；
 - `ui_tars_actions`：坐标模式和动作清单；
 - `action_trace`：实际状态、耗时和失败；

@@ -10,6 +10,10 @@
 [CODEX_HANDOFF.md](./CODEX_HANDOFF.md)；其中记录了当前工作目录、分阶段拓扑链路、
 CodeAgentCLI 的 Windows 启动方式、真实图片验证结论、已知限制和下一步建议。
 
+UI-TARS 对照执行器保留在 `eval-ui-tars` 分支：规划模型可接任意获批的
+OpenAI-compatible API，视觉定位单独调用 UI-TARS API；配置和安全边界见
+[docs/ui-tars-api-evaluation.md](./docs/ui-tars-api-evaluation.md)。
+
 ## 已实现能力
 
 | 能力 | 当前实现 |

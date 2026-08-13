@@ -1,4 +1,4 @@
-"""CLI for one DeepSeek-planned UI-TARS API evaluation repetition."""
+"""CLI for one model-planned UI-TARS API evaluation repetition."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from .ui_tars_evaluation import (
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run one isolated DeepSeek + UI-TARS API evaluation."
+        description="Run one isolated model API + UI-TARS API evaluation."
     )
     parser.add_argument("--suite", required=True, type=Path)
     parser.add_argument("--task", required=True, type=Path)
@@ -33,9 +33,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--workspace", required=True, type=Path)
     parser.add_argument("--repetition", required=True, type=int)
     parser.add_argument("--planner-api-base-url", default=None)
+    parser.add_argument("--planner-provider", default=None)
     parser.add_argument("--planner-model", default=None)
     parser.add_argument("--planner-api-allowed-host", action="append", default=None)
     parser.add_argument("--vision-api-base-url", default=None)
+    parser.add_argument("--vision-provider", default=None)
     parser.add_argument("--vision-model", default=None)
     parser.add_argument("--vision-api-allowed-host", action="append", default=None)
     parser.add_argument("--allow-remote-planner", action="store_true")
@@ -68,16 +70,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         if suite["suite_id"] != task.suite_id:
             raise EvaluationExecutionError("execution task does not belong to suite")
         planner_hosts = args.planner_api_allowed_host or _hosts_env(
-            "KT6_DEEPSEEK_API_ALLOWED_HOSTS"
+            "KT6_MODEL_API_ALLOWED_HOSTS"
         )
         vision_hosts = args.vision_api_allowed_host or _hosts_env(
             "KT6_UI_TARS_API_ALLOWED_HOSTS"
         )
         planner = ModelEndpointConfig(
             base_url=args.planner_api_base_url
-            or required_env("KT6_DEEPSEEK_API_BASE_URL"),
-            api_key=required_env("KT6_DEEPSEEK_API_KEY"),
-            model=args.planner_model or required_env("KT6_DEEPSEEK_MODEL"),
+            or required_env("KT6_MODEL_API_BASE_URL"),
+            api_key=required_env("KT6_MODEL_API_KEY"),
+            provider=args.planner_provider or required_env("KT6_MODEL_API_PROVIDER"),
+            model=args.planner_model or required_env("KT6_MODEL_API_MODEL"),
             allowed_hosts=frozenset(planner_hosts),
             allow_remote=args.allow_remote_planner,
         )
@@ -85,6 +88,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             base_url=args.vision_api_base_url
             or required_env("KT6_UI_TARS_API_BASE_URL"),
             api_key=required_env("KT6_UI_TARS_API_KEY"),
+            provider=args.vision_provider
+            or optional_env("KT6_UI_TARS_API_PROVIDER")
+            or "ui-tars",
             model=args.vision_model or required_env("KT6_UI_TARS_MODEL"),
             allowed_hosts=frozenset(vision_hosts),
             allow_remote=args.allow_remote_vision,
@@ -110,7 +116,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 repetition=args.repetition,
                 config=config,
                 implementation={
-                    "name": "KT6 DeepSeek + UI-TARS API",
+                    "name": "KT6 Model API + UI-TARS API",
                     "version": args.implementation_version,
                     "revision": args.implementation_revision,
                     "branch": args.implementation_branch,

@@ -155,8 +155,8 @@ class UITarsEvaluationTest(unittest.TestCase):
             title="UI-TARS comparison",
             task_count=1,
             repetitions=1,
-            planner_provider="deepseek",
-            planner_model="deepseek-test",
+            planner_provider="test-gateway",
+            planner_model="generic-model-test",
             environment_id="test-env",
         )
         self.suite["status"] = "ready"
@@ -188,11 +188,13 @@ class UITarsEvaluationTest(unittest.TestCase):
         self.planner_endpoint = ModelEndpointConfig(
             base_url="http://127.0.0.1:9001/v1",
             api_key="planner-secret",
-            model="deepseek-test",
+            provider="test-gateway",
+            model="generic-model-test",
         )
         self.vision_endpoint = ModelEndpointConfig(
             base_url="http://127.0.0.1:9002/v1",
             api_key="vision-secret",
+            provider="ui-tars",
             model="ui-tars-test",
         )
 
@@ -258,6 +260,7 @@ class UITarsEvaluationTest(unittest.TestCase):
         endpoint = ModelEndpointConfig(
             base_url="https://ui-tars.example.test/v1",
             api_key="secret",
+            provider="ui-tars",
             model="ui-tars-test",
             allowed_hosts=frozenset({"ui-tars.example.test"}),
         )
@@ -292,6 +295,8 @@ class UITarsEvaluationTest(unittest.TestCase):
         self.assertEqual(recorded["outcome"], "success")
         self.assertEqual(recorded["metrics"]["planner_model_calls"], 2)
         self.assertEqual(recorded["metrics"]["vision_model_calls"], 2)
+        self.assertEqual(recorded["planner"]["provider"], "test-gateway")
+        self.assertEqual(recorded["planner"]["model"], "generic-model-test")
         self.assertEqual(recorded["model_calls"], 4)
         self.assertTrue(operator.closed)
         loaded = load_run_records(self.root / "evaluation" / "runs.jsonl")
@@ -330,7 +335,7 @@ class UITarsEvaluationTest(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
-                "KT6_DEEPSEEK_API_KEY": "PLANNER-SECRET",
+                "KT6_MODEL_API_KEY": "PLANNER-SECRET",
                 "KT6_UI_TARS_API_KEY": "VISION-SECRET",
             },
             clear=True,

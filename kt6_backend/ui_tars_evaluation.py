@@ -33,7 +33,7 @@ from .openai_compatible_api import (
 
 UI_TARS_RESPONSE_SCHEMA_VERSION = "kt6.evaluation-ui-tars-response.v1"
 PLANNER_CALL_SCHEMA_VERSION = "kt6.evaluation-planner-call.v1"
-UI_TARS_ADAPTER_PROMPT_VERSION = "deepseek-plan-ui-tars-ground-v1"
+UI_TARS_ADAPTER_PROMPT_VERSION = "model-api-plan-ui-tars-ground-v1"
 
 _ACTION_LINE = re.compile(r"^\s*Action\s*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE)
 _ALLOWED_ACTIONS = frozenset(
@@ -74,13 +74,21 @@ _SAFE_HOTKEYS = frozenset(
 class ModelEndpointConfig:
     base_url: str
     api_key: str = field(repr=False)
-    model: str = ""
+    provider: str
+    model: str
     allowed_hosts: frozenset[str] = frozenset()
     timeout_seconds: float = 90.0
     max_tokens: int = 4096
     allow_remote: bool = False
 
     def client(self) -> OpenAICompatibleChatClient:
+        if (
+            not isinstance(self.provider, str)
+            or not self.provider.strip()
+            or len(self.provider.strip()) > 100
+            or any(char in self.provider for char in "\r\n")
+        ):
+            raise EvaluationExecutionError("model endpoint provider is invalid")
         try:
             client = OpenAICompatibleChatClient(
                 base_url=self.base_url,
@@ -225,7 +233,7 @@ class BrowserOperator(Protocol):
         ...
 
 
-class DeepSeekStepPlanner:
+class OpenAICompatibleStepPlanner:
     def __init__(self, config: ModelEndpointConfig) -> None:
         self.client = config.client()
 
@@ -541,7 +549,7 @@ async def run_ui_tars_evaluation(
         raise EvaluationExecutionError("configured max_steps exceeds task.step_limit")
     run_id = f"ui_tars-{task.task_id}-r{repetition}"
     workspace = EvaluationWorkspace(workspace_root, run_id)
-    planner_runtime = planner or DeepSeekStepPlanner(config.planner)
+    planner_runtime = planner or OpenAICompatibleStepPlanner(config.planner)
     vision_runtime = vision_model or UITarsAPIModel(config.vision)
     browser = operator or PlaywrightBrowserOperator(config)
     started_at = utc_now()
@@ -588,7 +596,7 @@ async def run_ui_tars_evaluation(
                     "run_id": run_id,
                     "call_index": step_index,
                     "producer": {
-                        "provider": "deepseek",
+                        "provider": config.planner.provider,
                         "model": config.planner.model,
                     },
                     "input_refs": [screenshot_sha],
@@ -621,7 +629,7 @@ async def run_ui_tars_evaluation(
                     "step_index": step_index,
                     "call_index": step_index,
                     "producer": {
-                        "provider": "ui-tars",
+                        "provider": config.vision.provider,
                         "model": config.vision.model,
                     },
                     "screenshot_artifact_id": screenshot_id,
@@ -740,7 +748,7 @@ async def run_ui_tars_evaluation(
         step_count=step_count,
         implementation=implementation,
         planner={
-            "provider": "deepseek",
+            "provider": config.planner.provider,
             "model": config.planner.model,
             "adapter_prompt_version": UI_TARS_ADAPTER_PROMPT_VERSION,
         },
@@ -986,8 +994,8 @@ def _is_loopback(host: str) -> bool:
 __all__ = [
     "BrowserObservation",
     "BrowserOperator",
-    "DeepSeekStepPlanner",
     "ModelEndpointConfig",
+    "OpenAICompatibleStepPlanner",
     "PlannerDecision",
     "PlannerModel",
     "PlaywrightBrowserOperator",
