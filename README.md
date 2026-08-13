@@ -18,6 +18,10 @@ UI-TARS 对照执行器保留在 `eval-ui-tars` 分支：规划模型可接任�
 OpenAI-compatible API，视觉定位单独调用 UI-TARS API；配置和安全边界见
 [docs/ui-tars-api-evaluation.md](./docs/ui-tars-api-evaluation.md)。
 
+公共配置、评测框架和配套文档会同步维护到所有实验分支；各分支只隔离方案执行器。
+分支职责、统一测试入口和开发约束分别见 [test.md](./test.md) 与
+[AGENTS.md](./AGENTS.md)。
+
 ## 已实现能力
 
 | 能力 | 当前实现 |
@@ -36,7 +40,7 @@ OpenAI-compatible API，视觉定位单独调用 UI-TARS API；配置和安全�
 | 拓扑变化检测 | 节点、位置、链路增删及链路语义属性变化检测；关键变化触发重规划 |
 | 运行记忆 | SQLite 持久化任务、事件、检查点、场景和业务处理结果 |
 | KT5 接入基础 | 感知拓扑与生成拓扑共用统一 Scene Graph 契约 |
-| 自动化测试 | 2026-08-04 开发环境全量 362 项通过、42 项跳过；已覆盖页面异步任务、DOM/视觉分治、资产绑定与安全动作等链路 |
+| 自动化测试 | 2026-08-13 `eval-ui-tars` 全量 457 项通过、46 项跳过；各分支结果见 `test.md` |
 
 ## 业务场景
 
@@ -639,7 +643,8 @@ tests/                         自动化测试
 python -m unittest discover -s tests
 ```
 
-2026-08-04 开发环境全量结果为 362 项通过、42 项跳过；后续仍以当前命令输出为准。
+2026-08-13 `eval-ui-tars` 开发环境全量结果为 457 项通过、46 项跳过；各分支基线见
+[test.md](./test.md)，后续仍以当前命令输出为准。
 跳过项来自开发环境缺少可选 RapidOCR/OpenCV 运行依赖，不是测试失败。覆盖范围包括
 异步 capture job、
 弹窗重开恢复、显式页面 API、节点来源/交互契约、DOM 语义投影、六步操作计划、
