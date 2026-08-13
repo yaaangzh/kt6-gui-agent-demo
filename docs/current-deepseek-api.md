@@ -1,6 +1,6 @@
 # 现有方案：OpenCV/OCR + DeepSeek API
 
-本分支 `eval-current-deepseek-api` 保留当前方案的本地几何识别、路由、确定性融合、
+本分支 `eval-current` 保留当前方案的本地几何识别、路由、确定性融合、
 UI Graph 和安全校验，只将模型补充层改为 OpenAI-compatible Chat Completions。
 
 ## 数据链路
