@@ -1,218 +1,160 @@
 # AGENTS.md
 
-本文件供在 `D:\yangzehui\FreeStyleCopilot` 工作的开发 Agent 使用。开始修改前，先读
-`README.md`、`CODEX_HANDOFF.md` 和 `test.md`，再执行 Git 状态检查。不要只依据旧对话、
-历史哈希或缓存的远端状态继续工作。
+本文件适用于 `D:\yangzehui\FreeStyleCopilot` 的所有本地分支。开始修改前依次阅读
+`README.md`、`CODEX_HANDOFF.md`、`test.md`，再检查当前分支、状态、最近提交和 stash。
+不得只依据旧对话、缓存哈希或另一个分支的文件继续开发。
 
-## 1. 项目定位
+## 1. 项目与分支
 
-KT6 / FreeStyleCopilot 是无线网络运维 PoC，目标是把自然语言意图、页面感知、拓扑
-理解、业务 Playbook、人在环确认和受控操作计划串成一条可审计链路。
+KT6 / FreeStyleCopilot 是无线网络运维 PoC，把自然语言意图、页面感知、拓扑理解、
+业务 Playbook、人在环确认和受控操作串成可审计链路。
 
-当前主要分支：
-
-| 分支 | 用途 |
+| 分支 | 职责 |
 |---|---|
-| `main` | 现有 DOM、Canvas、OpenCV/OCR、Runtime 和安全动作链基线 |
-| `ui-graph-textflow-cdp` | Playwright/CDP、多源 UI Graph、操作 DAG 规划实验分支 |
-| `br_omniParser` | 已停止作为当前 A/B 方案的 OmniParser 试点，不要混入 UI Graph 分支 |
+| `main` | Runtime、页面感知、安全动作链和公共评测/证据框架 |
+| `eval-current` | 现有 OpenCV/OCR + 任意获批 OpenAI-compatible 模型 API |
+| `eval-browser-use` | Browser Use/CDP + 任意获批 OpenAI-compatible 规划模型 API |
+| `eval-ui-tars` | 通用规划模型 API + 独立 UI-TARS 视觉定位 API + Playwright |
+| `ui-graph-textflow-cdp` | CDP、多源 UI Graph、操作 DAG 的实验分支 |
+| `br_omniParser` | 已停止的 OmniParser 试点，仅保留历史对照，不混入当前方案 |
 
-新 UI Graph 方案必须在独立分支完成真实测试后再决定是否合入 `main`。未经用户明确
-要求，不要合并、变基、删除分支、清理 stash、创建 PR 或改写远端历史。
+功能实验保持分支隔离；公共基础设施必须同步到所有仍保留的分支。公共修改包括：
 
-## 2. 项目架构
+- `.gitignore`、`.env.example`、`kt6_backend/env_config.py`；
+- 评测结果、证据归档、统一报告和共享 API 客户端；
+- `README.md`、`CODEX_HANDOFF.md`、`test.md`、`AGENTS.md` 中的公共规则；
+- 与上述公共代码直接对应的测试。
 
-### 2.1 Runtime 与业务链路
+同步公共提交时保留各分支专属实现和文档，不用某一分支的 README 整文件覆盖其他分支。
+未经用户明确要求，不合并功能分支、不变基、不删除分支、不清理 stash、不创建 PR、不
+改写远端历史。
+
+## 2. 公共架构
 
 ```text
 用户自然语言
-→ Intent Agent
-→ Playbook Router
+→ Intent Agent / Playbook Router
 → Runtime 状态机
-→ Tool Registry / Business Adapter
-→ Scene / Page Perception
+→ Page / Scene Perception
+→ DOM、Canvas、CV/OCR、模型或 CDP 证据
 → 人在环确认
 → dry-run 安全动作计划
 ```
 
-关键文件：
+主要 Runtime 文件：
 
 ```text
 kt6_backend/app.py
 kt6_backend/runtime.py
 kt6_backend/agent.py
 kt6_backend/router.py
-kt6_backend/playbook_loader.py
-kt6_backend/tool_registry.py
-kt6_backend/tools.py
-```
-
-### 2.2 页面感知
-
-浏览器扩展负责一次采集中的 DOM/ARIA 与 Canvas/SVG 分治：
-
-```text
-browser_extension/
-  content-collector.js    DOM/ARIA、selector、frame、业务 ID、视觉 ROI
-  popup-v2.js             提交异步 capture job、恢复任务进度
-  manifest.json           Chrome/Edge 扩展权限与版本
-```
-
-后端处理入口：
-
-```text
 kt6_backend/page_perception.py
 kt6_backend/page_capture_jobs.py
+kt6_backend/safe_dom_actions.py
 ```
 
-Canvas 视觉链路：
+浏览器扩展在一次显式采集中处理 DOM/ARIA 与 Canvas/SVG；耗时识别由异步 capture job
+执行。扩展 capture 与 CDP Sidecar capture 是独立采集，不能误称已经实时合并。
+
+Canvas 基线路线：
 
 ```text
-Canvas/SVG 截图
-→ OpenCV/OCR 提取文字、坐标和像素连线
-→ codeagent.bat 调用测试区内部 GLM5.1 补充语义
-→ 确定性融合
-→ vision/text 证据
+截图 → OpenCV/OCR → 可选模型语义补充 → 确定性融合 → UI/文本证据
 ```
 
-相关文件：
+测试区内部 GLM5.1 通过 `D:\03CodeAgent\CodeAgentCLI\codeagent.bat` 使用，不是独立
+HTTP endpoint。外部或内网大模型实验统一使用可配置的 OpenAI-compatible Chat
+Completions endpoint；UI-TARS 的截图定位服务使用独立配置。
 
-```text
-kt6_backend/local_cv_canvas_vision.py
-kt6_backend/codeagent_canvas_vision.py
-kt6_backend/hybrid_canvas_vision.py
-kt6_backend/topology_fusion.py
-```
+## 3. 统一本地配置
 
-### 2.3 Playwright/CDP Sidecar
-
-`browser_sidecar/capture-ui-graph.mjs` 通过 loopback CDP 只读采集：
-
-- DOMSnapshot
-- Accessibility Tree
-- iframe/frame/document
-- Shadow DOM
-- backend node id
-
-Sidecar 不点击、不输入、不拦截网络，也不调用 `Runtime.evaluate`。扩展 capture 与 CDP
-Sidecar capture 当前是独立 capture，不要误称已经实时合并。
-
-### 2.4 UI Graph
-
-`kt6_backend/ui_graph.py` 把以下来源转为统一 JSON 图协议：
-
-```text
-dom / cdp / page_api / vision / text
-```
-
-节点保留来源、role、name、frame/document、稳定引用、disabled 和 interaction；边表达：
-
-```text
-parent_of
-owner_of
-claims_business_object
-supports_action
-semantic_relation
-```
-
-UI Graph 是结构化数据模型，不一定是独立文件。完整图可通过
-`GET /api/ui-graphs/{capture_id}` 获取；发送给模型时使用有界 JSON/文本投影。
-
-### 2.5 操作 DAG
-
-```text
-UI Graph
-→ Reasoner 提出 locate/click/wait/verify DAG
-→ ui_operation_graph.py 确定性校验
-→ dry-run 计划
-```
-
-相关文件：
-
-```text
-kt6_backend/ui_graph_reasoner.py
-kt6_backend/ui_graph_planning.py
-kt6_backend/ui_operation_graph.py
-```
-
-重要现状：当前 UI Graph Reasoner 只实现 `HTTPUIGraphReasoner`。测试区内部 GLM5.1
-实际通过 `D:\03CodeAgent\CodeAgentCLI\codeagent.bat` 使用，目前没有 UI Graph
-CodeAgent CLI Adapter。因此：
-
-- Canvas 视觉可以真实使用 CodeAgent/GLM5.1。
-- UI Graph 建图和 DAG 验证可以自动化测试。
-- 真实 CodeAgent/GLM5.1 UI Graph 操作编排尚未接通。
-- 未配置 HTTP Reasoner 时计划接口返回 503 是当前预期。
-
-不要在文档、汇报或测试结论中把上述边界写成“内部 GLM 操作编排已实机完成”。
-
-### 2.6 DOM 安全动作链
-
-`asset_inventory.py`、`dom_action_binding.py`、`safe_dom_actions.py` 提供资产唯一解析、
-控件归属、新鲜页面复核、一次性令牌和审计。当前只有 dry-run，没有真实浏览器点击或
-设备下发通道。
-
-### 2.7 三方案评测报告
-
-`evaluation_artifacts.py` 为每次运行显式归档截图、CV 元数据、CV/模型/路由/融合 JSON、
-DOM/CDP、UI Graph、操作轨迹和验证结果，生成带 SHA-256 的 Manifest，并校验截图到融合
-的跨文件绑定、逐调用/逐步骤 envelope 和 UI Graph 内容 ID。视觉模型调用必须用
-`vision_model_call` ledger 记录成功、超时或无效响应；UI-TARS 按 artifact ID 逐调用绑定
-截图，SHA-256 只负责完整性；`evaluation_report.py` 和
-`evaluation_report_cli.py` 统一导入现有方案、Browser Use、UI-TARS 的
-`kt6.evaluation-run.v1` 结果，在重新校验证据后检查覆盖率、统一模型/提示/环境、安全
-违规和同模型自评偏差，并生成 JSON、CSV、Markdown、HTML、问题清单与结论。证据不全
-或哈希异常必须阻断排名。模块只处理本地文件，不调用模型或浏览器；真实三方案执行器
-尚需分别接入统一结果和证据契约。使用方法见 `docs/evaluation-reporting.md`。
-
-## 3. 关键约束
-
-### 3.1 数据与模型
-
-- 测试区页面数据不能传给 Codex、公共模型、外部 SaaS 或未经批准的 endpoint。
-- 测试区内部 GLM5.1 的实际入口是 `codeagent.bat`，不是独立 HTTP 服务。
-- CodeAgent events、CDP 快照、UI Graph 和截图可能包含敏感页面数据，不得提交 Git。
-- 不要在日志、健康检查、文档或回复中输出 API key、token、图片 Base64 或完整敏感 URL。
-
-### 3.2 UI Graph 与执行安全
-
-- UI Graph、节点、边和操作计划必须保持 `safe_for_execution=false`。
-- 计划必须保持 `dry_run_only=true`，除非未来有独立、经过批准的执行链变更。
-- `interaction.candidate=true` 只表示允许进入校验，不表示可立即点击或已授权。
-- 只有 DOM/CDP 节点可以成为点击候选。
-- DOM 候选必须有稳定 selector/source ref。
-- CDP 候选必须有正整数 backend node id。
-- page_api、vision、text 只能辅助理解，不能授权点击。
-- disabled/blocked 节点不能成为有效候选。
-- `@capture:` 及任意大小写变体不能成为稳定点击目标。
-- 原始 `actionable=true`、business_id 或 element_id 不能绕过候选门禁。
-- graph/capture 绑定、模型投影范围和 DAG 依赖必须 fail closed。
-
-### 3.3 页面 API 与 CDP
-
-- 页面 API 只读取页面显式提供的 `window.__KT6_PAGE_ADAPTER__`。
-- 不 monkey-patch 或拦截任意 `fetch`/XHR，不自行扫描业务 REST API。
-- CDP 地址只能是 `localhost`、`127.0.0.1` 或 `::1`。
-- Sidecar 输出文件独占创建；重测使用新文件名，不覆盖旧快照。
-
-### 3.4 Git 与工作区
-
-- `review.md` 是用户未跟踪文件，除非用户明确要求，否则不得修改、暂存或提交。
-- OmniParser WIP 保存在 stash；用 `git stash list` 核对，不要自动 apply/drop。
-- `runtime_data/` 可能保存耗时模型结果和敏感测试产物，不要无依据清理。
-- 工作区可能包含用户修改；只暂存当前任务明确涉及的文件，避免 `git add -A`。
-- 不使用 `git reset --hard`、`git checkout --` 或强制删除来清理用户改动。
-- 远端状态必须先 fetch 再判断；不要沿用文档中的历史哈希。
-- GitHub SSH 22 端口在当前网络可能长时间无响应；必要时使用已认证 HTTPS push，
-  但不要未经授权改写持久 remote 配置。
-
-## 4. 常用命令
-
-### 4.1 接手检查
+所有分支都使用根目录 `.env`。首次使用：
 
 ```powershell
-cd D:\yangzehui\FreeStyleCopilot
+Copy-Item .\.env.example .\.env
+notepad .\.env
+```
 
+后端和评测 CLI 会自动加载；进程中已经存在的同名环境变量优先。修改 `.env` 后必须
+重启后端或重新运行 CLI。`.env`、截图、模型原文、DOM/CDP 快照和真实评测结果不得提交。
+
+关键公共变量：
+
+```text
+KT6_MODEL_API_PROVIDER
+KT6_MODEL_API_BASE_URL
+KT6_MODEL_API_KEY
+KT6_MODEL_API_MODEL
+KT6_MODEL_API_ALLOWED_HOSTS
+```
+
+UI-TARS 另用：
+
+```text
+KT6_UI_TARS_API_PROVIDER
+KT6_UI_TARS_API_BASE_URL
+KT6_UI_TARS_API_KEY
+KT6_UI_TARS_MODEL
+KT6_UI_TARS_API_ALLOWED_HOSTS
+```
+
+不得把 API key 写进命令行、suite、运行 JSON、报告、健康检查或日志。远程 endpoint
+必须经过数据出区审批并使用精确 host 白名单；测试区页面数据默认不得发送到公网模型。
+
+## 4. 分支专属边界
+
+### 4.1 `eval-current`
+
+OpenCV/OCR 在本地运行，模型 API 只接收有界 CV/OCR JSON，不接收截图、Base64、本地
+路径或完整页面 URL。模型结果必须通过严格拓扑契约，再进入确定性融合。
+
+### 4.2 `eval-browser-use`
+
+Browser Use 负责 DOM/CDP 感知与动作，规划模型通过通用 API 调用；`use_vision=false`，
+规划模型不接收截图。成功必须由本地确定性页面断言判断，不能信任模型自报成功。
+
+### 4.3 `eval-ui-tars`
+
+规划模型只生成步骤目标；UI-TARS 服务单独接收截图并返回坐标动作。两类 API 的
+provider/model 必须分别记录。默认不执行动作，真实基准执行必须显式授权
+`--execute-actions` 并限制在隔离、可恢复任务中。
+
+### 4.4 `ui-graph-textflow-cdp`
+
+UI Graph 统一 `dom/cdp/page_api/vision/text` 来源，并生成 `locate/click/wait/verify`
+操作 DAG。当前 UI Graph CodeAgent CLI Adapter 尚未接通；未配置 HTTP Reasoner 时规划
+接口返回 503 是预期边界，不能写成“内部 GLM UI Graph 编排已实机完成”。
+
+### 4.5 `br_omniParser`
+
+该分支只保留历史试点。除公共基础设施同步和必要安全修复外，不继续扩展 OmniParser，
+也不将其结果混入当前三方案报告。
+
+## 5. 安全约束
+
+- UI Graph、节点、边和操作计划必须保持 `safe_for_execution=false`。
+- 默认计划必须 `dry_run_only=true`。
+- `interaction.candidate=true` 仅表示允许进入校验，不表示已授权点击。
+- 只有具有稳定引用的 DOM 节点或正整数 backend node id 的 CDP 节点可成为候选。
+- page_api、vision、text 只能辅助理解，不能授权点击。
+- disabled、blocked、`@capture:` 及大小写变体不得成为有效目标。
+- 原始 `actionable=true`、business_id、element_id 不能绕过候选门禁。
+- 页面 API 只读取显式 `window.__KT6_PAGE_ADAPTER__`，不拦截任意 fetch/XHR。
+- CDP 只允许 `localhost`、`127.0.0.1` 或 `::1`。
+
+## 6. 公共评测框架
+
+`evaluation_artifacts.py` 归档显式证据并生成 SHA-256 Manifest；
+`evaluation_report.py` / `evaluation_report_cli.py` 检查覆盖率、公平性、证据完整性、安全
+违规和同模型自评偏差。报告模块本身不调用模型或浏览器。
+
+证据、suite 和 runs 必须放在 `runtime_data/` 或测试区专用目录。证据缺失、哈希异常、
+调用/步骤覆盖不全或语义绑定不一致的运行不能参与排名。报告不得嵌入截图、DOM、模型
+原文、完整 URL、失败自由文本或密钥。
+
+## 7. 常用命令
+
+```powershell
 git status -sb
 git branch --show-current
 git branch -vv
@@ -220,189 +162,33 @@ git log -5 --oneline --decorate
 git stash list
 ```
 
-### 4.2 全量与定向测试
-
-在未配置真实 Vision/CodeAgent 环境变量的干净 PowerShell 中运行：
-
 ```powershell
 python -m unittest discover -s tests
-```
-
-2026-08-13 当前分支参考基线：487 项通过、46 项按环境跳过；以当前输出 `OK` 为准。
-
-```powershell
-python -m unittest `
-  tests.test_cdp_sidecar_assets `
-  tests.test_cdp_snapshot `
-  tests.test_page_perception_cdp `
-  tests.test_page_perception_ui_graph `
-  tests.test_ui_graph `
-  tests.test_ui_graph_reasoner `
-  tests.test_ui_operation_graph `
-  tests.test_ui_graph_planning `
-  tests.test_ui_graph_api
-```
-
-定向参考基线：57 项通过。
-
-### 4.3 配置真实 Canvas 混合识别
-
-```powershell
-$env:KT6_VISION_DRIVER = 'hybrid'
-$env:KT6_HYBRID_MODEL_DRIVER = 'codeagent_cli'
-$env:KT6_CODEAGENT_EXECUTABLE = `
-  'D:\03CodeAgent\CodeAgentCLI\codeagent.bat'
-$env:KT6_VISION_TIMEOUT_SECONDS = '300'
-```
-
-环境变量必须在启动后端前设置；修改后重启后端。
-
-### 4.4 启动后端
-
-```powershell
-python -m kt6_backend.app
-```
-
-```powershell
-Invoke-RestMethod -Uri 'http://127.0.0.1:8787/api/health' |
-  ConvertTo-Json -Depth 10
-```
-
-### 4.5 Sidecar 检查与采集
-
-```powershell
-cd .\browser_sidecar
-npm install
-npm run check
-```
-
-```powershell
-$snapshotPath = '.\cdp-snapshot-' + `
-  (Get-Date -Format 'yyyyMMdd-HHmmss') + '.json'
-
-node .\capture-ui-graph.mjs `
-  --cdp-url http://127.0.0.1:9222 `
-  --page-url nce `
-  --output $snapshotPath
-```
-
-### 4.6 快速查看 JSON
-
-```powershell
-$graph = Get-Content .\ui-graph.json -Raw | ConvertFrom-Json
-$graph | Select-Object graph_id, capture_id, analysis_only, safe_for_execution
-$graph.stats
-
-$graph.nodes |
-  Group-Object { $_.source.kind } |
-  Select-Object Name, Count
-```
-
-读取 API 图：
-
-```powershell
-$graph = Invoke-RestMethod `
-  -Uri 'http://127.0.0.1:8787/api/ui-graphs/<capture_id>'
-```
-
-### 4.7 文档修改检查
-
-```powershell
+python -m unittest tests.test_env_config
+python -m unittest tests.test_evaluation_artifacts tests.test_evaluation_report
 git diff --check
-git diff --stat
-git status -sb
 ```
 
-文档变更不需要重复跑全部代码测试，但必须检查 Markdown 围栏、相对链接和过时的
-分支/测试状态。
+分支专属命令和真实测试流程见 `test.md`。
 
-### 4.8 评测报告定向测试
+## 8. Git 与工作区
 
-```powershell
-python -m unittest `
-  tests.test_evaluation_artifacts `
-  tests.test_evaluation_report
-```
+- `review.md` 是用户未跟踪文件，除非用户明确要求，否则不修改、不暂存、不提交。
+- OmniParser WIP 在 stash 中；只核对，不自动 apply/drop。
+- 只暂存当前任务文件，不使用 `git add -A`。
+- 不使用 `git reset --hard`、`git checkout --` 清理用户修改。
+- `runtime_data/` 可能保存耗时模型结果，不无依据删除。
+- 判断远端前先 fetch；push 成功前不得宣称已上传。
+- 只在用户明确要求时 push、建 PR、合并或删除分支。
 
-评测 suite、runs、`artifacts/` 和报告必须放在 `runtime_data/` 或测试区专用目录；
-`record` 只允许显式 `--artifact role=path`，不得递归收集运行目录。不要提交真实运行
-结果、页面证据、模型原始输出、Manifest 或 API key。报告前必须重新校验 Manifest 和
-所有文件哈希及语义绑定；证据不完整或已改变时不能排名。有规划模型调用必须归档绑定
-run/call、生产者和同包输入的 `planner_result`；`action_trace` 必须绑定 run 并覆盖
-`step_count`；现有方案视觉调用必须归档成功/失败 ledger，UI-TARS 响应必须绑定
-call/step、截图 artifact ID 和哈希。所有图片必须有可解析尺寸和完整容器。报告不得复制
-`failure.reason`、`notes` 或本地验证引用等自由文本。
-suite、run、Manifest 和证据 JSON 必须使用严格 JSON：重复键、`NaN`、`Infinity` 一律
-拒绝，不能让后值覆盖前值改变完成率或安全指标。
+## 9. 文档一致性
 
-## 5. 容易踩坑的地方
+公共代码变化必须在所有分支同步检查：
 
-### 5.1 把两种 GLM 调用方式混为一谈
+1. `README.md` 是否说明当前分支能力与真实边界；
+2. `test.md` 是否包含可执行命令、配置方式和最新测试事实；
+3. `AGENTS.md` 是否保留公共同步、安全和 Git 规则；
+4. `CODEX_HANDOFF.md` 是否记录最新公共能力和分支职责；
+5. 方案文档是否仍使用当前环境变量和分支名。
 
-Canvas 视觉已经通过 `codeagent.bat` 使用内部 GLM5.1；UI Graph Reasoner 当前仍是 HTTP
-实现。不要配置一个不存在的内部 GLM endpoint，也不要把 Fake Reasoner 测试当成实机联调。
-
-### 5.2 把候选误认为可点击
-
-`role=button` 或 `interaction.candidate=true` 不等于已授权。当前所有节点仍应
-`can_click_now=false`、`safe_for_execution=false`。
-
-### 5.3 把 Canvas/OCR 坐标当成 DOM 点击依据
-
-视觉和 OCR 只提供语义、坐标和关系证据，不能直接授权点击。真实动作必须重新绑定到
-可信 DOM/CDP 节点并经过原有安全动作链。
-
-### 5.4 扩展采集与 CDP capture 混淆
-
-扩展一次任务可以同时处理 DOM 与 Canvas/SVG；CDP Sidecar 是另一条只读采集通道。
-当前两者生成独立 capture，测试和汇报时必须分开说明。
-
-### 5.5 大页面截断
-
-UI Graph 当前上限为 2000 节点、8000 边。图被截断时 planning 应 fail closed；不要为
-追求成功率直接放宽上限或绕过截断检查。先在真实页面记录来源占比和目标祖先链。
-
-### 5.6 多 frame 同名 alias
-
-多 iframe 出现相同 selector/ref 时，DOM action binding 可能保守地标为 unresolved。
-这是安全拒绝，不是误点击；需要通过 frame/document scope 精确修复，不能全局猜测。
-
-### 5.7 扩展更新未生效
-
-修改扩展文件后必须在 `chrome://extensions` 或 `edge://extensions` 点击“重新加载”。弹窗
-关闭不会终止异步 capture job，重开后应恢复，而不是重复提交。
-
-### 5.8 环境变量继承
-
-后端只在启动时读取环境变量。在另一个 PowerShell 设置变量无效；改完配置必须重启
-后端。自动化单元测试应在未配置真实 driver 的干净窗口运行。
-
-### 5.9 沙箱与临时目录权限
-
-部分 Python 测试需要在系统临时目录创建 SQLite 和 assets。受限沙箱可能报
-`PermissionError`，应在获准后提升权限重跑，不能把权限错误当成代码失败。
-
-### 5.10 CodeAgent 非确定性与大日志
-
-CodeAgent 可能超时、重复读取图片或返回带说明的 JSON。保留 events/stderr 和尝试日志；
-`codeagent-events.jsonl` 可能包含图片 Base64，不要完整打印或上传。
-
-## 6. 修改与交付准则
-
-- 诊断请求只报告原因，不主动实施修复；用户明确要求修改时才改代码。
-- 修改应保持最小范围，优先复用现有 Adapter、契约和测试 fixture。
-- 安全相关修改必须补正向和反向回归，特别是来源、稳定 ref、disabled、大小写变体、
-  graph/capture 绑定和 DAG 依赖。
-- 代码变更至少运行相关定向测试；高风险或跨模块修改运行全量测试。
-- 只在用户明确要求时 commit/push；推送成功前不能说“已上传”。
-- A/B 真实页面结果出来前，不把 `ui-graph-textflow-cdp` 合入 `main`。
-
-## 7. 权威文档
-
-- `README.md`：项目能力、架构、API 和运行入口。
-- `CODEX_HANDOFF.md`：当前状态、历史问题、测试事实和接手清单。
-- `test.md`：当前测试区可执行流程和真实边界。
-- `docs/ui-graph-architecture.md`：UI Graph 契约、安全边界和设计说明。
-
-文档与实际代码或 Git 状态冲突时，以当前代码、命令输出和真实测试证据为准，并在同一
-任务中修正文档。
+文档与代码冲突时，以当前代码和真实测试证据为准，并在同一任务修正文档。
