@@ -1516,7 +1516,7 @@ def build_suite_template(
     task_count: int = 28,
     repetitions: int = 3,
     step_limit: int = 10,
-    planner_provider: str = "deepseek",
+    planner_provider: str = "openai_compatible",
     planner_model: str = "fill-exact-model-name",
     environment_id: str = "fill-test-environment-id",
 ) -> dict[str, Any]:
