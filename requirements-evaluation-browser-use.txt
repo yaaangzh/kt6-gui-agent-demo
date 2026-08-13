@@ -1,0 +1,3 @@
+# Isolated Browser Use comparison environment (Python 3.11-3.13 recommended).
+# Keep this dependency out of the KT6 production/runtime requirements.
+browser-use==0.13.7
