@@ -80,7 +80,7 @@ run JSON 的 `metrics.safety_violation_count`，防止报告指标与原始操�
 `input_refs` 引用同一证据包中的文件 SHA-256、UI Graph ID 或 capture ID：
 
 ```json
-{"schema_version":"kt6.evaluation-planner-call.v1","run_id":"current-T01-r1","call_index":1,"producer":{"provider":"deepseek","model":"<精确模型名>"},"input_refs":["uig:..."],"response":{"actions":[{"type":"locate"}]}}
+{"schema_version":"kt6.evaluation-planner-call.v1","run_id":"current-T01-r1","call_index":1,"producer":{"provider":"<实际供应商或网关名>","model":"<精确模型名>"},"input_refs":["uig:..."],"response":{"actions":[{"type":"locate"}]}}
 ```
 
 `validation_result` 至少使用以下结构，并与 run JSON 保持一致：
@@ -171,7 +171,7 @@ python -m kt6_backend.evaluation_report_cli init `
   --task-count 28 `
   --repetitions 3 `
   --step-limit 10 `
-  --planner-provider deepseek `
+  --planner-provider '<实际供应商或网关名>' `
   --planner-model '<API实际返回的精确模型名>' `
   --environment-id '<测试机和浏览器环境编号>'
 ```
@@ -182,7 +182,7 @@ python -m kt6_backend.evaluation_report_cli init `
 - `scenario_type`：`dom/canvas/mixed/complex/other`。
 - `difficulty`：`easy/medium/hard/unknown`。
 - 可确定性复核的 `validation.method` 和 `validation.description`。
-- DeepSeek 精确模型名、浏览器/测试环境编号。
+- 规划模型的实际供应商、精确模型名、浏览器/测试环境编号。
 - 三套实现的精确版本或 Git revision。
 
 确认后把 `status` 改成 `ready`。不要把 API key 写入 suite。
@@ -224,7 +224,7 @@ python -m kt6_backend.evaluation_report_cli run-template `
   },
   "task_prompt_version": "v1",
   "planner": {
-    "provider": "deepseek",
+    "provider": "<实际供应商或网关名>",
     "model": "<精确模型名>",
     "adapter_prompt_version": "current-adapter-v1"
   },
@@ -421,5 +421,5 @@ Browser Use执行器 ├─> run JSON + 原始证据 ─> 归档/Manifest ─> �
 UI-TARS执行器 ───┘
 ```
 
-三套真实执行器仍需分别接入统一契约。公网 DeepSeek API 只能用于允许数据外发的脱敏
+三套真实执行器仍需分别接入统一契约。任意公网模型 API 只能用于允许数据外发的脱敏
 环境；正式测试区数据不可外传时，必须使用获批内网接口或本地部署。

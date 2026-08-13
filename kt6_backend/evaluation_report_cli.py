@@ -43,7 +43,9 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--task-count", type=int, default=28)
     init_parser.add_argument("--repetitions", type=int, default=3)
     init_parser.add_argument("--step-limit", type=int, default=10)
-    init_parser.add_argument("--planner-provider", default="deepseek")
+    init_parser.add_argument(
+        "--planner-provider", default="openai_compatible"
+    )
     init_parser.add_argument(
         "--planner-model", default="fill-exact-model-name"
     )
