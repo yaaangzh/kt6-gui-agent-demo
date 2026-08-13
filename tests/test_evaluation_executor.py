@@ -92,6 +92,13 @@ class EvaluationExecutorTest(unittest.TestCase):
         with self.assertRaises(EvaluationExecutionError):
             other.write_bytes("original_screenshot", b"image", extension="json")
 
+    def test_workspace_accepts_physical_image_suffix_for_image_role(self):
+        workspace = EvaluationWorkspace(self.root / "runs", "ui_tars-T01-r1")
+        screenshot = workspace.write_bytes(
+            "original_screenshot", b"png-bytes", extension="png"
+        )
+        self.assertEqual(screenshot.name, "original-screenshot-001.png")
+
     def test_builds_contract_valid_final_record(self):
         suite = build_suite_template(
             suite_id="suite-1",
