@@ -241,7 +241,12 @@ class EvaluationWorkspace:
     def _role(role: str, extension: str) -> str:
         normalized = str(role).strip()
         formats = ROLE_FORMATS.get(normalized)
-        if formats is None or extension not in formats:
+        logical_format = (
+            "image"
+            if extension in {"png", "jpg", "jpeg", "webp"}
+            else extension
+        )
+        if formats is None or logical_format not in formats:
             raise EvaluationExecutionError("unsupported artifact role or extension")
         return normalized
 
