@@ -14,13 +14,15 @@ from .asset_inventory import (
     JSONAssetInventoryAdapter,
 )
 from .codeagent_canvas_vision import CodeAgentCanvasVisionAdapter
-from .deepseek_topology_model import DeepSeekTopologySemanticAdapter
 from .dom_action_binding import DOMActionBindingService
 from .http_canvas_vision import HTTPTopologyVisionAdapter
 from .hybrid_canvas_vision import HybridCanvasVisionAdapter
 from .local_cv_canvas_vision import LocalCVTopologyVisionAdapter
 from .memory import SQLiteMemoryStore
 from .openai_compatible_api import OpenAICompatibleChatClient
+from .openai_compatible_topology_model import (
+    OpenAICompatibleTopologySemanticAdapter,
+)
 from .openai_compatible_ui_graph_reasoner import OpenAICompatibleUIGraphReasoner
 from .page_capture_jobs import PageCaptureJobCapacityError, PageCaptureJobService
 from .page_perception import PagePerceptionService, SQLitePageCaptureStore
@@ -60,6 +62,7 @@ HYBRID_MODEL_DRIVER_ENV = "KT6_HYBRID_MODEL_DRIVER"
 MODEL_API_BASE_URL_ENV = "KT6_MODEL_API_BASE_URL"
 MODEL_API_KEY_ENV = "KT6_MODEL_API_KEY"
 MODEL_API_MODEL_ENV = "KT6_MODEL_API_MODEL"
+MODEL_API_PROVIDER_ENV = "KT6_MODEL_API_PROVIDER"
 MODEL_API_ALLOWED_HOSTS_ENV = "KT6_MODEL_API_ALLOWED_HOSTS"
 MODEL_API_MAX_TOKENS_ENV = "KT6_MODEL_API_MAX_TOKENS"
 UI_GRAPH_REASONER_ENDPOINT_ENV = "KT6_UI_GRAPH_REASONER_ENDPOINT"
@@ -101,12 +104,14 @@ def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | N
     model_api_base_url = _optional_env(MODEL_API_BASE_URL_ENV)
     model_api_key = _optional_env(MODEL_API_KEY_ENV)
     model_api_model = _optional_env(MODEL_API_MODEL_ENV)
+    model_api_provider = _optional_env(MODEL_API_PROVIDER_ENV)
     model_api_allowed_hosts = _optional_env(MODEL_API_ALLOWED_HOSTS_ENV)
     model_api_max_tokens = _optional_env(MODEL_API_MAX_TOKENS_ENV)
     model_api_companions = (
         (MODEL_API_BASE_URL_ENV, model_api_base_url),
         (MODEL_API_KEY_ENV, model_api_key),
         (MODEL_API_MODEL_ENV, model_api_model),
+        (MODEL_API_PROVIDER_ENV, model_api_provider),
         (MODEL_API_ALLOWED_HOSTS_ENV, model_api_allowed_hosts),
         (MODEL_API_MAX_TOKENS_ENV, model_api_max_tokens),
     )
@@ -261,7 +266,7 @@ def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | N
             )
         required = [
             name
-            for name, value in model_api_companions[:4]
+            for name, value in model_api_companions[:5]
             if value is None
         ]
         if required:
@@ -289,7 +294,10 @@ def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | N
         )
         return HybridCanvasVisionAdapter(
             local_adapter=LocalCVTopologyVisionAdapter(),
-            model_adapter=DeepSeekTopologySemanticAdapter(client),
+            model_adapter=OpenAICompatibleTopologySemanticAdapter(
+                client,
+                provider=model_api_provider or "",
+            ),
         )
 
     if codeagent_executable is not None or codeagent_agent is not None:
@@ -396,6 +404,7 @@ def _create_ui_graph_reasoner_from_env() -> UIGraphReasoner | None:
         base_url = _optional_env(MODEL_API_BASE_URL_ENV)
         model_api_key = _optional_env(MODEL_API_KEY_ENV)
         model = _optional_env(MODEL_API_MODEL_ENV)
+        provider = _optional_env(MODEL_API_PROVIDER_ENV)
         model_hosts_text = _optional_env(MODEL_API_ALLOWED_HOSTS_ENV)
         max_tokens_text = _optional_env(MODEL_API_MAX_TOKENS_ENV)
         required = [
@@ -404,6 +413,7 @@ def _create_ui_graph_reasoner_from_env() -> UIGraphReasoner | None:
                 (MODEL_API_BASE_URL_ENV, base_url),
                 (MODEL_API_KEY_ENV, model_api_key),
                 (MODEL_API_MODEL_ENV, model),
+                (MODEL_API_PROVIDER_ENV, provider),
                 (MODEL_API_ALLOWED_HOSTS_ENV, model_hosts_text),
             )
             if value is None

@@ -14,11 +14,11 @@ from .ui_graph_reasoner import (
 
 
 class OpenAICompatibleUIGraphReasoner:
-    """Ask DeepSeek for a proposal; downstream KT6 validators still authorize it."""
+    """Ask a configured model API; downstream KT6 validators still authorize it."""
 
     reasoner_id = "openai-compatible-ui-graph-reasoner"
     reasoner_version = "1.0"
-    prompt_version = "kt6-ui-graph-deepseek-v1"
+    prompt_version = "kt6-ui-graph-openai-compatible-v1"
     MAX_INSTRUCTION_CHARS = 8_000
     MAX_GRAPH_TEXT_BYTES = 512 * 1024
 
@@ -26,7 +26,7 @@ class OpenAICompatibleUIGraphReasoner:
         self,
         client: OpenAICompatibleChatClient,
         *,
-        disable_thinking: bool = True,
+        disable_thinking: bool = False,
     ) -> None:
         if not isinstance(client, OpenAICompatibleChatClient):
             raise TypeError("client must be an OpenAICompatibleChatClient")

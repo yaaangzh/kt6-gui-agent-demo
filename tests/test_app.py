@@ -298,7 +298,7 @@ class AppFactoryTest(unittest.TestCase):
             model_adapter=model_adapter,
         )
 
-    def test_create_services_builds_hybrid_deepseek_cv_text_semantics(self):
+    def test_create_services_builds_hybrid_openai_compatible_cv_text_semantics(self):
         local_adapter = object()
         client = object()
         model_adapter = object()
@@ -306,10 +306,11 @@ class AppFactoryTest(unittest.TestCase):
         environment = {
             "KT6_VISION_DRIVER": "hybrid",
             "KT6_HYBRID_MODEL_DRIVER": "openai_compatible",
-            "KT6_MODEL_API_BASE_URL": "https://api.deepseek.test/v1",
+            "KT6_MODEL_API_BASE_URL": "https://model-gateway.test/v1",
             "KT6_MODEL_API_KEY": "secret",
-            "KT6_MODEL_API_MODEL": "deepseek-test",
-            "KT6_MODEL_API_ALLOWED_HOSTS": "api.deepseek.test",
+            "KT6_MODEL_API_MODEL": "generic-model-test",
+            "KT6_MODEL_API_PROVIDER": "test-gateway",
+            "KT6_MODEL_API_ALLOWED_HOSTS": "model-gateway.test",
             "KT6_MODEL_API_MAX_TOKENS": "2048",
             "KT6_VISION_TIMEOUT_SECONDS": "45",
         }
@@ -322,7 +323,7 @@ class AppFactoryTest(unittest.TestCase):
                 app, "OpenAICompatibleChatClient", return_value=client
             ) as client_constructor,
             patch.object(
-                app, "DeepSeekTopologySemanticAdapter", return_value=model_adapter
+                app, "OpenAICompatibleTopologySemanticAdapter", return_value=model_adapter
             ) as model_constructor,
             patch.object(
                 app, "HybridCanvasVisionAdapter", return_value=hybrid_adapter
@@ -334,32 +335,34 @@ class AppFactoryTest(unittest.TestCase):
         self.assertIs(services.page_perception.canvas_vision, hybrid_adapter)
         local_constructor.assert_called_once_with()
         client_constructor.assert_called_once_with(
-            base_url="https://api.deepseek.test/v1",
+            base_url="https://model-gateway.test/v1",
             api_key="secret",
-            model="deepseek-test",
+            model="generic-model-test",
             timeout_seconds=45.0,
             max_tokens=2048,
-            allowed_hosts=("api.deepseek.test",),
+            allowed_hosts=("model-gateway.test",),
         )
-        model_constructor.assert_called_once_with(client)
+        model_constructor.assert_called_once_with(client, provider="test-gateway")
         hybrid_constructor.assert_called_once_with(
             local_adapter=local_adapter,
             model_adapter=model_adapter,
         )
 
-    def test_deepseek_model_api_requires_complete_isolated_configuration(self):
+    def test_model_api_requires_complete_isolated_configuration(self):
         base = {
             "KT6_VISION_DRIVER": "hybrid",
             "KT6_HYBRID_MODEL_DRIVER": "openai_compatible",
-            "KT6_MODEL_API_BASE_URL": "https://api.deepseek.test/v1",
+            "KT6_MODEL_API_BASE_URL": "https://model-gateway.test/v1",
             "KT6_MODEL_API_KEY": "secret",
-            "KT6_MODEL_API_MODEL": "deepseek-test",
-            "KT6_MODEL_API_ALLOWED_HOSTS": "api.deepseek.test",
+            "KT6_MODEL_API_MODEL": "generic-model-test",
+            "KT6_MODEL_API_PROVIDER": "test-gateway",
+            "KT6_MODEL_API_ALLOWED_HOSTS": "model-gateway.test",
         }
         for missing in (
             "KT6_MODEL_API_BASE_URL",
             "KT6_MODEL_API_KEY",
             "KT6_MODEL_API_MODEL",
+            "KT6_MODEL_API_PROVIDER",
             "KT6_MODEL_API_ALLOWED_HOSTS",
         ):
             environment = {key: value for key, value in base.items() if key != missing}
@@ -385,10 +388,11 @@ class AppFactoryTest(unittest.TestCase):
         environment = {
             "KT6_UI_GRAPH_REASONER_DRIVER": "openai_compatible",
             "KT6_UI_GRAPH_REASONER_TIMEOUT_SECONDS": "55",
-            "KT6_MODEL_API_BASE_URL": "https://api.deepseek.test/v1",
+            "KT6_MODEL_API_BASE_URL": "https://model-gateway.test/v1",
             "KT6_MODEL_API_KEY": "secret",
-            "KT6_MODEL_API_MODEL": "deepseek-test",
-            "KT6_MODEL_API_ALLOWED_HOSTS": "api.deepseek.test",
+            "KT6_MODEL_API_MODEL": "generic-model-test",
+            "KT6_MODEL_API_PROVIDER": "test-gateway",
+            "KT6_MODEL_API_ALLOWED_HOSTS": "model-gateway.test",
             "KT6_MODEL_API_MAX_TOKENS": "3072",
         }
         with (
@@ -406,10 +410,10 @@ class AppFactoryTest(unittest.TestCase):
         self.assertIsNone(services.page_perception.canvas_vision)
         self.assertIs(services.ui_graph_planning.reasoner, reasoner)
         client_constructor.assert_called_once_with(
-            base_url="https://api.deepseek.test/v1",
+            base_url="https://model-gateway.test/v1",
             api_key="secret",
-            model="deepseek-test",
-            allowed_hosts=("api.deepseek.test",),
+            model="generic-model-test",
+            allowed_hosts=("model-gateway.test",),
             timeout_seconds=55.0,
             max_tokens=3072,
         )

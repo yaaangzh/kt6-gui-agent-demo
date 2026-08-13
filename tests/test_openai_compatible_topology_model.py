@@ -5,10 +5,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kt6_backend.deepseek_topology_model import DeepSeekTopologySemanticAdapter
 from kt6_backend.openai_compatible_api import (
     ModelHTTPResponse,
     OpenAICompatibleChatClient,
+)
+from kt6_backend.openai_compatible_topology_model import (
+    OpenAICompatibleTopologySemanticAdapter,
 )
 from kt6_backend.vision_recognition import CanvasFrame
 
@@ -26,7 +28,7 @@ class StubTransport:
             body=json.dumps(
                 {
                     "id": "call-1",
-                    "model": "deepseek-test",
+                    "model": "served-model-v2",
                     "choices": [
                         {
                             "finish_reason": "stop",
@@ -46,7 +48,7 @@ class StubTransport:
         )
 
 
-class DeepSeekTopologySemanticAdapterTest(unittest.TestCase):
+class OpenAICompatibleTopologySemanticAdapterTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         image = Path(self.temp.name) / "frame.png"
@@ -66,17 +68,19 @@ class DeepSeekTopologySemanticAdapterTest(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def adapter(self, transport, calls=None):
+    def adapter(self, transport, calls=None, *, extra_body=None):
         client = OpenAICompatibleChatClient(
-            base_url="https://api.deepseek.test/v1",
+            base_url="https://model-gateway.test/v1",
             api_key="secret-key",
-            model="deepseek-test",
-            allowed_hosts=["api.deepseek.test"],
+            model="requested-model-v1",
+            allowed_hosts=["model-gateway.test"],
             transport=transport,
         )
-        return DeepSeekTopologySemanticAdapter(
+        return OpenAICompatibleTopologySemanticAdapter(
             client,
+            provider="test-provider",
             call_sink=(calls.append if calls is not None else None),
+            extra_body=extra_body,
         )
 
     def test_sends_only_bounded_cv_text_and_parses_strict_contract(self):
@@ -117,9 +121,36 @@ class DeepSeekTopologySemanticAdapterTest(unittest.TestCase):
         outer_request = json.loads(request_body)
         semantic_request = json.loads(outer_request["messages"][1]["content"])
         self.assertFalse(semantic_request["screenshot_sent_to_model"])
+        self.assertNotIn("thinking", outer_request)
+        self.assertEqual(calls[0].provider, "test-provider")
+        self.assertEqual(calls[0].requested_model, "requested-model-v1")
+        self.assertEqual(calls[0].served_model, "served-model-v2")
         self.assertEqual(calls[0].input_mode, "cv_text")
         self.assertFalse(calls[0].screenshot_sent_to_model)
         self.assertEqual(calls[0].usage["total_tokens"], 25)
+
+    def test_passes_only_explicit_provider_extensions(self):
+        transport = StubTransport(
+            {
+                "schema_version": "kt6.topology-model.v1",
+                "nodes": [],
+                "links": [],
+            }
+        )
+        self.adapter(
+            transport,
+            extra_body={"vendor_option": {"enabled": True}},
+        ).recognize_with_context(
+            page={},
+            frames=(self.frame,),
+            cv_observations={
+                "objects": [{"business_id": "AP-1", "label": "AP-1"}],
+                "links": [],
+                "ocr_text_anchors": [],
+            },
+        )
+        request = json.loads(transport.calls[0]["body"])
+        self.assertEqual(request["vendor_option"], {"enabled": True})
 
     def test_refuses_raw_image_route_and_empty_cv_candidates(self):
         adapter = self.adapter(StubTransport({}))

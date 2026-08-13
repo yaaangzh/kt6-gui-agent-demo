@@ -1,7 +1,9 @@
-# 现有方案：OpenCV/OCR + DeepSeek API
+# 现有方案：OpenCV/OCR + 大模型 API
 
-本分支 `eval-current` 保留当前方案的本地几何识别、路由、确定性融合、
-UI Graph 和安全校验，只将模型补充层改为 OpenAI-compatible Chat Completions。
+本分支 `eval-current` 保留当前方案的本地几何识别、路由、确定性融合、UI Graph 和
+安全校验，只将模型补充层改为可配置的 OpenAI-compatible Chat Completions API。
+DeepSeek、Qwen、GLM 或内部网关都只是可选供应商；只要接口兼容且通过数据安全审批，
+无需修改业务代码即可切换。使用其他专有协议的模型需要另写协议 Adapter。
 
 ## 数据链路
 
@@ -10,13 +12,13 @@ Canvas/SVG 截图
 → 本地 OpenCV/OCR
 → 场景路由
 → 有界 CV/OCR JSON（不含截图、Base64、本地路径和完整页面 URL）
-→ DeepSeek API 语义标准化
+→ 可配置大模型 API 做语义标准化
 → TopologyModelContract 严格校验
 → 确定性融合 / UI Graph / dry-run DAG 校验
 ```
 
-官方 DeepSeek Chat Completions 在本实现中按文本接口使用。截图 SHA-256 只用于数据
-血缘，`screenshot_sent_to_model=false`；不得把这条路线描述为 DeepSeek 直接看图。
+当前 Adapter 按文本模型使用。截图 SHA-256 只用于数据血缘，
+`screenshot_sent_to_model=false`；不得把这条路线描述为大模型直接看图。
 
 ## 配置
 
@@ -25,13 +27,18 @@ PowerShell 示例：
 ```powershell
 $env:KT6_VISION_DRIVER = 'hybrid'
 $env:KT6_HYBRID_MODEL_DRIVER = 'openai_compatible'
-$env:KT6_MODEL_API_BASE_URL = 'https://api.deepseek.com'
-$env:KT6_MODEL_API_ALLOWED_HOSTS = 'api.deepseek.com'
+$env:KT6_MODEL_API_PROVIDER = '<供应商或内部网关标识>'
+$env:KT6_MODEL_API_BASE_URL = 'https://<获批网关>/v1'
+$env:KT6_MODEL_API_ALLOWED_HOSTS = '<获批网关的精确主机名>'
 $env:KT6_MODEL_API_KEY = '<从测试区密钥服务或当前会话注入>'
 $env:KT6_MODEL_API_MODEL = '<当前实际可用的精确模型名>'
 $env:KT6_MODEL_API_MAX_TOKENS = '4096'
 $env:KT6_VISION_TIMEOUT_SECONDS = '60'
 ```
+
+例如接入 DeepSeek、Qwen、GLM 或自建 vLLM 网关时，只替换 `PROVIDER`、`BASE_URL`、
+`ALLOWED_HOSTS`、`API_KEY` 和 `MODEL`，其余链路不变。供应商专有参数默认不会发送；
+确需使用时应由对应 Adapter 显式配置并补兼容性测试。
 
 如需让 UI Graph 规划也走同一个 API：
 
@@ -64,7 +71,7 @@ $health.ui_graph_reasoning
 ```powershell
 python -m unittest `
   tests.test_openai_compatible_api `
-  tests.test_deepseek_topology_model `
+  tests.test_openai_compatible_topology_model `
   tests.test_openai_compatible_ui_graph_reasoner `
   tests.test_hybrid_canvas_vision `
   tests.test_vision_cache_coordinator `
@@ -73,8 +80,3 @@ python -m unittest `
 
 单元测试使用注入的假 HTTP transport，不会请求真实 API。真实联调前必须确认任务文本、
 DOM 和 CV/OCR 业务标识允许发送到目标 endpoint；测试区数据不能直接发送到公网服务。
-
-参考：
-
-- [DeepSeek Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion)
-- [DeepSeek JSON Output](https://api-docs.deepseek.com/guides/json_mode/)

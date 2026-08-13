@@ -40,10 +40,10 @@ class OpenAICompatibleUIGraphReasonerTest(unittest.TestCase):
     def reasoner(self, content, transport=None):
         transport = transport or StubTransport(content)
         client = OpenAICompatibleChatClient(
-            base_url="https://api.deepseek.test/v1",
+            base_url="https://model-gateway.test/v1",
             api_key="secret",
-            model="deepseek-test",
-            allowed_hosts=["api.deepseek.test"],
+            model="generic-chat-test",
+            allowed_hosts=["model-gateway.test"],
             transport=transport,
         )
         return OpenAICompatibleUIGraphReasoner(client), transport
@@ -72,7 +72,7 @@ class OpenAICompatibleUIGraphReasonerTest(unittest.TestCase):
         self.assertEqual(result["graph_id"], "graph-1")
         request = json.loads(transport.calls[0]["body"])
         self.assertEqual(request["response_format"], {"type": "json_object"})
-        self.assertEqual(request["thinking"], {"type": "disabled"})
+        self.assertNotIn("thinking", request)
         semantic = json.loads(request["messages"][1]["content"])
         self.assertTrue(semantic["trust_boundary"]["dry_run_only"])
 

@@ -148,9 +148,9 @@ class VisionCacheCoordinatorTest(unittest.TestCase):
                 self.model = model
                 self.prompt_version = prompt_version
 
-        first = ConfiguredAdapter("deepseek-a", "prompt-v1")
-        second = ConfiguredAdapter("deepseek-b", "prompt-v1")
-        third = ConfiguredAdapter("deepseek-b", "prompt-v2")
+        first = ConfiguredAdapter("model-a", "prompt-v1")
+        second = ConfiguredAdapter("model-b", "prompt-v1")
+        third = ConfiguredAdapter("model-b", "prompt-v2")
         coordinator = self.coordinator()
         coordinator.recognize(adapter=first, page=self.page, frames=(frame,))
         coordinator.recognize(adapter=second, page=self.page, frames=(frame,))
