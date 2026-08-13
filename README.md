@@ -40,7 +40,7 @@ OpenAI-compatible API；配置、数据边界和执行方式见
 | 拓扑变化检测 | 节点、位置、链路增删及链路语义属性变化检测；关键变化触发重规划 |
 | 运行记忆 | SQLite 持久化任务、事件、检查点、场景和业务处理结果 |
 | KT5 接入基础 | 感知拓扑与生成拓扑共用统一 Scene Graph 契约 |
-| 自动化测试 | 2026-08-13 `eval-browser-use` 全量 455 项通过、46 项跳过；各分支结果见 `test.md` |
+| 自动化测试 | 2026-08-13 `eval-browser-use` 全量 456 项通过、46 项跳过；各分支结果见 `test.md` |
 
 ## 业务场景
 
@@ -643,7 +643,7 @@ tests/                         自动化测试
 python -m unittest discover -s tests
 ```
 
-2026-08-13 `eval-browser-use` 开发环境全量结果为 455 项通过、46 项跳过；各分支基线见
+2026-08-13 `eval-browser-use` 开发环境全量结果为 456 项通过、46 项跳过；各分支基线见
 [test.md](./test.md)，后续仍以当前命令输出为准。
 跳过项来自开发环境缺少可选 RapidOCR/OpenCV 运行依赖，不是测试失败。覆盖范围包括
 异步 capture job、
