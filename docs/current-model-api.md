@@ -22,18 +22,25 @@ Canvas/SVG 截图
 
 ## 配置
 
-PowerShell 示例：
+推荐先创建一次根目录 `.env`，以后启动后端无需重复在终端赋值：
 
 ```powershell
-$env:KT6_VISION_DRIVER = 'hybrid'
-$env:KT6_HYBRID_MODEL_DRIVER = 'openai_compatible'
-$env:KT6_MODEL_API_PROVIDER = '<供应商或内部网关标识>'
-$env:KT6_MODEL_API_BASE_URL = 'https://<获批网关>/v1'
-$env:KT6_MODEL_API_ALLOWED_HOSTS = '<获批网关的精确主机名>'
-$env:KT6_MODEL_API_KEY = '<从测试区密钥服务或当前会话注入>'
-$env:KT6_MODEL_API_MODEL = '<当前实际可用的精确模型名>'
-$env:KT6_MODEL_API_MAX_TOKENS = '4096'
-$env:KT6_VISION_TIMEOUT_SECONDS = '60'
+Copy-Item .\.env.example .\.env
+notepad .\.env
+```
+
+在 `.env` 中填写：
+
+```dotenv
+KT6_VISION_DRIVER=hybrid
+KT6_HYBRID_MODEL_DRIVER=openai_compatible
+KT6_MODEL_API_PROVIDER=<供应商或内部网关标识>
+KT6_MODEL_API_BASE_URL=https://<获批网关>/v1
+KT6_MODEL_API_ALLOWED_HOSTS=<获批网关的精确主机名>
+KT6_MODEL_API_KEY=<仅保存在本机.env>
+KT6_MODEL_API_MODEL=<当前实际可用的精确模型名>
+KT6_MODEL_API_MAX_TOKENS=4096
+KT6_VISION_TIMEOUT_SECONDS=60
 ```
 
 例如接入 DeepSeek、Qwen、GLM 或自建 vLLM 网关时，只替换 `PROVIDER`、`BASE_URL`、
@@ -42,9 +49,9 @@ $env:KT6_VISION_TIMEOUT_SECONDS = '60'
 
 如需让 UI Graph 规划也走同一个 API：
 
-```powershell
-$env:KT6_UI_GRAPH_REASONER_DRIVER = 'openai_compatible'
-$env:KT6_UI_GRAPH_REASONER_TIMEOUT_SECONDS = '60'
+```dotenv
+KT6_UI_GRAPH_REASONER_DRIVER=openai_compatible
+KT6_UI_GRAPH_REASONER_TIMEOUT_SECONDS=60
 ```
 
 不要同时配置 `KT6_VISION_ENDPOINT`、`KT6_VISION_API_KEY` 或 CodeAgent 参数。远程 API
