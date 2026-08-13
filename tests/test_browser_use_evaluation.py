@@ -43,8 +43,8 @@ class BrowserUseEvaluationTest(unittest.TestCase):
             title="Browser Use comparison",
             task_count=1,
             repetitions=1,
-            planner_provider="deepseek",
-            planner_model="deepseek-test",
+            planner_provider="test-gateway",
+            planner_model="generic-model-test",
             environment_id="test-env",
         )
         self.suite["status"] = "ready"
@@ -75,7 +75,8 @@ class BrowserUseEvaluationTest(unittest.TestCase):
         self.config = BrowserUseEvaluationConfig(
             base_url="http://127.0.0.1:9000/v1",
             api_key="secret-test-key",
-            model="deepseek-test",
+            provider="test-gateway",
+            model="generic-model-test",
             max_steps=2,
         )
 
@@ -136,7 +137,7 @@ class BrowserUseEvaluationTest(unittest.TestCase):
                 repetition=1,
                 config=self.config,
                 implementation={
-                    "name": "KT6 Browser Use DeepSeek API",
+                    "name": "KT6 Browser Use Model API",
                     "version": "browser-use-0.13.7",
                     "revision": "abc123",
                     "branch": "eval-browser-use",
@@ -153,16 +154,25 @@ class BrowserUseEvaluationTest(unittest.TestCase):
     def test_remote_api_and_non_loopback_cdp_require_explicit_safe_configuration(self):
         with self.assertRaises(EvaluationExecutionError):
             BrowserUseEvaluationConfig(
-                base_url="https://api.deepseek.com/v1",
+                base_url="http://127.0.0.1:9000/v1",
                 api_key="key",
-                model="deepseek-test",
-                api_allowed_hosts=frozenset({"api.deepseek.com"}),
+                provider=" ",
+                model="generic-model-test",
+            )
+        with self.assertRaises(EvaluationExecutionError):
+            BrowserUseEvaluationConfig(
+                base_url="https://model-gateway.test/v1",
+                api_key="key",
+                provider="test-gateway",
+                model="generic-model-test",
+                api_allowed_hosts=frozenset({"model-gateway.test"}),
             )
         configured = BrowserUseEvaluationConfig(
-            base_url="https://api.deepseek.com/v1",
+            base_url="https://model-gateway.test/v1",
             api_key="key",
-            model="deepseek-test",
-            api_allowed_hosts=frozenset({"api.deepseek.com"}),
+            provider="test-gateway",
+            model="generic-model-test",
+            api_allowed_hosts=frozenset({"model-gateway.test"}),
             allow_remote_model=True,
         )
         self.assertNotIn("key", repr(configured))
@@ -170,7 +180,8 @@ class BrowserUseEvaluationTest(unittest.TestCase):
             BrowserUseEvaluationConfig(
                 base_url="http://127.0.0.1:9000/v1",
                 api_key="key",
-                model="deepseek-test",
+                provider="test-gateway",
+                model="generic-model-test",
                 cdp_url="http://192.168.1.10:9222",
             )
 
@@ -194,6 +205,8 @@ class BrowserUseEvaluationTest(unittest.TestCase):
         self.assertEqual(recorded["outcome"], "success")
         self.assertEqual(recorded["metrics"]["planner_model_calls"], 2)
         self.assertEqual(recorded["metrics"]["input_tokens"], 120)
+        self.assertEqual(recorded["planner"]["provider"], "test-gateway")
+        self.assertEqual(recorded["planner"]["model"], "generic-model-test")
         self.assertEqual(recorded["evidence"]["status"], "archived")
         loaded = load_run_records(self.root / "evaluation" / "runs.jsonl")
         self.assertEqual(len(loaded), 1)
@@ -218,7 +231,7 @@ class BrowserUseEvaluationTest(unittest.TestCase):
     def test_cli_error_is_fixed_and_does_not_echo_secret_or_paths(self):
         task_path = self.root / "task-secret.json"
         task_path.write_text("{}", encoding="utf-8")
-        with patch.dict(os.environ, {"KT6_DEEPSEEK_API_KEY": "SECRET-KEY"}, clear=True):
+        with patch.dict(os.environ, {"KT6_MODEL_API_KEY": "SECRET-KEY"}, clear=True):
             with patch("sys.stderr") as stderr:
                 status = cli_main(
                     [

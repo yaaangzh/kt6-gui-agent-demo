@@ -10,6 +10,10 @@
 [CODEX_HANDOFF.md](./CODEX_HANDOFF.md)；其中记录了当前工作目录、分阶段拓扑链路、
 CodeAgentCLI 的 Windows 启动方式、真实图片验证结论、已知限制和下一步建议。
 
+Browser Use 对照执行器保留在 `eval-browser-use` 分支，规划模型可接任意获批的
+OpenAI-compatible API；配置、数据边界和执行方式见
+[docs/browser-use-model-api.md](./docs/browser-use-model-api.md)。
+
 ## 已实现能力
 
 | 能力 | 当前实现 |

@@ -1,13 +1,14 @@
-# Browser Use + DeepSeek API 对照组
+# Browser Use + 大模型 API 对照组
 
-本分支 `eval-browser-use` 实现第二套对照方案：Browser Use 负责 DOM/CDP
-感知与浏览器动作，DeepSeek 的 OpenAI-compatible API 负责每一步操作规划；成功与否由
-本地确定性页面条件判断，不使用 Browser Use 自带的模型裁判。
+本分支 `eval-browser-use` 实现第二套对照方案：Browser Use 负责 DOM/CDP 感知与浏览器
+动作，可配置的 OpenAI-compatible API 负责每一步操作规划；成功与否由本地确定性页面
+条件判断，不使用 Browser Use 自带的模型裁判。DeepSeek、Qwen、GLM 或内网网关均可
+作为供应商，模型和 endpoint 由运行参数确定。
 
 该执行器与主干的评测框架分层：
 
 ```text
-Browser Use/CDP -> DeepSeek API -> Browser Use 单步动作
+Browser Use/CDP -> 可配置模型 API -> Browser Use 单步动作
                 -> 本地终态断言
                 -> DOM/模型调用/动作/验收证据
                 -> main 中的统一归档和报告
@@ -61,20 +62,21 @@ python -m browser_use install
 API key 只从环境变量读取，不进入命令行、suite、运行 JSON 或报告：
 
 ```powershell
-$env:KT6_DEEPSEEK_API_BASE_URL = 'https://api.deepseek.com/v1'
-$env:KT6_DEEPSEEK_API_KEY = '<只在当前测试窗口设置>'
-$env:KT6_DEEPSEEK_MODEL = '<评测统一的精确模型名>'
-$env:KT6_DEEPSEEK_API_ALLOWED_HOSTS = 'api.deepseek.com'
+$env:KT6_MODEL_API_PROVIDER = '<供应商或内网网关标识>'
+$env:KT6_MODEL_API_BASE_URL = 'https://<获批网关>/v1'
+$env:KT6_MODEL_API_KEY = '<只在当前测试窗口设置>'
+$env:KT6_MODEL_API_MODEL = '<评测统一的精确模型名>'
+$env:KT6_MODEL_API_ALLOWED_HOSTS = '<获批网关的精确主机名>'
 $env:KT6_BROWSER_USE_CDP_URL = 'http://127.0.0.1:9222'
 ```
 
 远程 endpoint 必须同时满足 HTTPS、精确主机白名单和命令行
-`--allow-remote-model`。这是有意设置的显式数据出区门禁：受限测试区页面 DOM、任务文本、
-URL 或账号信息未经批准不得发给公网 DeepSeek。受限环境应改用批准的内网兼容网关，并
-只把该网关主机加入白名单。
+`--allow-remote-model`。这是显式数据出区门禁：受限测试区页面 DOM、任务文本、URL 或
+账号信息未经批准不得发给任何公网模型。受限环境应改用批准的内网兼容网关，并只把该
+网关主机加入白名单。
 
-Browser Use 匿名遥测与 Cloud Sync 会在导入库前关闭；视觉输入关闭，避免截图进入
-DeepSeek。Browser Use 默认 `evaluate`、文件读写、上传和站外搜索工具也被排除。
+Browser Use 匿名遥测与 Cloud Sync 会在导入库前关闭；视觉输入关闭，避免截图进入规划
+模型。Browser Use 默认 `evaluate`、文件读写、上传和站外搜索工具也被排除。
 
 ## 4. 执行一次任务
 
@@ -100,7 +102,7 @@ python -m kt6_backend.browser_use_evaluation_cli `
 一次可归档运行保存：
 
 - `dom_snapshot`：最终页面状态和本次实际交互的 DOM 元素；
-- `planner_result`：每个 Browser Use 步骤的 DeepSeek 结构化响应；
+- `planner_result`：每个 Browser Use 步骤的模型结构化响应，并记录真实供应商与模型名；
 - `action_trace`：每一步动作、耗时、错误和安全违规；
 - `browser_use_elements`：供测试区复查的精简历史；
 - `validation_result`：确定性终态判断。
@@ -120,5 +122,5 @@ python -m unittest `
   tests.test_openai_compatible_api
 ```
 
-真实冒烟测试需在获批网络和测试页面执行，至少检查：模型精确版本、API 调用次数、动作
-步数、越域拒绝、DOM 证据完整性、确定性验收与最终报告排名门禁。
+真实冒烟测试需在获批网络和测试页面执行，至少检查：供应商和模型精确版本、API 调用
+次数、动作步数、越域拒绝、DOM 证据完整性、确定性验收与最终报告排名门禁。

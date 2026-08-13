@@ -1,4 +1,4 @@
-"""Browser Use + DeepSeek API executor for the isolated comparison branch.
+"""Browser Use + configurable model API executor for the comparison branch.
 
 The module keeps Browser Use as the browser/action implementation and adapts
 its history to the common KT6 evidence contract.  It deliberately does not
@@ -33,7 +33,7 @@ from .openai_compatible_api import OpenAICompatibleChatClient
 
 BROWSER_USE_DOM_SCHEMA_VERSION = "kt6.browser-use-dom-snapshot.v1"
 PLANNER_CALL_SCHEMA_VERSION = "kt6.evaluation-planner-call.v1"
-BROWSER_USE_ADAPTER_PROMPT_VERSION = "browser-use-deepseek-v1"
+BROWSER_USE_ADAPTER_PROMPT_VERSION = "browser-use-openai-compatible-v1"
 
 _DANGEROUS_ACTIONS = frozenset(
     {
@@ -50,7 +50,8 @@ _DANGEROUS_ACTIONS = frozenset(
 class BrowserUseEvaluationConfig:
     base_url: str
     api_key: str = field(repr=False)
-    model: str = "deepseek-chat"
+    provider: str
+    model: str
     api_allowed_hosts: frozenset[str] = frozenset()
     cdp_url: str | None = None
     headless: bool = False
@@ -59,6 +60,13 @@ class BrowserUseEvaluationConfig:
     allow_remote_model: bool = False
 
     def __post_init__(self) -> None:
+        if (
+            not isinstance(self.provider, str)
+            or not self.provider.strip()
+            or len(self.provider.strip()) > 100
+            or any(char in self.provider for char in "\r\n")
+        ):
+            raise EvaluationExecutionError("model API provider is invalid")
         if isinstance(self.max_steps, bool) or not 1 <= self.max_steps <= 10_000:
             raise EvaluationExecutionError("max_steps must be a positive integer")
         if (
@@ -133,14 +141,14 @@ class BrowserUseLibraryBackend:
         os.environ["BROWSER_USE_CLOUD_SYNC"] = "false"
         browser: Any | None = None
         try:
-            from browser_use import Agent, Browser, ChatDeepSeek, Tools
+            from browser_use import Agent, Browser, ChatOpenAI, Tools
         except ImportError as exc:
             raise EvaluationExecutionError(
                 "browser-use 0.13.7 is required for this experiment branch"
             ) from exc
 
         try:
-            llm = ChatDeepSeek(
+            llm = ChatOpenAI(
                 model=config.model,
                 api_key=config.api_key,
                 base_url=config.base_url,
@@ -312,7 +320,7 @@ async def run_browser_use_evaluation(
                 "schema_version": PLANNER_CALL_SCHEMA_VERSION,
                 "run_id": run_id,
                 "call_index": index,
-                "producer": {"provider": "deepseek", "model": config.model},
+                "producer": {"provider": config.provider, "model": config.model},
                 "input_refs": [dom_sha256],
                 "response": response,
             }
@@ -395,7 +403,7 @@ async def run_browser_use_evaluation(
         step_count=step_count,
         implementation=implementation,
         planner={
-            "provider": "deepseek",
+            "provider": config.provider,
             "model": config.model,
             "adapter_prompt_version": BROWSER_USE_ADAPTER_PROMPT_VERSION,
         },
