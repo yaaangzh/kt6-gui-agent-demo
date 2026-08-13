@@ -4,6 +4,21 @@
 和 [README.md](./README.md)，再检查 Git 状态和最近提交，不要仅依据旧对话继续
 修改。
 
+## 0. 2026-08-13 公共能力与分支状态
+
+公共证据归档/评测报告、共享 API 运行时和统一 `.env` 加载已经同步到所有保留分支。
+根目录 `.env` 由后端和评测 CLI 自动读取，进程已有变量优先；真实 key 不得提交。
+
+当前三套功能执行器保持独立：
+
+- `eval-current`：本地 OpenCV/OCR + 通用 OpenAI-compatible 语义模型 API；
+- `eval-browser-use`：Browser Use/CDP + 通用 OpenAI-compatible 规划 API；
+- `eval-ui-tars`：通用规划 API + 独立 UI-TARS 截图定位 API。
+
+`ui-graph-textflow-cdp` 继续作为多源 UI Graph/DAG 实验；`br_omniParser` 只保留历史。
+公共文件修改后必须逐分支同步检查代码、README、`test.md`、`AGENTS.md` 和方案文档，
+但不得用公共同步名义合并各分支的功能实现。最新可执行流程以 `test.md` 为准。
+
 ## 1. 当前阶段目标
 
 当前优先级是先稳定打通拓扑图片的完整处理链路：
@@ -452,9 +467,9 @@ pair-level 负证据与低于阈值的 CV 链路组合会真正 rejected；全�
 
 ### 7.1 自动化测试
 
-2026-08-04 开发环境全量结果为 362 项通过、42 项跳过；后续通过、跳过和失败数量
-仍以当前命令输出为准。跳过项来自开发环境缺少可选 RapidOCR/OpenCV 运行依赖，
-不是测试失败。
+2026-08-13 `br_omniParser` 开发环境全量结果为 460 项通过、46 项跳过；所有分支的最近
+基线见 `test.md`。后续通过、跳过和失败数量仍以当前命令输出为准。跳过项主要来自
+开发环境缺少可选 RapidOCR/OpenCV 或实验运行依赖，不是测试失败。
 
 全量命令：
 
