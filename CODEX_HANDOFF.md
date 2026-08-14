@@ -19,6 +19,11 @@
 公共文件修改后必须逐分支同步检查代码、README、`test.md`、`AGENTS.md` 和方案文档，
 但不得用公共同步名义合并各分支的功能实现。最新可执行流程以 `test.md` 为准。
 
+`eval-current` 已新增 `current_evaluation.py` 与 `current_evaluation_cli.py`：输入一张真实
+图片后自动执行本地 CV/OCR、场景路由、必要时调用通用模型 API、确定性融合、UI Graph、
+断言验证、证据 Manifest 和 `runs.jsonl` 追加。模型失败也会记入完成率。该入口是图片
+识别子评测，不包含真实浏览器点击，不得写成 NCE 页面端到端执行器已完成。
+
 ### 0.1 UI Graph 阶段接手摘要
 
 当前工作已从单纯拓扑图片识别扩展到“多源页面结构理解 + 内部模型操作规划”，
@@ -47,7 +52,7 @@ B 组已经实现：
 Manifest/SHA-256 完整性校验、覆盖率/公平性/安全门禁，以及 JSON、CSV、Markdown、
 HTML 报告生成流程。
 
-2026-08-13 当前分支完整回归为 487 项通过、46 项跳过；本轮评测证据归档与报告定向
+该 UI Graph 阶段当时完整回归为 487 项通过、46 项跳过；评测证据归档与报告定向
 回归为43项通过；此前 NCE Adapter 和 UI Graph 专项回归为68项通过。
 这只证明开发环境自动化路径通过；真实 Chromium/CDP、真实 NCE/FEBS 页面和测试区
 内部 GLM5.1 endpoint 尚未现场验收。当前计划始终为 `dry_run_only=true`、
@@ -403,10 +408,11 @@ Token/成本/安全和证据完整率，输出 `report.json`、`metrics.csv`、`
 违规的方案不参与推荐。展示报告不复制 `failure.reason`、`notes` 或本地验证引用等自由
 文本，完整原始信息只保留在测试区证据归档中。
 
-报告模块完全离线，不会调用任何模型 API、Browser Use、UI-TARS 或控制浏览器。三套真实
-执行器仍需在获批环境中分别生成 `kt6.evaluation-run.v1` 结果和对应原始证据，不能把
-归档/报告工具的合成单元测试写成真实28项对比已经完成。完整证据矩阵、归档命令和数据
-安全边界见 `docs/evaluation-reporting.md`。
+报告模块完全离线，不会调用任何模型 API、Browser Use、UI-TARS 或控制浏览器。
+`eval-current` 的图片识别执行器已经接入统一结果和证据契约；Browser Use 与 UI-TARS
+执行器分别保留在各自实验分支。不能把图片子评测、归档工具或合成单元测试写成真实
+28项浏览器对比已经完成。完整证据矩阵、归档命令和数据安全边界见
+`docs/evaluation-reporting.md`。
 
 Demo 资产来自 `data/mock_assets.json`。生产必须将 `JSONAssetInventoryAdapter`
 替换为经过认证的 NCE/FEBS 查询 Adapter，并把权限、用户、scope 与页面采集来源
@@ -595,9 +601,9 @@ pair-level 负证据与低于阈值的 CV 链路组合会真正 rejected；全�
 
 ### 7.1 自动化测试
 
-2026-08-13 `eval-current` 开发环境全量结果为 518 项通过、46 项跳过；本轮评测证据归档与报告
-定向回归为43项通过，此前 NCE Adapter 和 UI Graph 专项回归为68项通过。后续通过、跳过
-和失败数量仍以当前命令输出为准。跳过项主要
+2026-08-13 `eval-current` 开发环境全量结果为 523 项通过、46 项跳过；current 执行器、
+评测证据归档与报告定向回归为48项通过，此前 NCE Adapter 和 UI Graph 专项回归为
+68项通过。后续通过、跳过和失败数量仍以当前命令输出为准。跳过项主要
 来自开发环境缺少可选 RapidOCR/OpenCV 运行依赖，不是测试失败。A/B 环境准备、样例
 和人工验收步骤统一以根目录 `test.md` 为准。
 

@@ -400,6 +400,7 @@ conclusion.md   是否具备排名条件及推荐结论
 
 ```powershell
 python -m unittest `
+  tests.test_current_evaluation `
   tests.test_evaluation_artifacts `
   tests.test_evaluation_report
 ```
@@ -421,5 +422,7 @@ Browser Use执行器 ├─> run JSON + 原始证据 ─> 归档/Manifest ─> �
 UI-TARS执行器 ───┘
 ```
 
-三套真实执行器仍需分别接入统一契约。任意公网模型 API 只能用于允许数据外发的脱敏
-环境；正式测试区数据不可外传时，必须使用获批内网接口或本地部署。
+`eval-current` 的图片识别执行器已经接入统一契约；Browser Use 与 UI-TARS 执行器分别
+位于各自方案分支。图片子评测不等于三套方案已完成真实页面端到端对比。任意公网模型
+API 只能用于允许数据外发的脱敏环境；正式测试区数据不可外传时，必须使用获批内网接口
+或本地部署。

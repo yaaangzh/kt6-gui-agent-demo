@@ -73,10 +73,65 @@ $health.ui_graph_reasoning
 画布结果仍通过现有扩展异步采集入口产生；UI Graph 规划仍必须保持
 `dry_run_only=true`、`safe_for_execution=false`。
 
+## 运行一次自动评测
+
+`eval-current` 现在提供单次图片评测入口，自动完成本地 CV/OCR、按路由调用模型 API、
+结果融合、UI Graph、确定性断言、原始证据归档和 `runs.jsonl` 追加，不再需要手工拼接
+各阶段 JSON。
+
+先准备一个 `status=ready`、包含 Canvas 任务的 suite。快速冒烟时可将
+`docs/current-evaluation-task.example.json` 复制到评测目录，并保证其中的 `suite_id`、
+`task_id`、验证方法与 suite 一致。正式准确率测试应把 `minimum_object_count` 换成明确的
+`object_exists`、`link_exists` 或 `text_contains` 断言。
+
+```powershell
+$evalDir = '.\runtime_data\evaluation\current-image-smoke'
+$revision = git rev-parse --short HEAD
+
+python -m kt6_backend.current_evaluation_cli `
+  --suite "$evalDir\suite.json" `
+  --task "$evalDir\task-T01.json" `
+  --image 'D:\测试图片\topology.png' `
+  --runs "$evalDir\runs.jsonl" `
+  --workspace "$evalDir\raw" `
+  --repetition 1 `
+  --implementation-revision $revision `
+  --environment-id '<测试环境编号>' `
+  --allow-remote-model
+```
+
+如果 API 是本机 loopback 服务，不需要 `--allow-remote-model`；非本机 endpoint 必须显式
+添加该参数。CLI 会自动读取根目录 `.env`，不会在终端显示 key、模型原文或绝对源路径。
+
+成功后主要结果位于：
+
+```text
+runtime_data/evaluation/current-image-smoke/
+├─ runs.jsonl
+├─ raw/current-T01-r1/
+│  ├─ original-screenshot-001.png
+│  ├─ cv-result-001.json
+│  ├─ cv-metadata-001.json
+│  ├─ routing-result-001.json
+│  ├─ model-result-001.json           # 仅 model_assist 成功时
+│  ├─ vision-model-call-001.jsonl     # 仅实际调用模型时
+│  ├─ fused-result-001.json
+│  ├─ ui-graph-001.json
+│  ├─ action-trace-001.jsonl
+│  └─ validation-result-001.json
+└─ artifacts/current/T01/r001/
+   ├─ manifest.json
+   └─ 上述证据的不可覆盖归档副本
+```
+
+模型超时、传输错误或无效 JSON 也会作为失败运行写入报告数据，不会从完成率中消失。
+当前入口评测的是图片识别链路，不控制真实浏览器，也不等同于 NCE 页面任务端到端完成率。
+
 ## 自动化测试
 
 ```powershell
 python -m unittest `
+  tests.test_current_evaluation `
   tests.test_openai_compatible_api `
   tests.test_openai_compatible_topology_model `
   tests.test_openai_compatible_ui_graph_reasoner `

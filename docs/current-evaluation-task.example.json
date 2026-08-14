@@ -1,0 +1,20 @@
+{
+  "schema_version": "kt6.evaluation-execution-task.v1",
+  "suite_id": "current-image-smoke",
+  "task_id": "T01",
+  "instruction": "识别拓扑图片中的设备，并输出可见节点和链路。",
+  "start_url": "http://127.0.0.1/topology-image",
+  "allowed_hosts": [
+    "127.0.0.1"
+  ],
+  "step_limit": 1,
+  "validation": {
+    "method": "api_assertion",
+    "assertions": [
+      {
+        "kind": "minimum_object_count",
+        "value": 1
+      }
+    ]
+  }
+}

@@ -83,7 +83,7 @@ python -m unittest discover -s tests
 | 分支 | 结果 |
 |---|---|
 | `main` | 451 tests OK，46 skipped |
-| `eval-current` | 518 tests OK，46 skipped |
+| `eval-current` | 523 tests OK，46 skipped |
 | `eval-browser-use` | 456 tests OK，46 skipped |
 | `eval-ui-tars` | 457 tests OK，46 skipped |
 | `ui-graph-textflow-cdp` | 508 tests OK，46 skipped |
@@ -113,6 +113,7 @@ python -m unittest `
 
 ```powershell
 python -m unittest `
+  tests.test_current_evaluation `
   tests.test_openai_compatible_api `
   tests.test_openai_compatible_topology_model `
   tests.test_openai_compatible_ui_graph_reasoner `
@@ -123,6 +124,38 @@ python -m unittest `
 
 检查点：OpenCV/OCR 本地执行；模型请求不包含截图、Base64、本地路径和完整页面 URL；
 provider/model 进入证据；模型输出先严格校验再融合。
+
+真实图片单次自动评测：
+
+1. 按第 3 节准备根目录 `.env`。
+2. 准备 `status=ready` 的 suite，任务类型设为 `canvas` 或 `mixed`。
+3. 将 `docs/current-evaluation-task.example.json` 复制为评测目录下的
+   `task-T01.json`，并让 `suite_id`、`task_id`、验证方法与 suite 对齐。
+4. 执行：
+
+```powershell
+$evalDir = '.\runtime_data\evaluation\current-image-smoke'
+$revision = git rev-parse --short HEAD
+
+python -m kt6_backend.current_evaluation_cli `
+  --suite "$evalDir\suite.json" `
+  --task "$evalDir\task-T01.json" `
+  --image 'D:\测试图片\topology.png' `
+  --runs "$evalDir\runs.jsonl" `
+  --workspace "$evalDir\raw" `
+  --repetition 1 `
+  --implementation-revision $revision `
+  --environment-id '<测试环境编号>' `
+  --allow-remote-model
+```
+
+本机 loopback 模型服务省略 `--allow-remote-model`。每次运行会自动生成 CV、模型调用、
+路由、融合、UI Graph、动作轨迹和验证证据；结果索引在 `$evalDir\runs.jsonl`，原始工作
+文件在 `$evalDir\raw\current-T01-r1`，不可覆盖归档在
+`$evalDir\artifacts\current\T01\r001`。然后按第 11 节执行 `validate` 和 `report`。
+
+这个入口只评测当前方案的图片识别链路；不点击真实页面，不能与 Browser Use/UI-TARS
+端到端浏览器任务的完成率直接混为同一口径。
 
 ## 7. `eval-browser-use` 测试
 

@@ -27,7 +27,8 @@ A/B 验证。测试区环境准备、CDP 采集、内部 GLM 配置、接口检�
 现有方案的大模型 API 实验实现在 `eval-current` 分支：OpenCV/OCR 仍在本地执行，
 通过供应商、模型名和 endpoint 参数接入任意获批的 OpenAI-compatible Chat
 Completions API，API 只接收有界的 CV/OCR JSON；配置和边界见
-[docs/current-model-api.md](./docs/current-model-api.md)。
+[docs/current-model-api.md](./docs/current-model-api.md)。`eval-current` 还提供单次图片评测
+CLI，自动生成 CV、模型、路由、融合、UI Graph、验证和 Manifest 证据。
 
 ## 当前 A/B 状态
 
@@ -65,7 +66,7 @@ B 组自动化回归已通过，下一阶段是在测试区使用真实 Chromium
 | 运行记忆 | SQLite 持久化任务、事件、检查点、场景和业务处理结果 |
 | KT5 接入基础 | 感知拓扑与生成拓扑共用统一 Scene Graph 契约 |
 | 三方案评测报告 | 统一归档现有方案、Browser Use、UI-TARS 的截图、感知结果和操作轨迹，使用 Manifest/SHA-256 校验证据完整性，再检查覆盖率、公平性并生成 JSON/CSV/Markdown/HTML 报告 |
-| 自动化测试 | 2026-08-13 `eval-current` 全量 518 项通过、46 项跳过；各分支结果见 `test.md` |
+| 自动化测试 | 2026-08-13 `eval-current` 全量 523 项通过、46 项跳过；各分支结果见 `test.md` |
 
 ## 业务场景
 
@@ -667,6 +668,8 @@ kt6_backend/
   evaluation_artifacts.py      单次运行原始证据归档、Manifest 和 SHA-256 校验
   evaluation_report.py         三方案运行契约、指标聚合、公平性校验和报告渲染
   evaluation_report_cli.py     初始化、记录、验证及生成评测报告的 CLI
+  current_evaluation.py        当前 CV/OCR + 模型 API 单次评测与证据归档
+  current_evaluation_cli.py    当前方案图片评测入口
   scene_store.py               Scene Graph 持久化
   memory.py                    任务、事件、checkpoint 和业务记忆
   models.py                    Task 与 RuntimeEvent 模型
@@ -686,7 +689,7 @@ tests/                         自动化测试
 python -m unittest discover -s tests
 ```
 
-2026-08-13 `eval-current` 分支开发环境全量结果为 518 项通过、46 项跳过；
+2026-08-13 `eval-current` 分支开发环境全量结果为 523 项通过、46 项跳过；
 后续仍以当前命令输出为准。跳过项来自开发环境缺少可选 RapidOCR/OpenCV 运行依赖，
 不是测试失败。完整的 A/B 测试步骤见 [test.md](./test.md)。覆盖范围包括
 异步 capture job、
@@ -731,6 +734,7 @@ npm run check
 
 ```powershell
 python -m unittest `
+  tests.test_current_evaluation `
   tests.test_evaluation_artifacts `
   tests.test_evaluation_report
 ```
