@@ -22,7 +22,9 @@
 `eval-current` 已新增 `current_evaluation.py` 与 `current_evaluation_cli.py`：输入一张真实
 图片后自动执行本地 CV/OCR、场景路由、必要时调用通用模型 API、确定性融合、UI Graph、
 断言验证、证据 Manifest 和 `runs.jsonl` 追加。模型失败也会记入完成率。该入口是图片
-识别子评测，不包含真实浏览器点击，不得写成 NCE 页面端到端执行器已完成。
+识别子评测，不包含真实浏览器点击，不得写成 NCE 页面端到端执行器已完成。成功运行会
+额外生成 `processed-screenshot-001.png` 四宫格总览，直接展示原图、CV/OCR、模型语义和
+融合结果；总览渲染耗时不计入方案识别耗时。
 
 ### 0.1 UI Graph 阶段接手摘要
 

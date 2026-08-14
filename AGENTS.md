@@ -108,7 +108,8 @@ KT6_UI_TARS_API_ALLOWED_HOSTS
 OpenCV/OCR 在本地运行，模型 API 只接收有界 CV/OCR JSON，不接收截图、Base64、本地
 路径或完整页面 URL。模型结果必须通过严格拓扑契约，再进入确定性融合。
 `current_evaluation_cli.py` 可对单张图片自动生成 CV、模型调用、路由、融合、UI Graph、
-验证和 Manifest 证据；它不控制真实浏览器，不能作为页面任务端到端完成率。
+验证、Manifest 证据和四阶段 PNG 识别总览；它不控制真实浏览器，不能作为页面任务
+端到端完成率。总览渲染属于展示开销，不计入方案耗时。
 
 ### 4.2 `eval-browser-use`
 

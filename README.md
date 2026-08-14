@@ -29,6 +29,8 @@ A/B 验证。测试区环境准备、CDP 采集、内部 GLM 配置、接口检�
 Completions API，API 只接收有界的 CV/OCR JSON；配置和边界见
 [docs/current-model-api.md](./docs/current-model-api.md)。`eval-current` 还提供单次图片评测
 CLI，自动生成 CV、模型、路由、融合、UI Graph、验证和 Manifest 证据。
+每次成功运行还会生成一张四宫格 PNG，把原图、CV/OCR 标注、模型路由/语义补充和
+最终融合结果放在同一张图中，演示时无需阅读 JSON。
 
 ## 当前 A/B 状态
 
@@ -670,6 +672,7 @@ kt6_backend/
   evaluation_report_cli.py     初始化、记录、验证及生成评测报告的 CLI
   current_evaluation.py        当前 CV/OCR + 模型 API 单次评测与证据归档
   current_evaluation_cli.py    当前方案图片评测入口
+  topology_process_visualization.py  单图识别四阶段 PNG 总览
   scene_store.py               Scene Graph 持久化
   memory.py                    任务、事件、checkpoint 和业务记忆
   models.py                    Task 与 RuntimeEvent 模型

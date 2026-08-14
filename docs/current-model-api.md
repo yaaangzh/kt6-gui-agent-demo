@@ -77,7 +77,8 @@ $health.ui_graph_reasoning
 
 `eval-current` 现在提供单次图片评测入口，自动完成本地 CV/OCR、按路由调用模型 API、
 结果融合、UI Graph、确定性断言、原始证据归档和 `runs.jsonl` 追加，不再需要手工拼接
-各阶段 JSON。
+各阶段 JSON。成功运行还会生成一张四宫格 PNG，将原图、CV/OCR 标注、路由/模型语义
+补充和最终融合结果放在同一张图中；PNG 渲染时间不计入方案识别耗时。
 
 先准备一个 `status=ready`、包含 Canvas 任务的 suite。快速冒烟时可将
 `docs/current-evaluation-task.example.json` 复制到评测目录，并保证其中的 `suite_id`、
@@ -117,6 +118,7 @@ runtime_data/evaluation/current-image-smoke/
 │  ├─ vision-model-call-001.jsonl     # 仅实际调用模型时
 │  ├─ fused-result-001.json
 │  ├─ ui-graph-001.json
+│  ├─ processed-screenshot-001.png    # 四阶段识别过程总览
 │  ├─ action-trace-001.jsonl
 │  └─ validation-result-001.json
 └─ artifacts/current/T01/r001/

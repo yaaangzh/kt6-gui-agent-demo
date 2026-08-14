@@ -99,18 +99,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "viewport": "derived-from-image",
             },
         )
-        print(
-            json.dumps(
-                {
-                    "status": "recorded",
-                    "run_id": recorded["run_id"],
-                    "outcome": recorded["outcome"],
-                    "evidence_status": recorded["evidence"]["status"],
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-        )
+        result = {
+            "status": "recorded",
+            "run_id": recorded["run_id"],
+            "outcome": recorded["outcome"],
+            "evidence_status": recorded["evidence"]["status"],
+        }
+        process_image = (
+            args.workspace / recorded["run_id"] / "processed-screenshot-001.png"
+        ).resolve()
+        if process_image.is_file():
+            result["process_image"] = str(process_image)
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0
     except (EvaluationExecutionError, EvaluationDataError, OSError, ValueError):
         print(

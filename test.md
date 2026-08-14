@@ -153,6 +153,9 @@ python -m kt6_backend.current_evaluation_cli `
 路由、融合、UI Graph、动作轨迹和验证证据；结果索引在 `$evalDir\runs.jsonl`，原始工作
 文件在 `$evalDir\raw\current-T01-r1`，不可覆盖归档在
 `$evalDir\artifacts\current\T01\r001`。然后按第 11 节执行 `validate` 和 `report`。
+识别过程总览图位于
+`$evalDir\raw\current-T01-r1\processed-screenshot-001.png`，归档目录中也会保存同名
+文件；它按“原图 → CV/OCR → 路由/模型语义 → 融合结果”四个阶段直接标注结果。
 
 这个入口只评测当前方案的图片识别链路；不点击真实页面，不能与 Browser Use/UI-TARS
 端到端浏览器任务的完成率直接混为同一口径。

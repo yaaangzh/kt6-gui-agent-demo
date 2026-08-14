@@ -129,6 +129,9 @@ class CurrentEvaluationTest(unittest.TestCase):
         self.assertTrue((archived / "manifest.json").is_file())
         self.assertTrue((archived / "vision-model-call-001.jsonl").is_file())
         self.assertTrue((archived / "ui-graph-001.json").is_file())
+        process_image = archived / "processed-screenshot-001.png"
+        self.assertTrue(process_image.is_file())
+        self.assertTrue(process_image.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
 
     def test_cv_only_run_does_not_call_model(self) -> None:
         model = _SemanticModel(AssertionError("model must not be called"))
@@ -198,6 +201,9 @@ class CurrentEvaluationTest(unittest.TestCase):
 
         def fake_run(**kwargs):
             captured.update(kwargs)
+            process_dir = kwargs["workspace_root"] / "current-T01-r1"
+            process_dir.mkdir(parents=True)
+            (process_dir / "processed-screenshot-001.png").write_bytes(_ONE_PIXEL_PNG)
             return {
                 "run_id": "current-T01-r1",
                 "outcome": "success",
@@ -243,34 +249,42 @@ class CurrentEvaluationTest(unittest.TestCase):
 
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(output.getvalue())["status"], "recorded")
+        self.assertEqual(
+            Path(json.loads(output.getvalue())["process_image"]).name,
+            "processed-screenshot-001.png",
+        )
         self.assertEqual(captured["config"].model, "test-model")
         self.assertEqual(captured["source_id"], "topology")
 
     def _run(self, *, repetition, cv_payload, semantic_model):
         runs = self.root / "runs.jsonl"
-        return run_current_evaluation(
-            suite=self.suite,
-            runs_path=runs,
-            workspace_root=self.root / "raw",
-            task=self.task,
-            repetition=repetition,
-            image_path=self.image,
-            source_id=f"fixture-{repetition}",
-            config=self.config,
-            implementation={
-                "name": "KT6 current test",
-                "version": "1.0",
-                "revision": "abc1234",
-                "branch": "eval-current",
-            },
-            environment={
-                "environment_id": "lab-a",
-                "browser": "offline image",
-                "viewport": "derived-from-image",
-            },
-            local_adapter=_CVAdapter(cv_payload),
-            semantic_model=semantic_model,
-        )
+        with patch(
+            "kt6_backend.current_evaluation.render_topology_process_overview",
+            return_value=_ONE_PIXEL_PNG,
+        ):
+            return run_current_evaluation(
+                suite=self.suite,
+                runs_path=runs,
+                workspace_root=self.root / "raw",
+                task=self.task,
+                repetition=repetition,
+                image_path=self.image,
+                source_id=f"fixture-{repetition}",
+                config=self.config,
+                implementation={
+                    "name": "KT6 current test",
+                    "version": "1.0",
+                    "revision": "abc1234",
+                    "branch": "eval-current",
+                },
+                environment={
+                    "environment_id": "lab-a",
+                    "browser": "offline image",
+                    "viewport": "derived-from-image",
+                },
+                local_adapter=_CVAdapter(cv_payload),
+                semantic_model=semantic_model,
+            )
 
     @staticmethod
     def _cv_payload(*, structured: bool) -> dict[str, object]:

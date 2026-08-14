@@ -43,6 +43,7 @@ from .topology_cv_routing import (
 )
 from .topology_fusion import fuse_topology_payloads
 from .topology_model_contract import TopologyModelResponseError
+from .topology_process_visualization import render_topology_process_overview
 from .ui_graph import build_ui_graph
 from .vision_recognition import CanvasFrame, CanvasVisionAdapter
 
@@ -329,6 +330,7 @@ def run_current_evaluation(
             action_status="completed",
         )
 
+    visualization_duration_ms = 0.0
     try:
         if model_result is not None:
             model_path = workspace.write_json("model_result", model_result)
@@ -385,6 +387,38 @@ def run_current_evaluation(
             action_status="error",
         )
 
+    try:
+        visualization_started = time.perf_counter()
+        overview = render_topology_process_overview(
+            image_path=image_path,
+            cv_result=cv_result,
+            routing_result=routing,
+            model_result=model_result,
+            fused_result=fused,
+        )
+        workspace.write_bytes("processed_screenshot", overview, extension="png")
+        visualization_duration_ms = max(
+            0.0, (time.perf_counter() - visualization_started) * 1000.0
+        )
+    except Exception:
+        return _finalize_run(
+            workspace=workspace,
+            runs_path=runs_path,
+            suite=normalized_suite,
+            task=task,
+            repetition=repetition,
+            started_at=started_at,
+            started=started,
+            trace_started=trace_started,
+            implementation=implementation,
+            planner=_planner_record(config),
+            environment=actual_environment,
+            metrics=metrics,
+            success=False,
+            failure_category="visualization_error",
+            action_status="error",
+        )
+
     passed = deterministic_topology_validation(task, fused["result"])
     metrics["first_target_hit"] = passed
     return _finalize_run(
@@ -403,6 +437,7 @@ def run_current_evaluation(
         success=passed,
         failure_category=None if passed else "validation_failed",
         action_status="completed",
+        excluded_duration_ms=visualization_duration_ms,
     )
 
 
@@ -496,6 +531,7 @@ def _finalize_run(
     failure_category: str | None,
     action_status: str,
     outcome: str = "failure",
+    excluded_duration_ms: float = 0.0,
 ) -> dict[str, Any]:
     run_id = workspace.run_id
     workspace.write_jsonl(
@@ -528,7 +564,10 @@ def _finalize_run(
         repetition=repetition,
         outcome="success" if success else outcome,
         started_at=started_at,
-        duration_ms=max(0.0, (time.perf_counter() - started) * 1000.0),
+        duration_ms=max(
+            0.0,
+            (time.perf_counter() - started) * 1000.0 - excluded_duration_ms,
+        ),
         step_count=1,
         implementation=implementation,
         planner=planner,
