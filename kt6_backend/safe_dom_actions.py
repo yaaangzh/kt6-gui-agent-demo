@@ -13,19 +13,24 @@ from .asset_inventory import (
     strong_identity_key,
 )
 from .dom_action_binding import DOMActionBindingService
+from .execution.browser_executor import BrowserExecutor
+from .execution.models import BrowserAction
+from .execution.target_resolver import (
+    TargetResolutionError,
+    UIGraphTargetResolver,
+)
 
 
 class ActionCaptureProvider(Protocol):
     def get_action_snapshot(self, capture_id: str) -> dict[str, Any] | None:
         ...
 
+    def get_ui_graph(self, capture_id: str) -> dict[str, Any] | None:
+        ...
+
 
 class SafeDOMActionService:
-    """Two-phase DOM action guard.
-
-    The current implementation intentionally stops at dry-run. It does not expose
-    a browser click primitive until an authenticated target-system executor exists.
-    """
+    """Two-phase DOM action guard with an optional fixed browser executor."""
 
     OPERATION_STEPS = (
         ("bind_target", "Bind the requested asset to one DOM control"),
@@ -41,8 +46,8 @@ class SafeDOMActionService:
             "final_revalidation",
             "Revalidate capture freshness, asset version and target fingerprint",
         ),
-        ("execute", "Validate the operation without a live side effect"),
-        ("verify_outcome", "Verify the outcome when a live executor exists"),
+        ("execute", "Dispatch an authorized action through the browser runtime"),
+        ("verify_outcome", "Verify the outcome from a new KT6 capture"),
     )
 
     def __init__(
@@ -54,6 +59,8 @@ class SafeDOMActionService:
         capture_max_age_seconds: float = 30.0,
         token_ttl_seconds: float = 15.0,
         plan_ttl_seconds: float = 300.0,
+        executor: BrowserExecutor | None = None,
+        target_resolver: UIGraphTargetResolver | None = None,
     ):
         self.binder = binder
         self.captures = captures
@@ -61,6 +68,8 @@ class SafeDOMActionService:
         self.capture_max_age_seconds = float(capture_max_age_seconds)
         self.token_ttl_seconds = float(token_ttl_seconds)
         self.plan_ttl_seconds = float(plan_ttl_seconds)
+        self.executor = executor
+        self.target_resolver = target_resolver
         self._plans: dict[str, dict[str, Any]] = {}
         self._tokens: dict[str, dict[str, Any]] = {}
         self._audit: list[dict[str, Any]] = []
@@ -105,7 +114,7 @@ class SafeDOMActionService:
             "created_at": now,
             "updated_at": now,
             "expires_at": now + self.plan_ttl_seconds,
-            "dry_run_only": True,
+            "dry_run_only": self.dry_run_only,
             "steps": [
                 {
                     "step_id": step_id,
@@ -141,7 +150,7 @@ class SafeDOMActionService:
             "safe_for_execution": False,
             "requires_fresh_capture": True,
             "requires_confirmation": True,
-            "dry_run_only": True,
+            "dry_run_only": self.dry_run_only,
             "operation_plan": self._public_operation_plan(plan),
         }
 
@@ -187,7 +196,7 @@ class SafeDOMActionService:
             "asset_id": public["asset_id"],
             "action_id": public["action_id"],
             "safe_for_execution": False,
-            "dry_run_only": True,
+            "dry_run_only": self.dry_run_only,
             "operation_plan": public,
         }
 
@@ -377,7 +386,7 @@ class SafeDOMActionService:
             "target": copy.deepcopy(current["control"]),
             "preflight_verified": True,
             "safe_for_execution": False,
-            "dry_run_only": True,
+            "dry_run_only": self.dry_run_only,
             "operation_plan": self.get_plan(plan_id)["operation_plan"],
         }
 
@@ -386,6 +395,8 @@ class SafeDOMActionService:
         *,
         execution_token: str,
         dry_run: bool = True,
+        graph_id: str = "",
+        target_node_id: str = "",
     ) -> dict[str, Any]:
         with self._lock:
             claims = self._tokens.pop(
@@ -445,25 +456,126 @@ class SafeDOMActionService:
             )
         self._update_operation_plan(
             claims["plan_id"],
-            status="executing_dry_run" if dry_run else "blocked",
+            status="executing_dry_run" if dry_run else "executing",
             reason="final_revalidation_succeeded",
             step_id="final_revalidation",
             step_status="completed",
             step_reason="capture_asset_and_target_revalidated",
         )
         if not dry_run:
+            if self.executor is None or self.target_resolver is None:
+                self._update_operation_plan(
+                    claims["plan_id"],
+                    status="blocked",
+                    reason="live_execution_channel_unavailable",
+                    step_id="execute",
+                    step_status="blocked",
+                    step_reason="live_execution_channel_unavailable",
+                )
+                return self._audit_result(
+                    "rejected",
+                    "live_execution_channel_unavailable",
+                    claims,
+                )
+            graph_provider = getattr(self.captures, "get_ui_graph", None)
+            graph = (
+                graph_provider(claims["capture_id"])
+                if callable(graph_provider)
+                else None
+            )
+            if not isinstance(graph, dict):
+                self._update_operation_plan(
+                    claims["plan_id"],
+                    status="blocked",
+                    reason="fresh_ui_graph_unavailable",
+                    step_id="execute",
+                    step_status="blocked",
+                    step_reason="fresh_ui_graph_unavailable",
+                )
+                return self._audit_result(
+                    "rejected", "fresh_ui_graph_unavailable", claims
+                )
+            try:
+                target = self.target_resolver.resolve(
+                    graph,
+                    expected_graph_id=graph_id,
+                    capture_id=claims["capture_id"],
+                    target_node_id=target_node_id,
+                    control=current["control"],
+                    asset_id=claims["asset_id"],
+                )
+            except TargetResolutionError as exc:
+                self._update_operation_plan(
+                    claims["plan_id"],
+                    status="blocked",
+                    reason=exc.error_code,
+                    step_id="execute",
+                    step_status="blocked",
+                    step_reason=exc.error_code,
+                )
+                return self._audit_result(
+                    "rejected", exc.error_code, claims
+                )
+            try:
+                execution = self.executor.execute(
+                    BrowserAction(op="click", target=target)
+                )
+            except Exception:
+                execution = None
+            if execution is None:
+                self._update_operation_plan(
+                    claims["plan_id"],
+                    status="failed",
+                    reason="browser_executor_failed",
+                    step_id="execute",
+                    step_status="failed",
+                    step_reason="browser_executor_failed",
+                )
+                return self._audit_result(
+                    "failed", "browser_executor_failed", claims, executed=False
+                )
+            if not execution.success:
+                self._update_operation_plan(
+                    claims["plan_id"],
+                    status="failed",
+                    reason=execution.error_code,
+                    step_id="execute",
+                    step_status="failed",
+                    step_reason=execution.error_code,
+                )
+                return self._audit_result(
+                    "failed", execution.error_code, claims, executed=False
+                )
             self._update_operation_plan(
                 claims["plan_id"],
-                status="blocked",
-                reason="live_execution_channel_unavailable",
+                status="executed_pending_verification",
+                reason="browser_action_dispatched_pending_outcome_verification",
                 step_id="execute",
-                step_status="blocked",
-                step_reason="live_execution_channel_unavailable",
+                step_status="completed",
+                step_reason="browser_harness_click_dispatched",
+            )
+            self._update_operation_plan(
+                claims["plan_id"],
+                status="executed_pending_verification",
+                reason="browser_action_dispatched_pending_outcome_verification",
+                step_id="verify_outcome",
+                step_status="pending",
+                step_reason="fresh_kt6_capture_required",
             )
             return self._audit_result(
-                "rejected",
-                "live_execution_channel_unavailable",
+                "executed_pending_verification",
+                "browser_action_dispatched_pending_outcome_verification",
                 claims,
+                executed=True,
+                outcome_verified=False,
+                executor_id=self.executor.executor_id,
+                target={
+                    "node_id": target.node_id,
+                    "backend_node_id": execution.backend_node_id,
+                    "frame_id": target.frame_id,
+                    "x": execution.x,
+                    "y": execution.y,
+                },
             )
         self._update_operation_plan(
             claims["plan_id"],
@@ -492,6 +604,10 @@ class SafeDOMActionService:
     def audit_events(self) -> list[dict[str, Any]]:
         with self._lock:
             return copy.deepcopy(self._audit)
+
+    @property
+    def dry_run_only(self) -> bool:
+        return self.executor is None or self.target_resolver is None
 
     @staticmethod
     def _dom_coverage_reason(snapshot: dict[str, Any]) -> str | None:
@@ -621,8 +737,7 @@ class SafeDOMActionService:
                 return str(step["step_id"])
         return None
 
-    @staticmethod
-    def _public_operation_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    def _public_operation_plan(self, plan: dict[str, Any]) -> dict[str, Any]:
         operation_plan = plan["operation_plan"]
         return {
             "plan_id": operation_plan["plan_id"],
@@ -633,7 +748,7 @@ class SafeDOMActionService:
             "created_at": operation_plan["created_at"],
             "updated_at": operation_plan["updated_at"],
             "expires_at": operation_plan["expires_at"],
-            "dry_run_only": True,
+            "dry_run_only": self.dry_run_only,
             "steps": copy.deepcopy(operation_plan["steps"]),
         }
 

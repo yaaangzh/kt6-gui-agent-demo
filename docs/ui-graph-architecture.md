@@ -35,8 +35,10 @@ flowchart LR
     TXT --> GLM["测试区内部 GLM5.1"]
     GLM --> DAG["locate / click / wait / verify DAG 提案"]
     DAG --> V["确定性验证器"]
-    V --> DRY["dry-run 结果"]
-    DRY -. "另行预检、授权、实时复核" .-> X["未来受控执行器"]
+    V --> DRY["dry-run DAG 提案"]
+    DRY -. "资产/权限/fresh capture/一次性令牌" .-> S["SafeDOMAction"]
+    S -. "功能分支显式启用" .-> X["Browser Harness click Runtime"]
+    X --> POST["新的 KT6 capture / OutcomeVerifier"]
 ```
 
 采集、建图、推理和执行彼此隔离：模型只提出计划，不能修改 UI Graph、授予点击
@@ -162,9 +164,16 @@ analysis-only 状态都会优先拒绝。`page_api`、`vision`、`text` 只能�
 }
 ```
 
-这表示“计划结构可供检查”，不表示“可以点击”。未来真实点击仍必须经过独立的
-实时 locator 解析、Playwright actionability 检查、页面新鲜度和目标归属复核、
-权限/用户确认、一次性令牌以及结果验证；该执行链不属于 GLM 推理器。
+这表示“计划结构可供检查”，不表示“可以点击”。`feature/browser-executor` 另行实现
+click-only 执行试验：只有资产/控件绑定、权限/用户确认、fresh capture、目标指纹和
+一次性令牌全部通过后，`UIGraphTargetResolver` 才把同一图中的 CDP 候选解析成
+backend node id，交给 Browser Harness 取 box center 并点击。图和 DAG 的安全字段仍不
+改变；执行授权来自 SafeDOMAction，不来自模型或 UI Graph。
+
+Browser Harness 仅承担 daemon、CDP transport 和坐标点击，不接收任意 CDP 方法、JS
+或模型生成代码，也不启用自修改 helper/domain skill。点击回执只说明事件已派发，计划
+进入 `executed_pending_verification`；必须用新的 KT6 capture 做业务结果验证后才能
+判定成功。第一阶段保留现有 Playwright/CDP 只读 Sidecar，不合并感知连接。
 
 ## 安全边界与运维检查
 
@@ -188,4 +197,6 @@ kt6_backend/ui_graph.py          多源 UI Graph 构建与文本序列化
 kt6_backend/ui_graph_reasoner.py 内部 GLM HTTP 契约
 kt6_backend/ui_operation_graph.py 操作 DAG 严格校验
 kt6_backend/ui_graph_planning.py 建图、推理与验证的 dry-run 服务
+kt6_backend/execution/          click-only Browser Harness Runtime 与目标重绑定
+kt6_backend/safe_dom_actions.py 资产/权限/fresh capture/令牌门禁与执行接线
 ```

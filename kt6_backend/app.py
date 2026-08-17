@@ -16,6 +16,9 @@ from .asset_inventory import (
 from .codeagent_canvas_vision import CodeAgentCanvasVisionAdapter
 from .dom_action_binding import DOMActionBindingService
 from .env_config import load_project_env
+from .execution.browser_executor import HarnessBrowserExecutor
+from .execution.browser_harness_client import BrowserHarnessClient
+from .execution.target_resolver import UIGraphTargetResolver
 from .http_canvas_vision import HTTPTopologyVisionAdapter
 from .hybrid_canvas_vision import HybridCanvasVisionAdapter
 from .local_cv_canvas_vision import LocalCVTopologyVisionAdapter
@@ -55,6 +58,8 @@ UI_GRAPH_REASONER_ENDPOINT_ENV = "KT6_UI_GRAPH_REASONER_ENDPOINT"
 UI_GRAPH_REASONER_API_KEY_ENV = "KT6_UI_GRAPH_REASONER_API_KEY"
 UI_GRAPH_REASONER_ALLOWED_HOSTS_ENV = "KT6_UI_GRAPH_REASONER_ALLOWED_HOSTS"
 UI_GRAPH_REASONER_TIMEOUT_ENV = "KT6_UI_GRAPH_REASONER_TIMEOUT_SECONDS"
+BROWSER_EXECUTION_DRIVER_ENV = "KT6_BROWSER_EXECUTION_DRIVER"
+BROWSER_HARNESS_CDP_URL_ENV = "KT6_BROWSER_HARNESS_CDP_URL"
 DEFAULT_VISION_TIMEOUT_SECONDS = 30.0
 DEFAULT_CODEAGENT_TIMEOUT_SECONDS = 120.0
 DEFAULT_UI_GRAPH_REASONER_TIMEOUT_SECONDS = 60.0
@@ -318,6 +323,37 @@ def _create_ui_graph_reasoner_from_env() -> HTTPUIGraphReasoner | None:
     )
 
 
+def _create_browser_executor_from_env(
+    root: Path,
+) -> tuple[HarnessBrowserExecutor | None, UIGraphTargetResolver | None]:
+    """Build the opt-in click runtime without starting a browser at app import."""
+
+    driver = _optional_env(BROWSER_EXECUTION_DRIVER_ENV)
+    cdp_url = _optional_env(BROWSER_HARNESS_CDP_URL_ENV)
+    if driver is None:
+        if cdp_url is not None:
+            raise ValueError(
+                f"{BROWSER_EXECUTION_DRIVER_ENV}=browser_harness is required when "
+                f"{BROWSER_HARNESS_CDP_URL_ENV} is configured"
+            )
+        return None, None
+    if driver.casefold() != "browser_harness":
+        raise ValueError(
+            f"{BROWSER_EXECUTION_DRIVER_ENV} must be browser_harness"
+        )
+    if cdp_url is None:
+        raise ValueError(
+            f"{BROWSER_HARNESS_CDP_URL_ENV} is required for browser_harness"
+        )
+    client = BrowserHarnessClient(
+        cdp_url=cdp_url,
+        workspace=Path(root).resolve()
+        / "runtime_data"
+        / "browser_harness_workspace",
+    )
+    return HarnessBrowserExecutor(client), UIGraphTargetResolver()
+
+
 @dataclass(frozen=True)
 class AppServices:
     memory: SQLiteMemoryStore
@@ -340,6 +376,9 @@ def create_services(root: Path = ROOT) -> AppServices:
     load_project_env(root)
     canvas_vision = _create_canvas_vision_from_env(root)
     ui_graph_reasoner = _create_ui_graph_reasoner_from_env()
+    browser_executor, browser_target_resolver = (
+        _create_browser_executor_from_env(root)
+    )
     runtime_dir = root / "runtime_data"
     memory = SQLiteMemoryStore(runtime_dir / "kt6_memory.sqlite3")
     scene_store = SQLiteSceneStore(runtime_dir / "kt6_scene.sqlite3")
@@ -363,7 +402,12 @@ def create_services(root: Path = ROOT) -> AppServices:
     asset_inventory = JSONAssetInventoryAdapter(root / "data" / "mock_assets.json")
     asset_resolver = AssetResolver(asset_inventory)
     dom_action_binding = DOMActionBindingService(asset_resolver)
-    safe_dom_actions = SafeDOMActionService(dom_action_binding, page_perception)
+    safe_dom_actions = SafeDOMActionService(
+        dom_action_binding,
+        page_perception,
+        executor=browser_executor,
+        target_resolver=browser_target_resolver,
+    )
     ui_graph_planning = UIGraphPlanningService(page_perception, ui_graph_reasoner)
     tools = MockBusinessTools(
         root / "data",
@@ -454,6 +498,18 @@ class KT6Handler(SimpleHTTPRequestHandler):
                         "arbitrary_network_interception": False,
                     },
                     "ui_graph_reasoning": services.ui_graph_planning.health(),
+                    "browser_execution": {
+                        "configured": not services.safe_dom_actions.dry_run_only,
+                        "driver": (
+                            services.safe_dom_actions.executor.executor_id
+                            if services.safe_dom_actions.executor is not None
+                            else None
+                        ),
+                        "supported_operations": ["click"],
+                        "raw_cdp_exposed": False,
+                        "javascript_exposed": False,
+                        "outcome_verification": "fresh_kt6_capture_required",
+                    },
                 },
             )
             return
@@ -711,8 +767,16 @@ class KT6Handler(SimpleHTTPRequestHandler):
             result = services.safe_dom_actions.execute(
                 execution_token=str(payload.get("execution_token", "")),
                 dry_run=payload.get("dry_run") is not False,
+                graph_id=str(payload.get("graph_id", "")),
+                target_node_id=str(payload.get("target_node_id", "")),
             )
-            self._json(200 if result["status"] == "dry_run_ok" else 409, result)
+            if result["status"] == "dry_run_ok":
+                status = 200
+            elif result["status"] == "executed_pending_verification":
+                status = 202
+            else:
+                status = 409
+            self._json(status, result)
             return
         if path == "/api/tasks":
             query = payload.get("query", "").strip()

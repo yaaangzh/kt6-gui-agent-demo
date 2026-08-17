@@ -5,8 +5,9 @@
 这不是纯前端动画演示：前端负责采集页面和呈现事件，后端负责意图路由、任务状态、业务步骤、方案授权、资源锁、场景校验、执行结果与运行记忆。
 
 当前阶段结论：**KT6 核心架构、端到端 PoC、三种 Canvas 像素识别驱动，以及 B 组
-多源 UI Graph dry-run 规划已完成；真实业务系统 A/B、真实图片准确率评测和真实设备
-下发尚未完成。**
+多源 UI Graph dry-run 规划已完成；`feature/browser-executor` 已接入默认关闭、仅 click
+的 Browser Harness 浏览器 Runtime；真实业务系统验收、动作后业务结果验证、真实图片
+准确率评测和真实设备下发尚未完成。**
 
 供其他 Codex 或新开发环境接手时，请同时阅读
 [CODEX_HANDOFF.md](./CODEX_HANDOFF.md)；其中记录了当前工作目录、分阶段拓扑链路、
@@ -20,9 +21,10 @@ CodeAgentCLI 的 Windows 启动方式、真实图片验证结论、已知限制�
 使用方式见 [docs/ui-graph-architecture.md](./docs/ui-graph-architecture.md)。该路径参考
 TextFlow 的中间文本图分层思想，当前不包含 OmniParser。
 
-UI Graph 新方案当前保留在 `ui-graph-textflow-cdp` 分支，与 `main` 基线分开进行
-A/B 验证。测试区环境准备、CDP 采集、内部 GLM 配置、接口检查、指标和通过条件见
-[test.md](./test.md)。当前代码只生成并验证不可执行的 dry-run 操作计划。
+UI Graph 新方案保留在 `ui-graph-textflow-cdp`；Browser Harness 执行试验继续隔离在
+`feature/browser-executor`。测试区环境准备、CDP 采集、内部 GLM 配置、接口检查和
+执行步骤见 [test.md](./test.md)。GLM 产出的 UI Operation DAG 始终是不可执行提案；
+真实 click 只能经过独立 SafeDOMAction 授权链。
 
 ## 当前 A/B 状态
 
@@ -30,10 +32,12 @@ A/B 验证。测试区环境准备、CDP 采集、内部 GLM 配置、接口检�
 |---|---|---|
 | A 组 | `main` | 现有 DOM、Canvas、OpenCV/OCR 和安全动作链基线 |
 | B 组 | `ui-graph-textflow-cdp` | Playwright/CDP、多源 UI Graph、内部 GLM5.1 DAG 规划 |
+| 执行试验 | `feature/browser-executor` | SafeDOMAction + CDP 目标重绑定 + Browser Harness click |
 
-B 组自动化回归已通过，下一阶段是在测试区使用真实 Chromium/CDP、真实 NCE/FEBS
-页面和内部 GLM5.1 endpoint 采集 A/B 数据。当前尚未接入真实浏览器点击执行器，
-也不能把合成测试结果等同于目标系统现场验收。
+B 组自动化回归已通过，执行试验分支已经完成 click-only 代码接线；下一阶段是在测试区
+使用真实 Chromium/CDP、真实 NCE/FEBS 页面和内部 GLM5.1 endpoint 验证完整链路。
+当前点击成功只表示输入事件已派发，必须重新采集并由 KT6 验证业务结果，不能把合成
+测试或 `executed_pending_verification` 等同于目标系统现场验收。
 公共配置、评测框架和配套文档会同步维护到所有实验分支；各分支只隔离方案执行器。
 分支职责、统一测试入口和开发约束分别见 [test.md](./test.md) 与
 [AGENTS.md](./AGENTS.md)。
@@ -53,13 +57,13 @@ B 组自动化回归已通过，下一阶段是在测试区使用真实 Chromium
 | 多源 UI Graph | 汇合 DOM/CDP/page_api/vision/text，保留节点来源、父子/owner/action/semantic 边及交互候选 |
 | 内部 GLM 结构规划 | 测试区 GLM5.1 只提出 `locate/click/wait/verify` DAG；严格验证后仍为不可执行 dry-run |
 | 在线页面采集 | Chrome/Edge 扩展 v0.5.2，并行采集 DOM/ARIA 与 Canvas/SVG 可见区域截图；耗时识别由后端异步任务执行，弹窗重开可恢复进度 |
-| DOM 安全动作 | 权威资产解析、设备与控件双重绑定、六步操作计划、新鲜页面复核、一次性令牌和 dry-run；真实点击尚未接入 |
+| DOM 安全动作 | 权威资产解析、设备与控件双重绑定、六步计划、新鲜页面复核和一次性令牌；默认 dry-run，功能分支可把已授权 CDP 目标交给 Browser Harness click |
 | 感知缓存 | Scene Graph 缓存、`scene_revision`、`HIT/MISS/INCREMENTAL` |
 | 拓扑变化检测 | 节点、位置、链路增删及链路语义属性变化检测；关键变化触发重规划 |
 | 运行记忆 | SQLite 持久化任务、事件、检查点、场景和业务处理结果 |
 | KT5 接入基础 | 感知拓扑与生成拓扑共用统一 Scene Graph 契约 |
 | 三方案评测报告 | 统一归档现有方案、Browser Use、UI-TARS 的截图、感知结果和操作轨迹，使用 Manifest/SHA-256 校验证据完整性，再检查覆盖率、公平性并生成 JSON/CSV/Markdown/HTML 报告 |
-| 自动化测试 | 2026-08-13 `ui-graph-textflow-cdp` 全量 508 项通过、46 项跳过；各分支结果见 `test.md` |
+| 自动化测试 | 2026-08-17 `feature/browser-executor` 全量 516 项通过、46 项跳过；各分支结果见 `test.md` |
 
 ## 业务场景
 
@@ -232,14 +236,16 @@ AP1 + 当前 page_capture_id
 -> POST /api/dom-actions/preflight
 -> 复核资产版本/状态、页面、frame、document、selector、控件归属和动作语义
 -> 签发 15 秒有效、只能消费一次的随机令牌
--> POST /api/dom-actions/execute（当前只做 dry-run，不产生副作用）
+-> POST /api/dom-actions/execute（默认 dry-run；功能分支显式启用后可派发 click）
 ```
 
 `operation_plan` 固定显示六步：`bind_target`、`confirm_and_authorize`、
 `fresh_capture_revalidation`、`final_revalidation`、`execute`、`verify_outcome`。
 计划查询接口会反映准备、复核、就绪、阻断、执行或过期状态；一次性令牌过期后，
-计划也会显示为过期。当前 `execute` 仍只验证 dry-run，`verify_outcome` 要等受控真实
-执行器接入后才能完成。
+计划也会显示为过期。Browser Harness 默认关闭；启用后，实时 click 还必须把本次
+`graph_id + target_node_id` 绑定到同一次 fresh capture 中的 CDP 节点，并严格匹配
+backend node id、稳定 `#id`、资产归属和动作标识。派发后计划进入
+`executed_pending_verification`，`verify_outcome` 仍等待新的 KT6 capture 和业务校验。
 
 任何同名、多候选、证据冲突、跨 frame/document、页面来源不可信、控件禁用、选择器
 缺失、资产版本变化、页面过期、确认目标不一致、权限不足、令牌过期或重放都会拒绝。
@@ -510,7 +516,7 @@ python -m kt6_backend.topology_fusion_cli `
 ### 环境要求
 
 - Python 3.10 或更高版本。
-- KT6 核心链路仅使用 Python 标准库；启用不依赖 Agent 的本地单图识别时，执行 `python -m pip install -r requirements-local-vision.txt` 安装 RapidOCR ONNX 与 OpenCV 运行依赖。
+- KT6 核心链路仅使用 Python 标准库；本地单图识别执行 `python -m pip install -r requirements-local-vision.txt`；Browser Harness 执行试验使用独立 Python 3.12 环境执行 `python -m pip install -r requirements-browser-executor.txt`。
 - Chrome、Edge 或其他现代浏览器。
 
 ### 启动
@@ -611,10 +617,10 @@ runtime_data/
 
 - Runtime 状态流转、事件、锁、checkpoint、持久化是真实实现。
 - DOM、Canvas 像素采集、Scene 缓存、资产解析规则、双重绑定、执行前复核和一次性
-  dry-run 令牌是真实实现。
+  令牌是真实实现；Browser Harness click 仅在功能分支显式启用。
 - Demo 拓扑业务语义、指标、根因输入和设备动作结果仍是 Mock。
-- 当前资产数据来自 `data/mock_assets.json`，请求中的权限列表不是企业鉴权；
-  `dry_run=false` 会被明确拒绝，代码没有真实浏览器点击或设备关闭通道。
+- 当前资产数据来自 `data/mock_assets.json`，请求中的权限列表不是企业鉴权；默认配置会
+  拒绝 `dry_run=false`。功能分支只接入受控浏览器 click，不等于真实设备 API 下发。
 - CanvasVision 本地 RapidOCR/OpenCV、HTTP 与 CodeAgent read-tool 接入已经具备，但真实图片准确率验证、企业鉴权、真实设备下发和生产级回滚尚未完成。
 
 接入真实系统时，应保留 Runtime 与 Playbook，替换 `kt6_backend/tools.py` 中的业务适配实现，并通过 `kt6_backend/tool_registry.py` 注册真实工具。
@@ -640,7 +646,8 @@ kt6_backend/
   ui_graph_planning.py         不可执行的 UI Graph 规划服务
   asset_inventory.py           权威资产适配接口、JSON Demo Adapter 与唯一性解析
   dom_action_binding.py        设备主体和所属 DOM 动作控件的双重绑定
-  safe_dom_actions.py          新鲜页面复核、一次性令牌、审计与 dry-run 门禁
+  safe_dom_actions.py          新鲜页面复核、一次性令牌、审计与可选 click 派发
+  execution/                   固定动作模型、CDP 目标重绑定与 Browser Harness 适配
   local_cv_canvas_vision.py    本地 RapidOCR/OpenCV 单图片视觉 Adapter
   codeagent_canvas_vision.py   本机 CodeAgent read-tool 视觉 Adapter
   http_canvas_vision.py        生产 HTTP 视觉 Adapter 与严格输入输出协议
@@ -680,7 +687,7 @@ tests/                         自动化测试
 python -m unittest discover -s tests
 ```
 
-2026-08-13 `ui-graph-textflow-cdp` 分支全量结果为 508 项通过、46 项跳过；
+2026-08-17 `feature/browser-executor` 分支全量结果为 516 项通过、46 项跳过；
 后续仍以当前命令输出为准。跳过项来自开发环境缺少可选 RapidOCR/OpenCV 运行依赖，
 不是测试失败。完整的 A/B 测试步骤见 [test.md](./test.md)。覆盖范围包括
 异步 capture job、
@@ -746,6 +753,7 @@ Manifest、文件或这些语义绑定有缺失/改动时，该运行不能参�
 
 ```powershell
 python -m unittest `
+  tests.test_browser_executor `
   tests.test_page_capture_jobs `
   tests.test_page_perception `
   tests.test_browser_extension_assets `
@@ -758,4 +766,5 @@ python -m unittest `
 ```
 
 当前仓库没有 FEBS/NCE 前端源码，因此扩展尚未嵌入目标系统；它只是外部采集桥梁。
-代码也没有真实浏览器点击或设备关闭通道，所有动作仍停在可审计的 dry-run。
+Browser Harness click 只有显式配置后才可用，设备 API 下发仍未接入；现场验收前应先在
+隔离、可恢复页面验证点击与新的 KT6 capture，不能把待验证状态记为任务成功。

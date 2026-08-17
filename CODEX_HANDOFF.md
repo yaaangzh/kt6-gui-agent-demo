@@ -15,7 +15,8 @@
 - `eval-browser-use`：Browser Use/CDP + 通用 OpenAI-compatible 规划 API；
 - `eval-ui-tars`：通用规划 API + 独立 UI-TARS 截图定位 API。
 
-`ui-graph-textflow-cdp` 继续作为多源 UI Graph/DAG 实验；`br_omniParser` 只保留历史。
+`ui-graph-textflow-cdp` 继续作为多源 UI Graph/DAG 实验；`feature/browser-executor` 在其上
+隔离验证 Browser Harness click 执行层；`br_omniParser` 只保留历史。
 公共文件修改后必须逐分支同步检查代码、README、`test.md`、`AGENTS.md` 和方案文档，
 但不得用公共同步名义合并各分支的功能实现。最新可执行流程以 `test.md` 为准。
 
@@ -47,11 +48,12 @@ B 组已经实现：
 Manifest/SHA-256 完整性校验、覆盖率/公平性/安全门禁，以及 JSON、CSV、Markdown、
 HTML 报告生成流程。
 
-2026-08-13 当前分支完整回归为 487 项通过、46 项跳过；本轮评测证据归档与报告定向
-回归为43项通过；此前 NCE Adapter 和 UI Graph 专项回归为68项通过。
+2026-08-17 `feature/browser-executor` 完整回归为 516 项通过、46 项跳过；Browser
+Harness 执行层及相邻安全链定向回归为 68 项通过。
 这只证明开发环境自动化路径通过；真实 Chromium/CDP、真实 NCE/FEBS 页面和测试区
-内部 GLM5.1 endpoint 尚未现场验收。当前计划始终为 `dry_run_only=true`、
-`safe_for_execution=false`，没有真实浏览器点击执行器。
+内部 GLM5.1 endpoint 尚未现场验收。UI Operation DAG 始终为 `dry_run_only=true`、
+`safe_for_execution=false`。`feature/browser-executor` 已增加默认关闭的 click-only
+Browser Harness Runtime，但尚未完成真实 NCE 点击和动作后业务结果现场验收。
 
 详细设计见 [docs/ui-graph-architecture.md](./docs/ui-graph-architecture.md)，完整 A/B
 测试手册见 [test.md](./test.md)。TextFlow 只作为“输入 → 中间文本图 → 推理器”的
@@ -101,8 +103,9 @@ Canvas/SVG/图形区域。扩展每次采集至多截取一个视觉主帧，与
 
 扩展同时采集资产 ID、管理 IP、序列号、站点、版本、动作 ID 和控件归属。后端已
 实现权威资产唯一解析、设备/控件双重绑定、六步 `operation_plan`、新鲜页面复核、
-一次性令牌和 dry-run；计划与令牌过期可通过查询接口观察。扩展仍不直接点击页面，
-服务端也没有真实设备动作通道。
+一次性令牌和 dry-run；计划与令牌过期可通过查询接口观察。扩展仍不直接点击页面。
+功能分支可把已授权 CDP 目标交给 Browser Harness click，但没有真实设备 API 下发，
+也没有把点击回执当作业务结果。
 
 用户已明确：新 UI Graph 方案必须保留在独立分支，与 `main` 做 A/B 对比；先验证
 真实页面识别效率、来源标记、父子关系、点击候选和内部 GLM 编排，再决定是否合入
@@ -118,6 +121,7 @@ Canvas/SVG/图形区域。扩展每次采集至多截取一个视觉主帧，与
 GitHub：git@github.com:yaaangzh/kt6-gui-agent-demo.git
 基线分支（A 组）：main
 方案分支（B 组）：ui-graph-textflow-cdp
+执行试验分支：feature/browser-executor
 当前检出分支：以 `git branch --show-current` 为准
 当前本地 HEAD 与远端状态：以 `git log`、`git status` 和 `git fetch` 的结果为准
 ```
@@ -172,6 +176,9 @@ kt6_backend/evaluation_report_cli.py
 kt6_backend/asset_inventory.py
 kt6_backend/dom_action_binding.py
 kt6_backend/safe_dom_actions.py
+kt6_backend/execution/browser_harness_client.py
+kt6_backend/execution/browser_executor.py
+kt6_backend/execution/target_resolver.py
 kt6_backend/runtime.py
 browser_sidecar/capture-ui-graph.mjs
 browser_extension/manifest.json
@@ -204,6 +211,7 @@ tests/test_asset_inventory.py
 tests/test_dom_action_binding.py
 tests/test_safe_dom_actions.py
 tests/test_safe_dom_action_plan.py
+tests/test_browser_executor.py
 tests/test_asset_action_integration.py
 tests/test_dom_action_api.py
 tests/test_browser_extension_assets.py
@@ -366,10 +374,12 @@ D:\yangzehui\FreeStyleCopilot\browser_extension
    资产状态/版本和完整 DOM 目标指纹一致。
 6. 复核通过后签发 15 秒有效、只能消费一次的随机令牌；并发消费只有一个成功。
    `GET /api/dom-actions/plans/{plan_id}` 会显示步骤推进、阻断和令牌到期后的过期状态。
-7. `execute` 当前只支持 dry-run；`dry_run=false` 固定返回
-   `live_execution_channel_unavailable`。所有层级的 `safe_for_execution` 均为
-   `false`，复核结果只用 `preflight_verified=true` 表示；`verify_outcome` 在真实执行器
-   接入前不会伪装为已完成。
+7. 默认配置下 `execute(dry_run=false)` 仍返回 `live_execution_channel_unavailable`。
+   功能分支只有显式配置 Browser Harness 后才接受实时 click，并额外要求本次
+   `graph_id/target_node_id` 与 fresh capture 一致，CDP 节点具备 backend id，且其稳定
+   `#id`、owner、action 与 SafeDOMAction 绑定完全一致。点击后状态为
+   `executed_pending_verification`；所有 `safe_for_execution` 仍为 `false`，新的 KT6
+   capture 完成业务验证前不能记为成功。
 
 接口：
 
@@ -783,7 +793,8 @@ python -m kt6_backend.topology_hybrid_cli `
 - 真实图片准确率评测尚未完成。
 - 模型推断语义、未定位节点坐标和页面自报的业务 ID 不可直接用于 GUI 点击。
 - 只有 CV 或渲染器提供的可验证几何信息可以参与真实定位。
-- DOM 安全链路已完成资产解析、双重绑定、复核、令牌和 dry-run，但没有真实点击。
+- DOM 安全链路已完成资产解析、双重绑定、复核和令牌；默认仍是 dry-run，功能分支已
+  接入受控 Browser Harness click，但未完成真实 NCE 与动作后业务结果验收。
 - 当前 capture、权限、资产数据、业务语义、指标和设备动作仍有 Mock/测试边界。
 - 生产必须接入服务端身份授权、可信浏览器会话和点击前原子 live DOM 复核，或优先
   使用以 canonical asset_id 为参数的受控设备 API。
@@ -815,8 +826,8 @@ python -m kt6_backend.topology_hybrid_cli `
 - 当前只通过单元测试和本地样例验证，尚未在真实测试区 Chromium/CDP 环境跑完 A/B。
 - 内部 GLM5.1 的实际 endpoint、模型响应格式、耗时和稳定性仍需在测试区联调；没有
   GLM 时可以使用确定性/fixture 规划验证图构建和安全校验，但不能代表模型效果。
-- CDP sidecar 当前是只读快照入口；没有浏览器动作执行器，也没有通过 runtime
-  JavaScript 或网络拦截读取任意页面内部状态。
+- CDP sidecar 仍是独立只读快照入口；功能分支的 Browser Harness 只承担授权后的 click，
+  不向模型或上层暴露 runtime JavaScript、任意 raw CDP 或网络拦截。
 - `page_api` 只有站点显式提供受信任 adapter 时才可用；不能把页面自报字段直接提升为
   可点击或可执行证据。
 - `interaction.candidate=true` 不是“可以立即点击”。操作仍需稳定 rebind、确定性 DAG
@@ -916,12 +927,12 @@ GLM 输出可以直接描述任意点击目标或产生循环依赖
    CDP、page_api、vision、text 来源标记、父子/owner 边和交互候选是否符合页面事实。
 3. 接入测试区内部 GLM5.1，记录 UI Graph 构建耗时、prompt/response 耗时、任务成功率、
    目标命中率、无效计划率和安全拒绝率；同时保留原方案的同口径数据。
-4. 用代表性任务验证“定位父容器 -> 子控件 -> 点击提案 -> 等待 -> 结果验证”DAG；当前
-   只验证规划和 dry-run，不执行真实点击。A/B 达标后再由用户决定是否合入 `main`。
+4. 在 `feature/browser-executor` 用可恢复任务验证“定位父容器 -> 子控件 -> 安全授权 ->
+   Browser Harness click -> 新 capture -> 结果验证”；点击回执不得直接算任务成功。
 5. 规划结果需要接执行链时，只桥接已有 DOM 安全动作链，并继续要求强资产身份、稳定
    rebind、服务端权限、二次采集和 preflight；不要让 GLM 或 UI Graph 直接执行动作。
 6. 将 `JSONAssetInventoryAdapter` 替换成经过认证的 NCE/FEBS 资产查询，把权限、用户和
-   scope 换成服务端身份会话；完成受控执行器与回滚前继续保持 dry-run。
+   scope 换成服务端身份会话；完成确定性 OutcomeVerifier 与回滚前不要扩大 click 范围。
 7. 继续复测 `1.png`、`2.png`、`3.png` 并建立人工节点/链路真值和多图片黄金数据集，
    不再用“链接越多越好”判断准确率。
 8. 后续再处理超过 900 秒的离线任务预算和正式 events 恢复 CLI；不要让这些工作阻塞

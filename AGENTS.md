@@ -16,6 +16,7 @@ KT6 / FreeStyleCopilot 是无线网络运维 PoC，把自然语言意图、页�
 | `eval-browser-use` | Browser Use/CDP + 任意获批 OpenAI-compatible 规划模型 API |
 | `eval-ui-tars` | 通用规划模型 API + 独立 UI-TARS 视觉定位 API + Playwright |
 | `ui-graph-textflow-cdp` | CDP、多源 UI Graph、操作 DAG 的实验分支 |
+| `feature/browser-executor` | 在 UI Graph 分支上验证 Browser Harness click 执行层 |
 | `br_omniParser` | 已停止的 OmniParser 试点，仅保留历史对照，不混入当前方案 |
 
 功能实验保持分支隔离；公共基础设施必须同步到所有仍保留的分支。公共修改包括：
@@ -39,6 +40,7 @@ KT6 / FreeStyleCopilot 是无线网络运维 PoC，把自然语言意图、页�
 → DOM、Canvas、CV/OCR、模型或 CDP 证据
 → 人在环确认
 → dry-run 安全动作计划
+→ 可选受控浏览器 Runtime（功能分支显式启用）
 ```
 
 主要 Runtime 文件：
@@ -125,7 +127,15 @@ UI Graph 统一 `dom/cdp/page_api/vision/text` 来源，并生成 `locate/click/
 操作 DAG。当前 UI Graph CodeAgent CLI Adapter 尚未接通；未配置 HTTP Reasoner 时规划
 接口返回 503 是预期边界，不能写成“内部 GLM UI Graph 编排已实机完成”。
 
-### 4.5 `br_omniParser`
+### 4.5 `feature/browser-executor`
+
+Browser Harness 只作为 click-only Browser Runtime：上层必须先通过 UI Graph/DAG、
+资产与控件绑定、权限确认、fresh capture、指纹和一次性令牌。执行器只接收已经解析的
+正整数 CDP backend node id，不接收模型生成的 CDP 方法、JavaScript 或 Python。
+点击派发不等于业务成功；在新的 KT6 capture 完成确定性验证前，状态必须保持
+`executed_pending_verification`。只读 Playwright/CDP Sidecar 保持独立，不在本阶段重构。
+
+### 4.6 `br_omniParser`
 
 该分支只保留历史试点。除公共基础设施同步和必要安全修复外，不继续扩展 OmniParser，
 也不将其结果混入当前三方案报告。
@@ -141,6 +151,8 @@ UI Graph 统一 `dom/cdp/page_api/vision/text` 来源，并生成 `locate/click/
 - 原始 `actionable=true`、business_id、element_id 不能绕过候选门禁。
 - 页面 API 只读取显式 `window.__KT6_PAGE_ADAPTER__`，不拦截任意 fetch/XHR。
 - CDP 只允许 `localhost`、`127.0.0.1` 或 `::1`。
+- Browser Harness 默认关闭，第一阶段只允许 click；禁止自修改 helper、domain skill、
+  任意 raw CDP 和 JavaScript 进入正式执行链。
 
 ### 5.1 性能与实现范围
 

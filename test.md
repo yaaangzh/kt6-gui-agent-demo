@@ -12,6 +12,7 @@
 | `eval-browser-use` | Browser Use/CDP + 通用规划模型 API |
 | `eval-ui-tars` | 通用规划模型 API + UI-TARS 截图定位 API |
 | `ui-graph-textflow-cdp` | CDP、多源 UI Graph、操作 DAG 安全校验 |
+| `feature/browser-executor` | SafeDOMAction 授权后通过 Browser Harness 派发 click |
 | `br_omniParser` | 历史回归，不纳入当前三方案结论 |
 
 目标测试目录：`D:\04project\FreeStyle_Copilot_KT6_demo`。页面数据、截图、DOM/CDP、
@@ -72,6 +73,17 @@ KT6_UI_TARS_API_ALLOWED_HOSTS=<获批服务精确主机名>
 
 正式测试区数据未经批准不得发送到公网 endpoint。
 
+### 3.4 Browser Harness 执行层
+
+只在 `feature/browser-executor` 的隔离、可恢复页面测试：
+
+```dotenv
+KT6_BROWSER_EXECUTION_DRIVER=browser_harness
+KT6_BROWSER_HARNESS_CDP_URL=http://127.0.0.1:9222
+```
+
+未设置这两个变量时，`dry_run=false` 继续 fail closed。CDP 地址只允许 loopback。
+
 ## 4. 公共自动化回归
 
 ```powershell
@@ -87,6 +99,7 @@ python -m unittest discover -s tests
 | `eval-browser-use` | 456 tests OK，46 skipped |
 | `eval-ui-tars` | 457 tests OK，46 skipped |
 | `ui-graph-textflow-cdp` | 508 tests OK，46 skipped |
+| `feature/browser-executor` | 516 tests OK，46 skipped |
 | `br_omniParser` | 461 tests OK，46 skipped |
 
 测试数量会随公共同步增加，以当前命令最终 `OK` 为准。公共配置和报告定向测试：
@@ -194,13 +207,59 @@ python -m unittest `
 - iframe、Shadow DOM、parent/owner 关系符合页面事实；
 - 未配置真实 Reasoner 时规划接口 503 是当前预期。
 
-## 10. `br_omniParser` 历史分支
+## 10. `feature/browser-executor` 测试
+
+第一阶段只测试 click，不测试输入、滚动、键盘、任意 CDP 或 JavaScript。使用独立
+Python 3.12 环境安装可选依赖：
+
+```powershell
+py -3.12 -m venv .venv-browser-executor
+.\.venv-browser-executor\Scripts\Activate.ps1
+python -m pip install -r .\requirements-browser-executor.txt
+browser-harness --doctor
+```
+
+先跑不需要真实浏览器的自动化回归：
+
+```powershell
+python -m unittest `
+  tests.test_browser_executor `
+  tests.test_safe_dom_actions `
+  tests.test_safe_dom_action_plan `
+  tests.test_dom_action_api `
+  tests.test_ui_graph `
+  tests.test_ui_operation_graph `
+  tests.test_app
+```
+
+实机只使用可恢复的“打开 AP_001 详情”类任务，步骤如下：
+
+1. Chrome/Edge 以 loopback remote debugging 启动，NCE 标签页已登录且页面状态可恢复。
+2. 用现有扩展采集 DOM，用 `browser_sidecar/capture-ui-graph.mjs` 采集同一页面的 CDP
+   snapshot；第一阶段将两份证据放进同一次 `POST /api/perception/captures` 请求，其中
+   Sidecar JSON 位于 `cdp_snapshot` 字段。不要声称扩展与 Sidecar 已自动实时合并。
+3. `POST /api/ui-operations/plan`，检查 click 指向带正整数 backend node id 的 CDP
+   candidate；DAG 本身仍为 `dry_run_only=true`。
+4. 依次调用 `/api/dom-actions/prepare` 与 `/api/dom-actions/preflight`，使用不同的新鲜
+   capture、准确 asset/action 确认和所需权限取得一次性 token。
+5. 调用 `/api/dom-actions/execute`，传入 token、`dry_run=false`、该 fresh capture 的
+   `graph_id` 和已经验证的 `target_node_id`。只有 CDP 节点的 `#id`、owner、action 与
+   DOM 绑定完全一致时才会交给 Browser Harness。
+6. 预期 HTTP 202，状态为 `executed_pending_verification`。这只证明 click 已派发；
+   重新进行 KT6 capture，确认 AP_001 详情面板后，才能在业务评测中记为成功。
+
+执行回执写入内存审计接口 `GET /api/dom-actions/audit`，计划进度通过
+`GET /api/dom-actions/plans/{plan_id}` 查看；Browser Harness 隔离工作区位于
+`runtime_data/browser_harness_workspace/`。当前代码不自动生成执行录像，也不把点击回执
+当作评测成功证据。
+
+## 11. `br_omniParser` 历史分支
 
 只运行全量回归和公共配置/报告测试，不新增当前三方案结果。OmniParser 结果不能与
 `current/browser_use/ui_tars` 混在同一正式比较中。若公共代码同步导致回归，修复公共
 兼容性，不继续扩展 OmniParser 功能。
 
-## 11. 统一评测报告
+## 12. 统一评测报告
 
 初始化示例：
 
@@ -238,7 +297,7 @@ python -m kt6_backend.evaluation_report_cli report `
 证据不完整、哈希改变、公平性不满足或存在安全违规时不得自动排名。详细角色和字段见
 `docs/evaluation-reporting.md`。
 
-## 12. 测试交付物
+## 13. 测试交付物
 
 ```text
 git-version.txt
