@@ -310,10 +310,7 @@ class GenericScenarioRunnerTest(unittest.TestCase):
             def __init__(self):
                 self.sequence = 0
 
-            def navigate_to(self, page_url):
-                return page_url
-
-            def bind_page_target(self, page_url):
+            def open_or_bind_target(self, page_url):
                 return {"target_id": "target-1", "page_url": page_url}
 
             def capture_page_payload(self, *, include_canvas=True):
@@ -384,9 +381,11 @@ class FailureCategoryAndGenericVerifierTest(unittest.TestCase):
             "execution_planner_invalid_response": PLANNER_FAILED,
             "dom_grounding_target_missing": TARGET_NOT_FOUND,
             "dom_grounding_target_ambiguous": TARGET_AMBIGUOUS,
+            "browser_target_ambiguous": TARGET_AMBIGUOUS,
             "scenario_capture_incomplete": PERCEPTION_FAILED,
             "browser_page_changed": PAGE_CHANGED,
             "browser_target_occluded": EXECUTION_FAILED,
+            "browser_session_target_changed": EXECUTION_FAILED,
             "scenario_expected_outcome_missing": VERIFY_FAILED,
         }
         for code, category in cases.items():

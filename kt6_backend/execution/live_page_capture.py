@@ -20,36 +20,6 @@ class LivePageCaptureError(RuntimeError):
         self.error_code = error_code
 
 
-def navigate_to(
-    cdp_call: Callable[..., Mapping[str, Any]],
-    page_url: str,
-    *,
-    url_policy: ExecutionURLPolicy,
-) -> str:
-    try:
-        target_url = url_policy.validate(page_url)
-    except ExecutionURLPolicyError as exc:
-        raise LivePageCaptureError(exc.error_code) from exc
-    response = cdp_call("Page.navigate", url=target_url)
-    if response.get("errorText"):
-        raise LivePageCaptureError("browser_navigation_failed")
-    deadline = time.monotonic() + 15.0
-    while time.monotonic() < deadline:
-        frame_tree = cdp_call("Page.getFrameTree")
-        current_url = str(
-            frame_tree.get("frameTree", {}).get("frame", {}).get("url", "")
-        ).strip()
-        if current_url.startswith(("http://", "https://")):
-            try:
-                allowed_url = url_policy.validate(current_url)
-            except ExecutionURLPolicyError as exc:
-                raise LivePageCaptureError(exc.error_code) from exc
-            time.sleep(0.1)
-            return allowed_url
-        time.sleep(0.05)
-    raise LivePageCaptureError("browser_navigation_timeout")
-
-
 def capture_live_page_payload(
     cdp_call: Callable[..., Mapping[str, Any]],
     *,
@@ -412,5 +382,4 @@ def _dom_projection(scene: Mapping[str, Any]) -> dict[str, Any]:
 __all__ = [
     "LivePageCaptureError",
     "capture_live_page_payload",
-    "navigate_to",
 ]

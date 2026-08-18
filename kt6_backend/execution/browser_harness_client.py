@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import math
 import os
+import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
@@ -10,7 +11,6 @@ from urllib.parse import urlsplit
 from .live_page_capture import (
     LivePageCaptureError,
     capture_live_page_payload,
-    navigate_to,
 )
 from .models import BrowserTarget, VisualTarget
 from .url_policy import ExecutionURLPolicy, ExecutionURLPolicyError
@@ -34,6 +34,9 @@ class BrowserHarnessClient:
         cdp_call: Callable[..., Mapping[str, Any]] | None = None,
         click_call: Callable[[float, float], Any] | None = None,
         ensure_daemon: Callable[[], Any] | None = None,
+        switch_tab_call: Callable[[str], Any] | None = None,
+        current_tab_call: Callable[[], Any] | None = None,
+        new_tab_call: Callable[[str], Any] | None = None,
     ):
         self.cdp_url = self._loopback_cdp_url(cdp_url)
         self.workspace = Path(workspace).resolve()
@@ -41,39 +44,65 @@ class BrowserHarnessClient:
         self._cdp_call = cdp_call
         self._click_call = click_call
         self._ensure_daemon = ensure_daemon
+        self._switch_tab_call = switch_tab_call
+        self._current_tab_call = current_tab_call
+        self._new_tab_call = new_tab_call
         self._ready = False
         self._bound_target_id = ""
         self._bound_page_url = ""
 
-    def bind_page_target(self, page_url: str) -> dict[str, str]:
-        """Bind one ScenarioRunner to one exact live page target."""
+    def open_or_bind_target(self, start_url: str) -> dict[str, str]:
+        """Select, switch to, navigate and bind one target for this Scenario."""
 
         try:
+            target_url = self.url_policy.validate(start_url)
+        except ExecutionURLPolicyError as exc:
+            raise BrowserHarnessError(exc.error_code) from exc
+        try:
             self._load_runtime()
-            result = self._cdp_call("Target.getTargets")
-            targets = result.get("targetInfos")
-            matches = [
-                item
-                for item in targets
-                if isinstance(item, Mapping)
-                and str(item.get("type", "")) == "page"
-                and str(item.get("url", "")).strip() == page_url
-                and str(item.get("targetId", "")).strip()
-            ] if isinstance(targets, list) else []
-            if len(matches) != 1:
-                raise BrowserHarnessError(
-                    "browser_target_missing" if not matches else "browser_target_ambiguous"
-                )
-            self._bound_target_id = str(matches[0]["targetId"]).strip()
-            self._bound_page_url = page_url
-            return {
-                "target_id": self._bound_target_id,
-                "page_url": self._bound_page_url,
-            }
+            matches = self._page_targets(target_url)
+            if len(matches) == 1:
+                target_id = str(matches[0].get("targetId", "")).strip()
+                self._switch_tab(target_id)
+            elif len(matches) > 1:
+                raise BrowserHarnessError("browser_target_ambiguous")
+            else:
+                target_id = self._open_new_target(target_url)
+            self._confirm_active_target(target_id)
+            final_url = self._settle_page_url()
         except BrowserHarnessError:
             raise
         except Exception as exc:
             raise BrowserHarnessError("browser_target_binding_failed") from exc
+
+        self._bound_target_id = target_id
+        self._bound_page_url = final_url
+        return {"target_id": target_id, "page_url": final_url}
+
+    def bind_page_target(self, page_url: str) -> dict[str, str]:
+        """Switch the Browser Harness session to one exact live page target."""
+
+        try:
+            target_url = self.url_policy.validate(page_url)
+        except ExecutionURLPolicyError as exc:
+            raise BrowserHarnessError(exc.error_code) from exc
+        try:
+            self._load_runtime()
+            matches = self._page_targets(target_url)
+            if len(matches) != 1:
+                raise BrowserHarnessError(
+                    "browser_target_missing" if not matches else "browser_target_ambiguous"
+                )
+            target_id = str(matches[0].get("targetId", "")).strip()
+            self._switch_tab(target_id)
+            self._confirm_active_target(target_id)
+        except BrowserHarnessError:
+            raise
+        except Exception as exc:
+            raise BrowserHarnessError("browser_target_binding_failed") from exc
+        self._bound_target_id = target_id
+        self._bound_page_url = target_url
+        return {"target_id": target_id, "page_url": target_url}
 
     def click_backend_node(
         self,
@@ -219,21 +248,6 @@ class BrowserHarnessClient:
             raise BrowserHarnessError("browser_harness_click_failed") from exc
         return {"backend_node_id": backend_node_id, "x": x, "y": y}
 
-    def navigate_to(self, page_url: str) -> str:
-        try:
-            self._load_runtime()
-            self._bound_target_id = ""
-            self._bound_page_url = ""
-            return navigate_to(
-                self._cdp_call,
-                page_url,
-                url_policy=self.url_policy,
-            )
-        except LivePageCaptureError as exc:
-            raise BrowserHarnessError(exc.error_code) from exc
-        except Exception as exc:
-            raise BrowserHarnessError("browser_navigation_failed") from exc
-
     def capture_page_payload(
         self,
         *,
@@ -249,6 +263,8 @@ class BrowserHarnessClient:
                 url_policy=self.url_policy,
                 include_canvas=include_canvas,
             )
+        except BrowserHarnessError:
+            raise
         except LivePageCaptureError as exc:
             raise BrowserHarnessError(exc.error_code) from exc
         except Exception as exc:
@@ -303,6 +319,9 @@ class BrowserHarnessClient:
                 raise BrowserHarnessError("browser_harness_workspace_mismatch")
             self._cdp_call = helpers.cdp
             self._click_call = helpers.click_at_xy
+            self._switch_tab_call = helpers.switch_tab
+            self._current_tab_call = helpers.current_tab
+            self._new_tab_call = helpers.new_tab
             self._ensure_daemon = admin.ensure_daemon
         if self._ensure_daemon is not None:
             try:
@@ -364,6 +383,8 @@ class BrowserHarnessClient:
     def _assert_bound_target(self, expected_page_url: str | None) -> None:
         if not self._bound_target_id:
             raise BrowserHarnessError("browser_session_not_bound")
+        if self._active_target_id() != self._bound_target_id:
+            raise BrowserHarnessError("browser_session_target_changed")
         result = self._cdp_call("Target.getTargets")
         targets = result.get("targetInfos")
         matches = [
@@ -382,6 +403,72 @@ class BrowserHarnessClient:
             raise BrowserHarnessError(exc.error_code) from exc
         if expected_page_url is not None and current_url != expected_page_url:
             raise BrowserHarnessError("browser_session_page_changed")
+
+    def _page_targets(self, page_url: str) -> list[Mapping[str, Any]]:
+        result = self._cdp_call("Target.getTargets")
+        targets = result.get("targetInfos")
+        if not isinstance(targets, list):
+            return []
+        return [
+            item
+            for item in targets
+            if isinstance(item, Mapping)
+            and str(item.get("type", "")) == "page"
+            and str(item.get("url", "")).strip() == page_url
+            and str(item.get("targetId", "")).strip()
+        ]
+
+    def _switch_tab(self, target_id: str) -> None:
+        if self._switch_tab_call is None:
+            raise BrowserHarnessError("browser_target_binding_failed")
+        self._switch_tab_call(target_id)
+
+    def _open_new_target(self, target_url: str) -> str:
+        if self._new_tab_call is None:
+            raise BrowserHarnessError("browser_target_missing")
+        created = self._new_tab_call(target_url)
+        target_id = self._target_id(created)
+        if not target_id:
+            target_id = self._active_target_id()
+        if not target_id:
+            raise BrowserHarnessError("browser_target_binding_failed")
+        return target_id
+
+    def _confirm_active_target(self, target_id: str) -> None:
+        if self._active_target_id() != target_id:
+            raise BrowserHarnessError("browser_session_target_changed")
+
+    def _active_target_id(self) -> str:
+        if self._current_tab_call is None:
+            raise BrowserHarnessError("browser_harness_unavailable")
+        return self._target_id(self._current_tab_call())
+
+    def _settle_page_url(self) -> str:
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            frame_tree = self._cdp_call("Page.getFrameTree")
+            current_url = str(
+                frame_tree.get("frameTree", {}).get("frame", {}).get("url", "")
+            ).strip()
+            if current_url.startswith(("http://", "https://")):
+                try:
+                    return self.url_policy.validate(current_url)
+                except ExecutionURLPolicyError as exc:
+                    raise BrowserHarnessError(exc.error_code) from exc
+            time.sleep(0.05)
+        raise BrowserHarnessError("browser_navigation_timeout")
+
+    @staticmethod
+    def _target_id(value: Any) -> str:
+        if isinstance(value, Mapping):
+            for key in ("targetId", "target_id", "id"):
+                candidate = value.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    return candidate.strip()
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        return ""
 
     @staticmethod
     def _inside_viewport(x: float, y: float, value: Any) -> bool:

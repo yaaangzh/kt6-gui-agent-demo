@@ -51,8 +51,7 @@ class ScenarioRunner:
 
     def inspect(self, start_url: str) -> dict[str, Any]:
         target_url = self.url_policy.validate(start_url)
-        current_url = self.client.navigate_to(target_url)
-        browser_session = self.client.bind_page_target(current_url)
+        browser_session = self.client.open_or_bind_target(target_url)
         snapshot, graph, preview = self._capture()
         return {
             "browser_session": browser_session,
@@ -77,8 +76,7 @@ class ScenarioRunner:
         target_url = self.url_policy.validate(action_plan["start_url"])
         out_dir.mkdir(parents=True, exist_ok=False)
         _write_json(out_dir / "action-plan.json", action_plan)
-        current_url = self.client.navigate_to(target_url)
-        browser_session = self.client.bind_page_target(current_url)
+        browser_session = self.client.open_or_bind_target(target_url)
         step_results: list[dict[str, Any]] = []
         pending: dict[str, Any] | None = None
         capture_sequence = 0

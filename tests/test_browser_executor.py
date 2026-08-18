@@ -135,9 +135,63 @@ class RecordingExecutor:
         return self.result
 
 
+class SingleTargetHarness:
+    def __init__(self, page_url: str, target_id: str = "target-1"):
+        self.page_url = page_url
+        self.target_id = target_id
+        self.active_target_id = target_id
+        self.switch_calls: list[str] = []
+
+    def switch_tab(self, target_id: str) -> None:
+        self.switch_calls.append(target_id)
+        self.active_target_id = target_id
+
+    def current_tab(self) -> dict[str, str]:
+        return {
+            "targetId": self.active_target_id,
+            "type": "page",
+            "url": self.page_url,
+        }
+
+
+class TabHarness:
+    def __init__(self, targets: list[dict], active_target_id: str | None = None):
+        self.targets = {item["targetId"]: dict(item) for item in targets}
+        self.active_target_id = active_target_id or (
+            targets[0]["targetId"] if targets else ""
+        )
+        self.switch_calls: list[str] = []
+        self.new_tab_calls: list[str] = []
+
+    def current_tab(self) -> dict | None:
+        return self.targets.get(self.active_target_id)
+
+    def switch_tab(self, target_id: str) -> None:
+        self.switch_calls.append(target_id)
+        if target_id not in self.targets:
+            raise RuntimeError(f"unknown target {target_id}")
+        self.active_target_id = target_id
+
+    def new_tab(self, url: str) -> dict:
+        target_id = f"target-{len(self.targets) + 1}"
+        self.targets[target_id] = {
+            "targetId": target_id,
+            "type": "page",
+            "url": url,
+            "title": "",
+        }
+        self.active_target_id = target_id
+        self.new_tab_calls.append(url)
+        return self.targets[target_id]
+
+    def targets_payload(self) -> dict:
+        return {"targetInfos": list(self.targets.values())}
+
+
 class BrowserHarnessClientTest(unittest.TestCase):
     def test_runner_binds_one_exact_browser_target(self):
         page_url = "http://127.0.0.1:8787/execution-test.html"
+        harness = SingleTargetHarness(page_url)
         client = BrowserHarnessClient(
             cdp_url="http://127.0.0.1:9222",
             workspace=Path("runtime_data/browser-harness-test"),
@@ -150,16 +204,20 @@ class BrowserHarnessClientTest(unittest.TestCase):
             if method == "Target.getTargets"
             else {},
             click_call=lambda _x, _y: None,
+            switch_tab_call=harness.switch_tab,
+            current_tab_call=harness.current_tab,
         )
 
         session = client.bind_page_target(page_url)
 
         self.assertEqual(session["target_id"], "target-1")
         self.assertEqual(session["page_url"], page_url)
+        self.assertEqual(harness.switch_calls, ["target-1"])
 
     def test_canvas_click_recomputes_the_pixel_point_from_the_live_box(self):
         page_url = "http://127.0.0.1:8787/execution-test.html"
         clicks = []
+        harness = SingleTargetHarness(page_url)
 
         def cdp(method, **_params):
             if method == "Target.getTargets":
@@ -195,6 +253,8 @@ class BrowserHarnessClientTest(unittest.TestCase):
             url_policy=execution_url_policy(),
             cdp_call=cdp,
             click_call=lambda x, y: clicks.append((x, y)),
+            switch_tab_call=harness.switch_tab,
+            current_tab_call=harness.current_tab,
         )
         target = VisualTarget(
             node_id="vision:ap1",
@@ -218,6 +278,7 @@ class BrowserHarnessClientTest(unittest.TestCase):
     def test_capture_builds_dom_and_cdp_payload_from_the_live_snapshot(self):
         page_url = "https://example.test/topology?capture=1"
         envelope = cdp_envelope(page_url)
+        harness = SingleTargetHarness(page_url)
 
         def cdp(method, **_kwargs):
             if method == "Target.getTargets":
@@ -255,6 +316,8 @@ class BrowserHarnessClientTest(unittest.TestCase):
             url_policy=execution_url_policy(),
             cdp_call=cdp,
             click_call=lambda _x, _y: None,
+            switch_tab_call=harness.switch_tab,
+            current_tab_call=harness.current_tab,
         )
         client.bind_page_target(page_url)
         payload = client.capture_page_payload()
@@ -290,6 +353,7 @@ class BrowserHarnessClientTest(unittest.TestCase):
 
     def test_click_uses_box_center_and_fixed_helper(self):
         calls: list[tuple] = []
+        harness = SingleTargetHarness("https://nce.example/devices")
 
         def cdp(method, **params):
             calls.append(("cdp", method, params))
@@ -348,6 +412,8 @@ class BrowserHarnessClientTest(unittest.TestCase):
             cdp_call=cdp,
             click_call=lambda x, y: calls.append(("click", x, y)),
             ensure_daemon=lambda: calls.append(("daemon",)),
+            switch_tab_call=harness.switch_tab,
+            current_tab_call=harness.current_tab,
         )
 
         client.bind_page_target("https://nce.example/devices")
@@ -373,6 +439,8 @@ class BrowserHarnessClientTest(unittest.TestCase):
                 workspace=Path("runtime_data/browser-harness-test"),
                 url_policy=execution_url_policy(),
             )
+
+        harness = SingleTargetHarness("https://nce.example/devices")
 
         def invalid_box_cdp(method, **_kwargs):
             if method == "Target.getTargets":
@@ -416,6 +484,8 @@ class BrowserHarnessClientTest(unittest.TestCase):
             url_policy=execution_url_policy(),
             cdp_call=invalid_box_cdp,
             click_call=lambda _x, _y: None,
+            switch_tab_call=harness.switch_tab,
+            current_tab_call=harness.current_tab,
         )
         client.bind_page_target("https://nce.example/devices")
         with self.assertRaises(BrowserHarnessError) as raised:
@@ -429,6 +499,7 @@ class BrowserHarnessClientTest(unittest.TestCase):
     def test_click_rejects_a_different_active_page_before_box_lookup(self):
         page_url = "https://nce.example/devices"
         calls: list[str] = []
+        harness = SingleTargetHarness(page_url)
 
         def cdp(method, **_kwargs):
             calls.append(method)
@@ -453,6 +524,8 @@ class BrowserHarnessClientTest(unittest.TestCase):
             url_policy=execution_url_policy(),
             cdp_call=cdp,
             click_call=lambda _x, _y: self.fail("click must not run"),
+            switch_tab_call=harness.switch_tab,
+            current_tab_call=harness.current_tab,
         )
 
         client.bind_page_target(page_url)
@@ -468,6 +541,7 @@ class BrowserHarnessClientTest(unittest.TestCase):
     def test_click_revalidates_live_attributes_and_hit_target(self):
         def run(*, live_action="ap.shutdown", hit_backend_id=387):
             calls: list[str] = []
+            harness = SingleTargetHarness("https://nce.example/devices")
 
             def cdp(method, **_kwargs):
                 calls.append(method)
@@ -525,6 +599,8 @@ class BrowserHarnessClientTest(unittest.TestCase):
                 url_policy=execution_url_policy(),
                 cdp_call=cdp,
                 click_call=lambda _x, _y: self.fail("click must not run"),
+                switch_tab_call=harness.switch_tab,
+                current_tab_call=harness.current_tab,
             )
             client.bind_page_target("https://nce.example/devices")
             with self.assertRaises(BrowserHarnessError) as raised:
@@ -541,6 +617,7 @@ class BrowserHarnessClientTest(unittest.TestCase):
 
     def test_click_rejects_live_frame_change(self):
         page_url = "https://nce.example/devices"
+        harness = SingleTargetHarness(page_url)
 
         def cdp(method, **_kwargs):
             if method == "Target.getTargets":
@@ -564,6 +641,8 @@ class BrowserHarnessClientTest(unittest.TestCase):
             url_policy=execution_url_policy(),
             cdp_call=cdp,
             click_call=lambda _x, _y: self.fail("click must not run"),
+            switch_tab_call=harness.switch_tab,
+            current_tab_call=harness.current_tab,
         )
 
         client.bind_page_target(page_url)
@@ -573,6 +652,305 @@ class BrowserHarnessClientTest(unittest.TestCase):
         self.assertEqual(
             raised.exception.error_code, "browser_target_frame_changed"
         )
+
+    def test_open_or_bind_switches_to_the_existing_target_tab(self):
+        runner_url = "http://127.0.0.1:8765/execution-runner.html"
+        target_url = "http://127.0.0.1:8787/target.html"
+        harness = TabHarness(
+            [
+                {"targetId": "target-runner", "type": "page", "url": runner_url},
+                {"targetId": "target-b", "type": "page", "url": target_url},
+            ],
+            active_target_id="target-runner",
+        )
+
+        def cdp(method, **_params):
+            if method == "Target.getTargets":
+                return harness.targets_payload()
+            if method == "Page.getFrameTree":
+                return {
+                    "frameTree": {
+                        "frame": {"id": "main-frame", "url": target_url}
+                    }
+                }
+            self.fail(f"unexpected CDP method: {method}")
+
+        client = BrowserHarnessClient(
+            cdp_url="http://127.0.0.1:9222",
+            workspace=Path("runtime_data/browser-harness-test"),
+            url_policy=execution_url_policy(),
+            cdp_call=cdp,
+            click_call=lambda _x, _y: None,
+            switch_tab_call=harness.switch_tab,
+            current_tab_call=harness.current_tab,
+            new_tab_call=harness.new_tab,
+        )
+
+        session = client.open_or_bind_target(target_url)
+
+        self.assertEqual(session["target_id"], "target-b")
+        self.assertEqual(session["page_url"], target_url)
+        self.assertEqual(harness.switch_calls, ["target-b"])
+        self.assertEqual(harness.active_target_id, "target-b")
+        self.assertEqual(harness.targets["target-runner"]["url"], runner_url)
+
+    def test_open_target_creates_a_new_tab_and_leaves_runner_tab_unchanged(self):
+        runner_url = "http://127.0.0.1:8765/execution-runner.html"
+        target_url = "http://127.0.0.1:8787/target.html"
+        harness = TabHarness(
+            [{"targetId": "target-runner", "type": "page", "url": runner_url}],
+            active_target_id="target-runner",
+        )
+
+        def cdp(method, **_params):
+            if method == "Target.getTargets":
+                return harness.targets_payload()
+            if method == "Page.getFrameTree":
+                return {
+                    "frameTree": {
+                        "frame": {
+                            "id": "main-frame",
+                            "url": harness.targets[harness.active_target_id]["url"],
+                        }
+                    }
+                }
+            self.fail(f"unexpected CDP method: {method}")
+
+        client = BrowserHarnessClient(
+            cdp_url="http://127.0.0.1:9222",
+            workspace=Path("runtime_data/browser-harness-test"),
+            url_policy=execution_url_policy(),
+            cdp_call=cdp,
+            click_call=lambda _x, _y: None,
+            switch_tab_call=harness.switch_tab,
+            current_tab_call=harness.current_tab,
+            new_tab_call=harness.new_tab,
+        )
+
+        session = client.open_or_bind_target(target_url)
+
+        self.assertEqual(session["target_id"], "target-2")
+        self.assertEqual(session["page_url"], target_url)
+        self.assertEqual(harness.new_tab_calls, [target_url])
+        self.assertEqual(harness.active_target_id, "target-2")
+        self.assertEqual(harness.targets["target-runner"]["url"], runner_url)
+
+    def test_capture_routes_every_cdp_method_to_the_bound_target_session(self):
+        runner_url = "http://127.0.0.1:8765/execution-runner.html"
+        target_url = "https://example.test/topology?capture=1"
+        harness = TabHarness(
+            [
+                {"targetId": "target-runner", "type": "page", "url": runner_url},
+                {"targetId": "target-b", "type": "page", "url": target_url},
+            ],
+            active_target_id="target-runner",
+        )
+        envelope = cdp_envelope(target_url)
+        routed: list[tuple[str, str]] = []
+
+        def cdp(method, **_params):
+            routed.append((harness.active_target_id, method))
+            if method == "Target.getTargets":
+                return harness.targets_payload()
+            if method == "Page.getFrameTree":
+                return {
+                    "frameTree": {
+                        "frame": {"id": "main-frame", "url": target_url}
+                    }
+                }
+            if method == "DOMSnapshot.captureSnapshot":
+                return envelope["dom_snapshot"]
+            if method == "Accessibility.getFullAXTree":
+                return envelope["ax_tree"]
+            if method == "Browser.getVersion":
+                return {"product": "Chrome/Test", "protocolVersion": "1.3"}
+            if method == "Page.getLayoutMetrics":
+                return {
+                    "cssVisualViewport": {
+                        "clientWidth": 1280,
+                        "clientHeight": 720,
+                    }
+                }
+            if method == "Page.captureScreenshot":
+                return {"data": "/9j/2Q=="}
+            self.fail(f"unexpected CDP method: {method}")
+
+        client = BrowserHarnessClient(
+            cdp_url="http://127.0.0.1:9222",
+            workspace=Path("runtime_data/browser-harness-test"),
+            url_policy=execution_url_policy(),
+            cdp_call=cdp,
+            click_call=lambda _x, _y: None,
+            switch_tab_call=harness.switch_tab,
+            current_tab_call=harness.current_tab,
+            new_tab_call=harness.new_tab,
+        )
+
+        client.open_or_bind_target(target_url)
+        routed.clear()
+        client.capture_page_payload()
+
+        methods = [method for _, method in routed]
+        for expected in (
+            "Page.getFrameTree",
+            "DOMSnapshot.captureSnapshot",
+            "Accessibility.getFullAXTree",
+            "Page.captureScreenshot",
+        ):
+            self.assertIn(expected, methods)
+        self.assertTrue(routed)
+        self.assertTrue(all(tid == "target-b" for tid, _ in routed))
+
+    def test_click_routes_dom_and_click_to_the_bound_target_session(self):
+        runner_url = "http://127.0.0.1:8765/execution-runner.html"
+        target_url = "https://nce.example/devices"
+        harness = TabHarness(
+            [
+                {"targetId": "target-runner", "type": "page", "url": runner_url},
+                {"targetId": "target-b", "type": "page", "url": target_url},
+            ],
+            active_target_id="target-runner",
+        )
+        routed: list[tuple[str, str]] = []
+
+        def cdp(method, **_params):
+            routed.append((harness.active_target_id, method))
+            if method == "Target.getTargets":
+                return harness.targets_payload()
+            if method == "Page.getFrameTree":
+                return {
+                    "frameTree": {
+                        "frame": {"id": "frame-main", "url": target_url}
+                    }
+                }
+            if method == "DOM.describeNode":
+                return {
+                    "node": {
+                        "backendNodeId": 387,
+                        "attributes": [
+                            "id",
+                            "shutdown-ap-1",
+                            "data-owner-business-id",
+                            "ap_001",
+                            "data-action-id",
+                            "ap.shutdown",
+                        ],
+                    }
+                }
+            if method == "DOM.getBoxModel":
+                return {
+                    "model": {
+                        "content": [10, 20, 30, 20, 30, 40, 10, 40]
+                    }
+                }
+            if method == "Page.getLayoutMetrics":
+                return {
+                    "cssVisualViewport": {
+                        "clientWidth": 1280,
+                        "clientHeight": 720,
+                    }
+                }
+            if method == "DOM.getNodeForLocation":
+                return {"backendNodeId": 387}
+            self.fail(f"unexpected CDP method: {method}")
+
+        def click(_x, _y):
+            routed.append((harness.active_target_id, "click"))
+
+        client = BrowserHarnessClient(
+            cdp_url="http://127.0.0.1:9222",
+            workspace=Path("runtime_data/browser-harness-test"),
+            url_policy=execution_url_policy(),
+            cdp_call=cdp,
+            click_call=click,
+            switch_tab_call=harness.switch_tab,
+            current_tab_call=harness.current_tab,
+            new_tab_call=harness.new_tab,
+        )
+
+        client.open_or_bind_target(target_url)
+        routed.clear()
+        receipt = client.click_backend_node(browser_target())
+
+        self.assertEqual(receipt, {"backend_node_id": 387, "x": 20.0, "y": 30.0})
+        self.assertTrue(routed)
+        self.assertTrue(all(tid == "target-b" for tid, _ in routed))
+        methods = [method for _, method in routed]
+        for expected in ("DOM.describeNode", "DOM.getBoxModel", "DOM.getNodeForLocation"):
+            self.assertIn(expected, methods)
+        self.assertIn("click", methods)
+
+    def test_bound_target_disappearing_or_session_change_fails_closed(self):
+        target_url = "https://nce.example/devices"
+        harness = TabHarness(
+            [{"targetId": "target-b", "type": "page", "url": target_url}],
+            active_target_id="target-b",
+        )
+
+        def cdp(method, **_params):
+            if method == "Target.getTargets":
+                return harness.targets_payload()
+            if method == "Page.getFrameTree":
+                return {
+                    "frameTree": {
+                        "frame": {"id": "frame-main", "url": target_url}
+                    }
+                }
+            self.fail(f"unexpected CDP method: {method}")
+
+        client = BrowserHarnessClient(
+            cdp_url="http://127.0.0.1:9222",
+            workspace=Path("runtime_data/browser-harness-test"),
+            url_policy=execution_url_policy(),
+            cdp_call=cdp,
+            click_call=lambda _x, _y: None,
+            switch_tab_call=harness.switch_tab,
+            current_tab_call=harness.current_tab,
+            new_tab_call=harness.new_tab,
+        )
+        client.open_or_bind_target(target_url)
+
+        harness.targets["target-runner"] = {
+            "targetId": "target-runner",
+            "type": "page",
+            "url": "http://127.0.0.1:8765/execution-runner.html",
+        }
+        harness.active_target_id = "target-runner"
+        with self.assertRaises(BrowserHarnessError) as raised:
+            client.capture_page_payload()
+        self.assertEqual(raised.exception.error_code, "browser_session_target_changed")
+
+        harness.active_target_id = "target-b"
+        del harness.targets["target-b"]
+        with self.assertRaises(BrowserHarnessError) as raised:
+            client.capture_page_payload()
+        self.assertEqual(raised.exception.error_code, "browser_session_target_changed")
+
+    def test_two_page_targets_with_same_url_are_ambiguous(self):
+        target_url = "https://nce.example/devices"
+        harness = TabHarness(
+            [
+                {"targetId": "target-a", "type": "page", "url": target_url},
+                {"targetId": "target-b", "type": "page", "url": target_url},
+            ],
+        )
+        client = BrowserHarnessClient(
+            cdp_url="http://127.0.0.1:9222",
+            workspace=Path("runtime_data/browser-harness-test"),
+            url_policy=execution_url_policy(),
+            cdp_call=lambda method, **_kwargs: harness.targets_payload()
+            if method == "Target.getTargets"
+            else {},
+            click_call=lambda _x, _y: None,
+            switch_tab_call=harness.switch_tab,
+            current_tab_call=harness.current_tab,
+            new_tab_call=harness.new_tab,
+        )
+
+        with self.assertRaises(BrowserHarnessError) as raised:
+            client.open_or_bind_target(target_url)
+
+        self.assertEqual(raised.exception.error_code, "browser_target_ambiguous")
 
 
 class BrowserExecutionBoundaryTest(unittest.TestCase):

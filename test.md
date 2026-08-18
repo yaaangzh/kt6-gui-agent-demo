@@ -294,6 +294,28 @@ Runner 页面与受控 Chromium Target Tab 必须是两个独立页面；不要�
    perception_failed / execution_failed / verify_failed / page_changed 归类，便于统计
    KT6 GUI Agent 具体卡在哪个环节。
 
+目标 Tab 真绑定（`BrowserHarnessClient.open_or_bind_target`）：
+
+- Runner Tab 与 Target Tab 同时存在时，Runner 不导航、不点击、不感知。ScenarioRunner
+  通过 `client.open_or_bind_target(start_url)` 由 Client 内部完成“按 URL 选择唯一 page
+  target → `switch_tab` 切换 daemon 当前 session → 确认 `current_tab()` 就是该 target →
+  无匹配时 `new_tab(url)` → 确认最终 URL”，不再先对当前 session 导航再补绑定。
+- 同 URL 存在两个 page target 必须 fail closed 为 `browser_target_ambiguous`；目标消失或
+  daemon session 被切走时返回 `browser_session_target_changed`（execution_failed）。
+- 单元测试用两个 page target 的 fake harness 验证 `switch_tab` 真实发生，且后续
+  `Page.getFrameTree`、`DOMSnapshot.captureSnapshot`、`Accessibility.getFullAXTree`、
+  `Page.captureScreenshot` 与 `DOM.describeNode`、`DOM.getBoxModel`、
+  `DOM.getNodeForLocation`、click 都路由到 target-tab session，而不是只记住 targetId。
+
+双 Tab 实机验收至少检查：
+
+1. Tab A（Runner）始终没有被导航或操作；
+2. Tab B（Target）才是实际导航、感知和点击的页面；
+3. Capture/UI Graph 中的 URL、DOM、截图都来自 Tab B；
+4. BrowserExecutor 的 click 真正发生在 Tab B；
+5. click 后重新感知，Verifier 能判断成功或明确失败；
+6. 结果落到 SUCCESS 或明确失败类别，而不是线程卡死 / 状态一直 running。
+
 DOM 执行回执写入内存审计接口 `GET /api/dom-actions/audit`，计划进度通过
 `GET /api/dom-actions/plans/{plan_id}` 查看；Browser Harness 隔离工作区位于
 `runtime_data/browser_harness_workspace/`。当前代码不自动生成执行录像，也不把点击回执
