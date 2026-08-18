@@ -8,7 +8,7 @@ from .models import (
     BrowserAction,
     BrowserExecutionResult,
     BrowserTarget,
-    CanvasTarget,
+    VisualTarget,
 )
 from .plan_validator import ActionPlanValidator
 from .scenario_runner import ScenarioRunner
@@ -30,7 +30,7 @@ __all__ = [
     "BrowserExecutor",
     "BrowserHarnessClient",
     "BrowserTarget",
-    "CanvasTarget",
+    "VisualTarget",
     "AssetDetailOutcomeVerifier",
     "ActionPlanValidator",
     "ActionPlanner",

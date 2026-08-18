@@ -53,9 +53,11 @@ Output shape:
     {"id":"step-2","op":"verify","expected":{"type":"element_visible","target":{"query":"expected semantic result"}}}
   ]
 }
-Expected type must be element_visible, element_selected, or page_changed.
-page_changed has no target. verify uses element_visible/element_selected/page_changed;
-wait uses element_visible/element_selected only and includes timeout_ms 100..30000.
+Expected type must be element_visible, element_disappeared, element_selected,
+selected, text_present, url_changed, or page_changed. page_changed and url_changed
+have no target. verify may use any expected type; wait uses element_visible,
+element_disappeared, element_selected, selected, or text_present and includes
+timeout_ms 100..30000.
 Keep the plan at 12 steps or fewer."""
 
     def __init__(

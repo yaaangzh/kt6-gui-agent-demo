@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 
 from ..asset_inventory import compact_text
 from ..ui_graph import SCHEMA_VERSION as UI_GRAPH_SCHEMA_VERSION
-from .models import BrowserTarget, CanvasTarget
+from .models import BrowserTarget, VisualTarget
 from .semantic_target import matching_nodes
 
 
@@ -77,7 +77,7 @@ class DOMGrounder:
         )
 
 
-class CanvasGrounder:
+class VisionGrounder:
     def __init__(self, *, producer_id: str | None):
         self.producer_id = compact_text(producer_id, 200)
 
@@ -85,10 +85,10 @@ class CanvasGrounder:
         self,
         target: Mapping[str, Any],
         graph: Mapping[str, Any],
-    ) -> CanvasTarget:
+    ) -> VisualTarget:
         _require_safe_graph(graph)
         if not self.producer_id:
-            raise GroundingError("canvas_grounding_not_configured")
+            raise GroundingError("vision_grounding_not_configured")
         matches = []
         for node in matching_nodes(target, graph, source_kinds=frozenset({"vision"})):
             source = _mapping(node.get("source"))
@@ -100,25 +100,25 @@ class CanvasGrounder:
                 matches.append(node)
         if len(matches) != 1:
             raise GroundingError(
-                "canvas_grounding_target_missing"
+                "vision_grounding_target_missing"
                 if not matches
-                else "canvas_grounding_target_ambiguous"
+                else "vision_grounding_target_ambiguous"
             )
         vision = matches[0]
         source = _mapping(vision.get("source"))
         bbox = vision.get("bbox")
         if not isinstance(bbox, list) or len(bbox) != 4:
-            raise GroundingError("canvas_grounding_geometry_invalid")
+            raise GroundingError("vision_grounding_geometry_invalid")
         try:
             x, y, width, height = (float(item) for item in bbox)
             canvas_width = float(source.get("canvas_width"))
             canvas_height = float(source.get("canvas_height"))
         except (TypeError, ValueError, OverflowError):
-            raise GroundingError("canvas_grounding_geometry_invalid") from None
+            raise GroundingError("vision_grounding_geometry_invalid") from None
         x_ratio = (x + width / 2) / canvas_width if canvas_width > 0 else 0
         y_ratio = (y + height / 2) / canvas_height if canvas_height > 0 else 0
         if not 0 < x_ratio < 1 or not 0 < y_ratio < 1:
-            raise GroundingError("canvas_grounding_geometry_invalid")
+            raise GroundingError("vision_grounding_geometry_invalid")
         canvas_id = compact_text(source.get("canvas_id"), 300)
         frame_id = compact_text(source.get("frame_id"), 200)
         page_url = _page_url(graph)
@@ -147,7 +147,7 @@ class CanvasGrounder:
         frame_url = compact_text(canvas_source.get("frame_url"), 2048) or page_url
         if not live_frame_id or not frame_url:
             raise GroundingError("canvas_frame_mismatch")
-        return CanvasTarget(
+        return VisualTarget(
             node_id=compact_text(vision.get("id"), 300),
             canvas_backend_node_id=backend_id,
             frame_id=live_frame_id,
@@ -162,21 +162,21 @@ class CanvasGrounder:
 
 
 class TargetGrounderRegistry:
-    def __init__(self, *, canvas_producer_id: str | None = None):
+    def __init__(self, *, vision_producer_id: str | None = None):
         self.dom = DOMGrounder()
-        self.canvas = CanvasGrounder(producer_id=canvas_producer_id)
+        self.vision = VisionGrounder(producer_id=vision_producer_id)
 
     def resolve(
         self,
         target: Mapping[str, Any],
         graph: Mapping[str, Any],
-    ) -> BrowserTarget | CanvasTarget:
+    ) -> BrowserTarget | VisualTarget:
         try:
             return self.dom.resolve(target, graph)
         except GroundingError as exc:
             if exc.error_code != "dom_grounding_target_missing":
                 raise
-        return self.canvas.resolve(target, graph)
+        return self.vision.resolve(target, graph)
 
 
 def _require_safe_graph(graph: Mapping[str, Any]) -> None:
@@ -217,8 +217,8 @@ def _confidence(value: Any) -> float:
 
 
 __all__ = [
-    "CanvasGrounder",
     "DOMGrounder",
     "GroundingError",
     "TargetGrounderRegistry",
+    "VisionGrounder",
 ]

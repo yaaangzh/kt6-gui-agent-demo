@@ -20,7 +20,7 @@ from kt6_backend.execution.models import (
     BrowserAction,
     BrowserExecutionResult,
     BrowserTarget,
-    CanvasTarget,
+    VisualTarget,
 )
 from kt6_backend.execution.target_resolver import (
     TargetResolutionError,
@@ -196,7 +196,7 @@ class BrowserHarnessClientTest(unittest.TestCase):
             cdp_call=cdp,
             click_call=lambda x, y: clicks.append((x, y)),
         )
-        target = CanvasTarget(
+        target = VisualTarget(
             node_id="vision:ap1",
             canvas_backend_node_id=900,
             frame_id="frame-main",
@@ -210,7 +210,7 @@ class BrowserHarnessClientTest(unittest.TestCase):
         )
 
         client.bind_page_target(page_url)
-        receipt = client.click_canvas_target(target)
+        receipt = client.click_visual_target(target)
 
         self.assertEqual(receipt, {"backend_node_id": 900, "x": 166.0, "y": 188.0})
         self.assertEqual(clicks, [(166.0, 188.0)])

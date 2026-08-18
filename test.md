@@ -284,12 +284,15 @@ Runner 页面与受控 Chromium Target Tab 必须是两个独立页面；不要�
    Policy 校验，再感知页面并调用 LLM 生成计划；确认没有坐标、selector 和 backend node id。
 3. `POST /api/execution/runs` 必须带 `confirmed=true`，立即返回 run_id；前端轮询
    `GET /api/execution/runs/{run_id}`，避免阻塞页面。
-4. 每个 click 执行“capture → Grounding（DOM/CDP 优先，缺失时回退 Canvas/Vision）→
+4. 每个 click 执行“capture → Grounding（DOM/CDP 优先，缺失时回退 Vision）→
    fresh capture → live frame/identity/hit-test → click”；随后用 verify/wait 再次感知。
-5. Canvas/Vision 目标使用本次截图识别的 bbox 比例，点击前重新读取 live Canvas box 并
+5. Vision 目标使用本次截图识别的 bbox 比例，点击前重新读取 live Canvas box 并
    做 hit-test，不复用第一步坐标。
-6. 最后新 capture 必须满足对应 Verifier（element_visible、element_selected 或
-   page_changed），才能返回 SUCCESS。
+6. 最后新 capture 必须满足对应 Verifier（element_visible、element_disappeared、
+   element_selected、selected、text_present、url_changed 或 page_changed），才能返回
+   SUCCESS。失败会按 planner_failed / target_not_found / target_ambiguous /
+   perception_failed / execution_failed / verify_failed / page_changed 归类，便于统计
+   KT6 GUI Agent 具体卡在哪个环节。
 
 DOM 执行回执写入内存审计接口 `GET /api/dom-actions/audit`，计划进度通过
 `GET /api/dom-actions/plans/{plan_id}` 查看；Browser Harness 隔离工作区位于

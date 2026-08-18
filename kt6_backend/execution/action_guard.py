@@ -8,7 +8,7 @@ import time
 from dataclasses import asdict
 from typing import Callable
 
-from .models import BrowserTarget, CanvasTarget
+from .models import BrowserTarget, VisualTarget
 
 
 class ScenarioActionGuardError(ValueError):
@@ -31,7 +31,7 @@ class ScenarioActionGuard:
         self._tokens: dict[str, tuple[float, str]] = {}
         self._lock = threading.Lock()
 
-    def authorize(self, target: BrowserTarget | CanvasTarget) -> str:
+    def authorize(self, target: BrowserTarget | VisualTarget) -> str:
         token = secrets.token_urlsafe(32)
         with self._lock:
             self._tokens[self._hash(token)] = (
@@ -40,7 +40,7 @@ class ScenarioActionGuard:
             )
         return token
 
-    def consume(self, token: str, target: BrowserTarget | CanvasTarget) -> None:
+    def consume(self, token: str, target: BrowserTarget | VisualTarget) -> None:
         with self._lock:
             claims = self._tokens.pop(self._hash(token), None)
         if claims is None:
@@ -52,7 +52,7 @@ class ScenarioActionGuard:
             raise ScenarioActionGuardError("scenario_action_target_changed")
 
     @staticmethod
-    def fingerprint(target: BrowserTarget | CanvasTarget) -> str:
+    def fingerprint(target: BrowserTarget | VisualTarget) -> str:
         payload = {
             "type": type(target).__name__,
             "target": asdict(target),

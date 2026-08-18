@@ -18,8 +18,8 @@ class BrowserTarget:
 
 
 @dataclass(frozen=True)
-class CanvasTarget:
-    """Pixel-grounded point inside a live, revalidated Canvas element."""
+class VisualTarget:
+    """Pixel-grounded point inside a live, revalidated visual (Canvas) element."""
 
     node_id: str
     canvas_backend_node_id: int
@@ -38,7 +38,7 @@ class BrowserAction:
     """The fixed action vocabulary exposed to a browser runtime."""
 
     op: str
-    target: BrowserTarget | CanvasTarget
+    target: BrowserTarget | VisualTarget
 
 
 @dataclass(frozen=True)
@@ -54,5 +54,5 @@ __all__ = [
     "BrowserAction",
     "BrowserExecutionResult",
     "BrowserTarget",
-    "CanvasTarget",
+    "VisualTarget",
 ]

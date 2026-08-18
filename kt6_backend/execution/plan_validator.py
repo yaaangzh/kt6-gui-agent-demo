@@ -25,7 +25,15 @@ class ActionPlanValidator:
     )
     _TARGET_KEYS = frozenset({"query", "asset_id", "action", "role"})
     _EXPECTED_TYPES = frozenset(
-        {"element_visible", "element_selected", "page_changed"}
+        {
+            "element_visible",
+            "element_disappeared",
+            "element_selected",
+            "selected",
+            "text_present",
+            "url_changed",
+            "page_changed",
+        }
     )
 
     def validate(self, value: Mapping[str, Any]) -> dict[str, Any]:
@@ -94,7 +102,7 @@ class ActionPlanValidator:
                 or not 100 <= timeout <= 30_000
             ):
                 raise ActionPlanValidationError("action_plan_wait_timeout_invalid")
-            if expected["type"] == "page_changed":
+            if expected["type"] in {"page_changed", "url_changed"}:
                 raise ActionPlanValidationError("action_plan_wait_expected_invalid")
             result["timeout_ms"] = timeout
         return result
@@ -117,7 +125,7 @@ class ActionPlanValidator:
         expected_type = compact_text(value.get("type"), 100)
         if expected_type not in self._EXPECTED_TYPES:
             raise ActionPlanValidationError("action_plan_expected_invalid")
-        if expected_type == "page_changed":
+        if expected_type in {"page_changed", "url_changed"}:
             if set(value) != {"type"}:
                 raise ActionPlanValidationError("action_plan_expected_invalid")
             return {"type": expected_type}

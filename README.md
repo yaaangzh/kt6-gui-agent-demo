@@ -654,9 +654,10 @@ kt6_backend/
   execution/action_planner.py  可配置 LLM Planner 生成语义 `kt6.action-plan.v1`
   execution/plan_validator.py  Agent/Runner 之间的严格计划契约
   execution/semantic_target.py 语义目标与 UI Graph 节点的确定性匹配
-  execution/grounding.py       DOM/CDP 优先、Canvas/Vision 兜底的现场 Grounding
+  execution/grounding.py       DOM/CDP 优先、Vision 兜底的现场 Grounding
   execution/scenario_runner.py 每步 fresh capture 的通用 click/verify/wait 执行循环
   execution/url_policy.py      导航目标的精确 host 白名单
+  execution/error_categories.py 稳定失败归类（planner/target/perception/execution/verify/page_changed）
   execution/action_guard.py    一次性点击令牌与目标指纹复核
   execution/verifier_registry.py 按预期类型选择确定性 Verifier
   execution/live_page_capture.py 固定 CDP 方法的真实页面与 Canvas 像素采集
@@ -791,7 +792,7 @@ python -m kt6_backend.execution_e2e_cli --url <获批测试页> --task "打开 A
 
 命令先通过 URL Safety Policy 校验目标 URL，再感知真实页面并调用规划模型生成语义计划，
 不再固定测试页或规则解析器。计划中没有 UI Graph、backend node id、selector 或坐标；
-DOM 目标走 DOM/CDP Grounding，缺失时回退 Canvas/Vision Grounding，Canvas 坐标由本次
+DOM 目标走 DOM/CDP Grounding，缺失时回退 Vision Grounding，Vision 坐标由本次
 像素识别和实时 Canvas box 共同计算。每个动作后由新 capture 的确定性 Verifier 检查
 结果。Action Plan、逐次 UI Graph 和 `result.json` 保存在
 `runtime_data/execution_scenarios/<run_id>/`。也可打开 `execution-runner.html` 填入 URL 与

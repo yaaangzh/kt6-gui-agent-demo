@@ -148,7 +148,15 @@ class UIGraphOutcomeVerifier:
 
     verifier_id = "ui_graph_state"
     expected_types = frozenset(
-        {"element_visible", "element_selected", "page_changed"}
+        {
+            "element_visible",
+            "element_disappeared",
+            "element_selected",
+            "selected",
+            "text_present",
+            "url_changed",
+            "page_changed",
+        }
     )
 
     def verify(
@@ -161,7 +169,7 @@ class UIGraphOutcomeVerifier:
         if before.get("capture_id") == after.get("capture_id"):
             return False
         expected_type = compact_text(expected.get("type"), 100)
-        if expected_type == "page_changed":
+        if expected_type in {"page_changed", "url_changed"}:
             before_page = before.get("page")
             after_page = after.get("page")
             if not isinstance(before_page, Mapping) or not isinstance(
@@ -176,13 +184,20 @@ class UIGraphOutcomeVerifier:
             return False
         before_matches = matching_nodes(target, before)
         after_matches = matching_nodes(target, after)
-        if len(after_matches) != 1:
-            return False
         if expected_type == "element_visible":
-            return len(before_matches) == 0
-        if expected_type == "element_selected":
-            return node_selected(after_matches[0]) and not (
-                len(before_matches) == 1 and node_selected(before_matches[0])
+            return len(after_matches) == 1 and len(before_matches) == 0
+        if expected_type == "element_disappeared":
+            return len(after_matches) == 0 and len(before_matches) >= 1
+        if expected_type == "text_present":
+            return len(after_matches) >= 1
+        if expected_type in {"element_selected", "selected"}:
+            return (
+                len(after_matches) == 1
+                and node_selected(after_matches[0])
+                and not (
+                    len(before_matches) == 1
+                    and node_selected(before_matches[0])
+                )
             )
         return False
 

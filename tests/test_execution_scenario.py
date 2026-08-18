@@ -11,9 +11,19 @@ import zlib
 
 from kt6_backend.execution.action_planner import OpenAIActionPlanner
 from kt6_backend.execution.browser_executor import HarnessBrowserExecutor
+from kt6_backend.execution.error_categories import (
+    EXECUTION_FAILED,
+    PAGE_CHANGED,
+    PERCEPTION_FAILED,
+    PLANNER_FAILED,
+    TARGET_AMBIGUOUS,
+    TARGET_NOT_FOUND,
+    VERIFY_FAILED,
+    classify_error,
+)
 from kt6_backend.execution.grounding import TargetGrounderRegistry
 from kt6_backend.execution.live_page_capture import _capture_canvases
-from kt6_backend.execution.models import BrowserExecutionResult, BrowserTarget, CanvasTarget
+from kt6_backend.execution.models import BrowserExecutionResult, BrowserTarget, VisualTarget
 from kt6_backend.execution.plan_validator import (
     ACTION_PLAN_SCHEMA_VERSION,
     ActionPlanValidationError,
@@ -237,7 +247,7 @@ class PlannerAndServiceTest(unittest.TestCase):
 
 class UnifiedGroundingTest(unittest.TestCase):
     def test_registry_prefers_reliable_dom_candidate(self):
-        target = TargetGrounderRegistry(canvas_producer_id="local-cv-ocr").resolve(
+        target = TargetGrounderRegistry(vision_producer_id="local-cv-ocr").resolve(
             {"query": "AP_001 详情", "asset_id": "ap_001"},
             graph("c1", vision=True),
         )
@@ -247,11 +257,11 @@ class UnifiedGroundingTest(unittest.TestCase):
     def test_registry_uses_configured_formal_vision_when_dom_is_missing(self):
         value = graph("c1", vision=True)
         value["nodes"] = [node for node in value["nodes"] if node["id"] != "cdp:detail-button"]
-        target = TargetGrounderRegistry(canvas_producer_id="local-cv-ocr").resolve(
+        target = TargetGrounderRegistry(vision_producer_id="local-cv-ocr").resolve(
             {"query": "AP_001", "asset_id": "ap_001"},
             value,
         )
-        self.assertIsInstance(target, CanvasTarget)
+        self.assertIsInstance(target, VisualTarget)
         self.assertEqual(target.canvas_backend_node_id, 202)
         self.assertEqual(target.producer_id, "local-cv-ocr")
 
@@ -366,6 +376,94 @@ class GenericScenarioRunnerTest(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["capture_count"], 3)
         self.assertEqual(len(result["steps"]), 2)
+
+
+class FailureCategoryAndGenericVerifierTest(unittest.TestCase):
+    def test_classify_error_maps_loop_failures_to_stable_categories(self):
+        cases = {
+            "execution_planner_invalid_response": PLANNER_FAILED,
+            "dom_grounding_target_missing": TARGET_NOT_FOUND,
+            "dom_grounding_target_ambiguous": TARGET_AMBIGUOUS,
+            "scenario_capture_incomplete": PERCEPTION_FAILED,
+            "browser_page_changed": PAGE_CHANGED,
+            "browser_target_occluded": EXECUTION_FAILED,
+            "scenario_expected_outcome_missing": VERIFY_FAILED,
+        }
+        for code, category in cases.items():
+            with self.subTest(code=code):
+                self.assertEqual(classify_error(code), category)
+        self.assertEqual(classify_error(""), "unclassified")
+        self.assertEqual(classify_error("unknown_error"), "unclassified")
+
+    def test_validator_accepts_generic_outcome_types(self):
+        validator = ActionPlanValidator()
+        for expected_type in (
+            "element_disappeared",
+            "text_present",
+            "url_changed",
+            "selected",
+        ):
+            with self.subTest(expected_type=expected_type):
+                plan = semantic_plan()
+                if expected_type == "url_changed":
+                    plan["steps"][1]["expected"] = {"type": expected_type}
+                else:
+                    plan["steps"][1]["expected"] = {
+                        "type": expected_type,
+                        "target": {"query": "AP_001 详情面板"},
+                    }
+                validator.validate(plan)
+
+    def test_ui_graph_verifier_supports_generic_outcomes(self):
+        verifier = UIGraphOutcomeVerifier()
+        before = graph("c-before")
+        after = graph("c-after", include_result=True)
+
+        self.assertTrue(
+            verifier.verify(
+                expected={
+                    "type": "element_visible",
+                    "target": {"query": "AP_001 详情面板"},
+                },
+                before=before,
+                after=after,
+            )
+        )
+        self.assertTrue(
+            verifier.verify(
+                expected={
+                    "type": "text_present",
+                    "target": {"query": "AP_001 详情"},
+                },
+                before=before,
+                after=after,
+            )
+        )
+
+        gone = graph("c-gone")
+        gone["nodes"] = [
+            node for node in gone["nodes"] if node["id"] != "cdp:detail-button"
+        ]
+        self.assertTrue(
+            verifier.verify(
+                expected={
+                    "type": "element_disappeared",
+                    "target": {"query": "AP_001 详情"},
+                },
+                before=before,
+                after=gone,
+            )
+        )
+
+        changed = graph("c-changed")
+        changed["page"] = {"url": URL + "/next", "title": "NCE"}
+        self.assertTrue(
+            verifier.verify(
+                expected={"type": "url_changed"},
+                before=before,
+                after=changed,
+            )
+        )
 
 
 if __name__ == "__main__":

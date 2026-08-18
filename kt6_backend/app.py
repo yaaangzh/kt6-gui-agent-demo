@@ -18,6 +18,7 @@ from .dom_action_binding import DOMActionBindingService
 from .env_config import load_project_env
 from .execution.browser_executor import HarnessBrowserExecutor
 from .execution.browser_harness_client import BrowserHarnessClient
+from .execution.error_categories import classify_error
 from .execution.action_planner import ActionPlanner, OpenAIActionPlanner
 from .execution.grounding import TargetGrounderRegistry
 from .execution.scenario_runner import ScenarioRunner
@@ -520,7 +521,7 @@ def create_services(
             page_perception=page_perception,
             browser_executor=browser_executor,
             grounders=TargetGrounderRegistry(
-                canvas_producer_id=(
+                vision_producer_id=(
                     str(getattr(canvas_vision, "adapter_id", "")) or None
                 )
             ),
@@ -819,9 +820,13 @@ class KT6Handler(SimpleHTTPRequestHandler):
                     user_request=str(payload.get("user_request", "")),
                 )
             except ValueError as exc:
+                error_code = getattr(exc, "error_code", "plan_invalid")
                 self._json(
                     422,
-                    {"error": getattr(exc, "error_code", "plan_invalid")},
+                    {
+                        "error": error_code,
+                        "error_category": classify_error(error_code),
+                    },
                 )
                 return
             self._json(200, generated)
@@ -837,12 +842,12 @@ class KT6Handler(SimpleHTTPRequestHandler):
                     confirmed=payload.get("confirmed") is True,
                 )
             except ValueError as exc:
+                error_code = getattr(exc, "error_code", "execution_run_invalid")
                 self._json(
                     409,
                     {
-                        "error": getattr(
-                            exc, "error_code", "execution_run_invalid"
-                        )
+                        "error": error_code,
+                        "error_category": classify_error(error_code),
                     },
                 )
                 return

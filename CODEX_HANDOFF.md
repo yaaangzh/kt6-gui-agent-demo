@@ -55,10 +55,12 @@ E2E 因环境未启用而跳过。
 `safe_for_execution=false`。`feature/browser-executor` 已固定 `kt6.action-plan.v1`
 作为模型到 Runner 的语义契约；规划由可配置 LLM Planner 生成语义目标，经
 ActionPlanValidator 兜底校验。用户确认后 ScenarioRunner 每步重新 capture，
-TargetGrounderRegistry 优先使用 DOM/CDP Grounding，缺失时回退 Canvas/Vision Grounding；
-DOM 目标经 fresh capture 复核后受控 click，Canvas 目标在对应步骤做一次真实像素识别和
+TargetGrounderRegistry 优先使用 DOM/CDP Grounding，缺失时回退 Vision Grounding；
+DOM 目标经 fresh capture 复核后受控 click，Vision 目标在对应步骤做一次真实像素识别和
 live box 重绑定。UIGraphOutcomeVerifier 用新 capture 的 UI Graph 验证
-element_visible、element_selected 或 page_changed。
+element_visible、element_disappeared、element_selected、selected、text_present、
+url_changed 或 page_changed；失败按稳定类别（planner_failed、target_not_found、
+target_ambiguous、perception_failed、execution_failed、verify_failed、page_changed）归类。
 当前开发机缺少 Python 3.12 与已连接 Chromium，真实浏览器 E2E 和真实 NCE 现场验收
 仍未完成。
 
@@ -425,10 +427,11 @@ python -m kt6_backend.execution_e2e_cli --url <获批测试页> --task "打开 A
 该命令先通过 URL Safety Policy 校验目标 URL，再感知真实页面并调用 LLM 生成语义
 `kt6.action-plan.v1`，不再固定中文任务、固定测试页或规则解析器。Browser Harness 通过
 固定 CDP 方法现场采集 DOMSnapshot/AXTree 和目标 Canvas 像素。ScenarioRunner 每步使用
-fresh capture：TargetGrounderRegistry 优先 DOM/CDP，缺失时回退 Canvas/Vision；Canvas
+fresh capture：TargetGrounderRegistry 优先 DOM/CDP，缺失时回退 Vision；Vision
 目标只在对应步骤识别一次真实像素，并与实时 Canvas box 重新绑定。每个 click 之后由
-新 capture 的 UIGraphOutcomeVerifier 检查 element_visible、element_selected 或
-page_changed，不能把 click 回执当成成功。计划、逐次 UI Graph 与结果写入
+新 capture 的 UIGraphOutcomeVerifier 检查 element_visible、element_disappeared、
+element_selected、selected、text_present、url_changed 或 page_changed，不能把 click
+回执当成成功。计划、逐次 UI Graph 与结果写入
 `runtime_data/execution_scenarios/<run_id>/`；仓库没有 `mock_ui_graph.json`。
 
 ### 3.4 三方案评测报告

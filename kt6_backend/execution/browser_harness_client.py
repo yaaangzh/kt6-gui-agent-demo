@@ -12,7 +12,7 @@ from .live_page_capture import (
     capture_live_page_payload,
     navigate_to,
 )
-from .models import BrowserTarget, CanvasTarget
+from .models import BrowserTarget, VisualTarget
 from .url_policy import ExecutionURLPolicy, ExecutionURLPolicyError
 
 
@@ -159,7 +159,7 @@ class BrowserHarnessClient:
             "y": y,
         }
 
-    def click_canvas_target(self, target: CanvasTarget) -> dict[str, Any]:
+    def click_visual_target(self, target: VisualTarget) -> dict[str, Any]:
         backend_node_id = target.canvas_backend_node_id
         if (
             isinstance(backend_node_id, bool)

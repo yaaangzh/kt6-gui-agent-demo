@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .action_planner import ActionPlanner, ActionPlannerError
+from .error_categories import classify_error
 from .plan_validator import ActionPlanValidator
 from .scenario_runner import ScenarioExecutionError, ScenarioRunner, _write_json
 from .url_policy import ExecutionURLPolicy, ExecutionURLPolicyError
@@ -175,6 +176,7 @@ class ExecutionScenarioService:
                 record = self._runs[run_id]
                 record["status"] = "failed"
                 record["error_code"] = str(error_code)
+                record["error_category"] = classify_error(str(error_code))
             if out_dir.exists():
                 _write_json(out_dir / "failed-result.json", self.get_run(run_id))
             return
@@ -207,11 +209,16 @@ class ExecutionScenarioService:
             target = step["target"]
             return f"点击：{target['query']}"
         expected = step["expected"]
-        if expected["type"] == "page_changed":
+        if expected["type"] in {"page_changed", "url_changed"}:
             return "确认页面已经跳转"
         target = expected["target"]
         prefix = "等待" if step["op"] == "wait" else "确认"
-        state = "已选中" if expected["type"] == "element_selected" else "已出现"
+        if expected["type"] in {"element_selected", "selected"}:
+            state = "已选中"
+        elif expected["type"] == "element_disappeared":
+            state = "已消失"
+        else:
+            state = "已出现"
         return f"{prefix}：{target['query']} {state}"
 
 

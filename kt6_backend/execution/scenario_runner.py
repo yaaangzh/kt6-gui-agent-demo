@@ -11,7 +11,7 @@ from .action_guard import ScenarioActionGuard, ScenarioActionGuardError
 from .browser_executor import HarnessBrowserExecutor
 from .browser_harness_client import BrowserHarnessError
 from .grounding import GroundingError, TargetGrounderRegistry
-from .models import BrowserAction, BrowserTarget, CanvasTarget
+from .models import BrowserAction, BrowserTarget, VisualTarget
 from .plan_validator import ActionPlanValidator
 from .url_policy import ExecutionURLPolicy, ExecutionURLPolicyError
 from .verifier_registry import OutcomeVerifierRegistry, OutcomeVerifierRegistryError
@@ -214,7 +214,7 @@ class ScenarioRunner:
             {
                 "grounder": "dom_ui_graph"
                 if isinstance(grounded, BrowserTarget)
-                else "canvas_ui_graph",
+                else "vision_ui_graph",
                 "capture_id": str(graph.get("capture_id", "")),
                 "graph_id": str(graph.get("graph_id", "")),
                 "target_node_id": grounded.node_id,
