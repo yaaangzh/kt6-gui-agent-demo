@@ -12,7 +12,7 @@ from .live_page_capture import (
     capture_live_page_payload,
     reset_execution_fixture,
 )
-from .models import BrowserTarget
+from .models import BrowserTarget, CanvasTarget
 
 
 class BrowserHarnessError(RuntimeError):
@@ -39,6 +39,38 @@ class BrowserHarnessClient:
         self._click_call = click_call
         self._ensure_daemon = ensure_daemon
         self._ready = False
+        self._bound_target_id = ""
+        self._bound_page_url = ""
+
+    def bind_page_target(self, page_url: str) -> dict[str, str]:
+        """Bind one ScenarioRunner to one exact live page target."""
+
+        try:
+            self._load_runtime()
+            result = self._cdp_call("Target.getTargets")
+            targets = result.get("targetInfos")
+            matches = [
+                item
+                for item in targets
+                if isinstance(item, Mapping)
+                and str(item.get("type", "")) == "page"
+                and str(item.get("url", "")).strip() == page_url
+                and str(item.get("targetId", "")).strip()
+            ] if isinstance(targets, list) else []
+            if len(matches) != 1:
+                raise BrowserHarnessError(
+                    "browser_target_missing" if not matches else "browser_target_ambiguous"
+                )
+            self._bound_target_id = str(matches[0]["targetId"]).strip()
+            self._bound_page_url = page_url
+            return {
+                "target_id": self._bound_target_id,
+                "page_url": self._bound_page_url,
+            }
+        except BrowserHarnessError:
+            raise
+        except Exception as exc:
+            raise BrowserHarnessError("browser_target_binding_failed") from exc
 
     def click_backend_node(
         self,
@@ -53,6 +85,7 @@ class BrowserHarnessClient:
             raise BrowserHarnessError("invalid_backend_node_id")
         try:
             self._load_runtime()
+            self._assert_bound_target(target.page_url)
         except BrowserHarnessError:
             raise
         except Exception as exc:
@@ -117,23 +150,92 @@ class BrowserHarnessClient:
             "y": y,
         }
 
+    def click_canvas_target(self, target: CanvasTarget) -> dict[str, Any]:
+        backend_node_id = target.canvas_backend_node_id
+        if (
+            isinstance(backend_node_id, bool)
+            or not isinstance(backend_node_id, int)
+            or backend_node_id < 1
+            or not 0 < target.x_ratio < 1
+            or not 0 < target.y_ratio < 1
+        ):
+            raise BrowserHarnessError("invalid_canvas_target")
+        try:
+            self._load_runtime()
+            self._assert_bound_target(target.page_url)
+            page = self._cdp_call("Page.getFrameTree")
+            current_url = str(
+                page.get("frameTree", {}).get("frame", {}).get("url", "")
+            ).strip()
+            if current_url != target.page_url:
+                raise BrowserHarnessError("browser_page_changed")
+            live_frame = self._frame_by_id(page.get("frameTree"), target.frame_id)
+            if live_frame is None or str(live_frame.get("url", "")).strip() != target.frame_url:
+                raise BrowserHarnessError("browser_target_frame_changed")
+            described = self._cdp_call(
+                "DOM.describeNode",
+                backendNodeId=backend_node_id,
+                depth=0,
+                pierce=True,
+            )
+            live_node = described.get("node")
+            if not isinstance(live_node, Mapping):
+                raise BrowserHarnessError("browser_canvas_changed")
+            attributes = self._attributes(live_node.get("attributes"))
+            if (
+                live_node.get("backendNodeId") != backend_node_id
+                or attributes.get("id") != target.canvas_dom_id
+            ):
+                raise BrowserHarnessError("browser_canvas_changed")
+            response = self._cdp_call(
+                "DOM.getBoxModel", backendNodeId=backend_node_id
+            )
+            quad = response.get("model", {}).get("content")
+            x, y = self._quad_point(quad, target.x_ratio, target.y_ratio)
+            metrics = self._cdp_call("Page.getLayoutMetrics")
+            viewport = metrics.get("cssVisualViewport") or metrics.get(
+                "cssLayoutViewport"
+            )
+            if not self._inside_viewport(x, y, viewport):
+                raise BrowserHarnessError("browser_target_not_visible")
+            hit = self._cdp_call(
+                "DOM.getNodeForLocation", x=int(round(x)), y=int(round(y))
+            )
+            if hit.get("backendNodeId") != backend_node_id:
+                raise BrowserHarnessError("browser_target_occluded")
+            self._click_call(x, y)
+        except BrowserHarnessError:
+            raise
+        except Exception as exc:
+            raise BrowserHarnessError("browser_harness_click_failed") from exc
+        return {"backend_node_id": backend_node_id, "x": x, "y": y}
+
     def reset_execution_fixture(self, page_url: str) -> None:
         try:
             self._load_runtime()
+            self._bound_target_id = ""
+            self._bound_page_url = ""
             reset_execution_fixture(self._cdp_call, page_url)
         except LivePageCaptureError as exc:
             raise BrowserHarnessError(exc.error_code) from exc
         except Exception as exc:
             raise BrowserHarnessError("execution_fixture_navigation_failed") from exc
 
-    def capture_page_payload(self, *, expected_page_url: str) -> dict[str, Any]:
+    def capture_page_payload(
+        self,
+        *,
+        expected_page_url: str,
+        include_canvas: bool = True,
+    ) -> dict[str, Any]:
         """Capture the live page through fixed CDP methods for the E2E harness."""
 
         try:
             self._load_runtime()
+            self._assert_bound_target(expected_page_url)
             return capture_live_page_payload(
                 self._cdp_call,
                 expected_page_url=expected_page_url,
+                include_canvas=include_canvas,
             )
         except LivePageCaptureError as exc:
             raise BrowserHarnessError(exc.error_code) from exc
@@ -224,6 +326,46 @@ class BrowserHarnessClient:
         if area <= 0 or x < 0 or y < 0:
             raise BrowserHarnessError("browser_target_not_visible")
         return round(x, 3), round(y, 3)
+
+    @classmethod
+    def _quad_point(
+        cls,
+        value: Any,
+        x_ratio: float,
+        y_ratio: float,
+    ) -> tuple[float, float]:
+        cls._quad_center(value)
+        numbers = [float(item) for item in value]
+        points = [(numbers[index], numbers[index + 1]) for index in range(0, 8, 2)]
+        weights = (
+            (1 - x_ratio) * (1 - y_ratio),
+            x_ratio * (1 - y_ratio),
+            x_ratio * y_ratio,
+            (1 - x_ratio) * y_ratio,
+        )
+        x = sum(point[0] * weight for point, weight in zip(points, weights))
+        y = sum(point[1] * weight for point, weight in zip(points, weights))
+        if not math.isfinite(x) or not math.isfinite(y):
+            raise BrowserHarnessError("browser_target_box_invalid")
+        return round(x, 3), round(y, 3)
+
+    def _assert_bound_target(self, expected_page_url: str) -> None:
+        if not self._bound_target_id:
+            return
+        if expected_page_url != self._bound_page_url:
+            raise BrowserHarnessError("browser_session_page_changed")
+        result = self._cdp_call("Target.getTargets")
+        targets = result.get("targetInfos")
+        matches = [
+            item
+            for item in targets
+            if isinstance(item, Mapping)
+            and str(item.get("targetId", "")).strip() == self._bound_target_id
+            and str(item.get("type", "")) == "page"
+            and str(item.get("url", "")).strip() == expected_page_url
+        ] if isinstance(targets, list) else []
+        if len(matches) != 1:
+            raise BrowserHarnessError("browser_session_target_changed")
 
     @staticmethod
     def _inside_viewport(x: float, y: float, value: Any) -> bool:

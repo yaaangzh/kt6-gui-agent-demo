@@ -15,14 +15,12 @@ from kt6_backend.execution.browser_harness_client import (
     BrowserHarnessClient,
     BrowserHarnessError,
 )
-from kt6_backend.execution.fixture_planner import (
-    FixturePlanner,
-    FixturePlanningError,
-)
+from kt6_backend.execution.grounding import DOMGrounder, GroundingError
 from kt6_backend.execution.models import (
     BrowserAction,
     BrowserExecutionResult,
     BrowserTarget,
+    CanvasTarget,
 )
 from kt6_backend.execution.target_resolver import (
     TargetResolutionError,
@@ -133,6 +131,75 @@ class RecordingExecutor:
 
 
 class BrowserHarnessClientTest(unittest.TestCase):
+    def test_runner_binds_one_exact_browser_target(self):
+        page_url = "http://127.0.0.1:8787/execution-test.html"
+        client = BrowserHarnessClient(
+            cdp_url="http://127.0.0.1:9222",
+            workspace=Path("runtime_data/browser-harness-test"),
+            cdp_call=lambda method, **_kwargs: {
+                "targetInfos": [
+                    {"targetId": "target-1", "type": "page", "url": page_url}
+                ]
+            }
+            if method == "Target.getTargets"
+            else {},
+            click_call=lambda _x, _y: None,
+        )
+
+        session = client.bind_page_target(page_url)
+
+        self.assertEqual(session["target_id"], "target-1")
+        self.assertEqual(session["page_url"], page_url)
+
+    def test_canvas_click_recomputes_the_pixel_point_from_the_live_box(self):
+        clicks = []
+
+        def cdp(method, **_params):
+            if method == "Page.getFrameTree":
+                return {
+                    "frameTree": {
+                        "frame": {"id": "frame-main", "url": "http://127.0.0.1:8787/execution-test.html"}
+                    }
+                }
+            if method == "DOM.describeNode":
+                return {
+                    "node": {
+                        "backendNodeId": 900,
+                        "attributes": ["id", "topology-canvas"],
+                    }
+                }
+            if method == "DOM.getBoxModel":
+                return {"model": {"content": [10, 20, 530, 20, 530, 440, 10, 440]}}
+            if method == "Page.getLayoutMetrics":
+                return {"cssVisualViewport": {"clientWidth": 1280, "clientHeight": 720}}
+            if method == "DOM.getNodeForLocation":
+                return {"backendNodeId": 900}
+            self.fail(f"unexpected CDP method: {method}")
+
+        client = BrowserHarnessClient(
+            cdp_url="http://127.0.0.1:9222",
+            workspace=Path("runtime_data/browser-harness-test"),
+            cdp_call=cdp,
+            click_call=lambda x, y: clicks.append((x, y)),
+        )
+        target = CanvasTarget(
+            node_id="vision:ap1",
+            canvas_backend_node_id=900,
+            frame_id="frame-main",
+            frame_url="http://127.0.0.1:8787/execution-test.html",
+            page_url="http://127.0.0.1:8787/execution-test.html",
+            canvas_dom_id="topology-canvas",
+            asset_id="ap_001",
+            x_ratio=0.3,
+            y_ratio=0.4,
+            producer_id="execution-fixture-canvas-cv",
+        )
+
+        receipt = client.click_canvas_target(target)
+
+        self.assertEqual(receipt, {"backend_node_id": 900, "x": 166.0, "y": 188.0})
+        self.assertEqual(clicks, [(166.0, 188.0)])
+
     def test_capture_builds_dom_and_cdp_payload_from_the_live_snapshot(self):
         page_url = "https://example.test/topology?capture=1"
         envelope = cdp_envelope(page_url)
@@ -157,6 +224,8 @@ class BrowserHarnessClientTest(unittest.TestCase):
                         "clientHeight": 720,
                     }
                 }
+            if method == "Page.captureScreenshot":
+                return {"data": "/9j/2Q=="}
             self.fail(f"unexpected CDP method: {method}")
 
         client = BrowserHarnessClient(
@@ -419,25 +488,25 @@ class BrowserHarnessClientTest(unittest.TestCase):
 
 
 class BrowserExecutionBoundaryTest(unittest.TestCase):
-    def test_fixture_planner_selects_the_current_real_graph_target(self):
+    def test_dom_grounder_selects_the_current_real_graph_target(self):
         graph = cdp_graph()
         graph["nodes"][0]["action_id"] = "device.details"
         graph["nodes"][0]["attributes"]["data-action-id"] = "device.details"
-        decision = FixturePlanner().plan(
+        decision = DOMGrounder().resolve(
+            {"action": "open_asset_details", "asset_id": "AP_001"},
             graph,
-            {"goal": "open_asset_details", "asset_id": "AP_001"},
         )
 
-        self.assertEqual(decision["target_node_id"], "cdp:shutdown")
-        self.assertEqual(decision["graph_id"], "uig:current")
-        self.assertNotIn("backend_node_id", decision)
+        self.assertEqual(decision.target_node_id, "cdp:shutdown")
+        self.assertEqual(decision.graph_id, "uig:current")
+        self.assertFalse(hasattr(decision, "backend_node_id"))
 
         graph["nodes"].append(copy.deepcopy(graph["nodes"][0]))
         graph["nodes"][1]["id"] = "cdp:duplicate"
-        with self.assertRaisesRegex(FixturePlanningError, "ambiguous"):
-            FixturePlanner().plan(
+        with self.assertRaisesRegex(GroundingError, "ambiguous"):
+            DOMGrounder().resolve(
+                {"action": "open_asset_details", "asset_id": "ap_001"},
                 graph,
-                {"goal": "open_asset_details", "asset_id": "ap_001"},
             )
 
     def test_executor_only_accepts_click(self):
@@ -504,7 +573,7 @@ class BrowserExecutionBoundaryTest(unittest.TestCase):
                 asset_id="ap_001",
             )
 
-    def test_safe_action_dispatches_only_after_token_and_fresh_graph_rebind(self):
+    def test_live_action_without_outcome_verifier_is_blocked(self):
         clock = lambda: 101.0
         captures = GraphCaptureProvider(
             [
@@ -547,18 +616,14 @@ class BrowserExecutionBoundaryTest(unittest.TestCase):
             target_node_id="cdp:shutdown",
         )
 
-        self.assertEqual(result["status"], "executed_pending_verification")
-        self.assertTrue(result["executed"])
-        self.assertFalse(result["outcome_verified"])
-        self.assertFalse(result["safe_for_execution"])
-        self.assertEqual(len(executor.actions), 1)
-        self.assertEqual(executor.actions[0].target.backend_node_id, 387)
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(result["reason"], "outcome_verifier_unavailable")
+        self.assertEqual(executor.actions, [])
         plan = service.get_plan(prepared["plan_id"])["operation_plan"]
         steps = {item["step_id"]: item for item in plan["steps"]}
-        self.assertEqual(steps["execute"]["status"], "completed")
-        self.assertEqual(steps["verify_outcome"]["status"], "pending")
+        self.assertEqual(steps["execute"]["status"], "blocked")
 
-    def test_bad_graph_target_never_reaches_executor(self):
+    def test_unverified_action_never_reaches_executor_even_with_bad_graph(self):
         captures = GraphCaptureProvider(
             [
                 action_snapshot("capture-initial", 99.0),
@@ -598,13 +663,14 @@ class BrowserExecutionBoundaryTest(unittest.TestCase):
             target_node_id="cdp:shutdown",
         )
 
-        self.assertEqual(result["reason"], "ui_graph_id_mismatch")
+        self.assertEqual(result["reason"], "outcome_verifier_unavailable")
         self.assertEqual(executor.actions, [])
 
     def test_app_factory_enables_only_explicit_browser_harness_driver(self):
         environment = {
             "KT6_BROWSER_EXECUTION_DRIVER": "browser_harness",
             "KT6_BROWSER_HARNESS_CDP_URL": "http://127.0.0.1:9222",
+            "KT6_VISION_DRIVER": "execution_fixture",
         }
         with patch.dict(os.environ, environment, clear=True), tempfile.TemporaryDirectory() as temp_dir:
             services = app.create_services(Path(temp_dir))
@@ -614,6 +680,7 @@ class BrowserExecutionBoundaryTest(unittest.TestCase):
             services.safe_dom_actions.executor.executor_id,
             "browser_harness",
         )
+        self.assertTrue(services.execution_scenarios.health()["configured"])
 
         with patch.dict(
             os.environ,

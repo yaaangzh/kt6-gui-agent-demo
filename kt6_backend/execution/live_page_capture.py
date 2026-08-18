@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import re
+import struct
 import time
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -52,6 +54,7 @@ def capture_live_page_payload(
     cdp_call: Callable[..., Mapping[str, Any]],
     *,
     expected_page_url: str,
+    include_canvas: bool = True,
 ) -> dict[str, Any]:
     page = cdp_call("Page.getFrameTree")
     frame_tree = page.get("frameTree")
@@ -129,6 +132,12 @@ def capture_live_page_payload(
         "actionable_grounding": False,
         "safe_for_execution": False,
     }
+    canvases = (
+        _capture_canvases(cdp_call, normalized, page_url=page_url)
+        if include_canvas
+        else []
+    )
+    preview_data_url = _capture_preview(cdp_call)
     return {
         "page": {
             "url": page_url,
@@ -142,11 +151,115 @@ def capture_live_page_payload(
             },
         },
         "dom": _dom_projection(normalized),
-        "canvases": [],
+        "canvases": canvases,
         "adapter_scene": None,
         "cdp_snapshot": envelope,
         "captured_at": time.time(),
+        "preview_data_url": preview_data_url,
     }
+
+
+def _capture_canvases(
+    cdp_call: Callable[..., Mapping[str, Any]],
+    scene: Mapping[str, Any],
+    *,
+    page_url: str,
+) -> list[dict[str, Any]]:
+    nodes = scene.get("nodes")
+    if not isinstance(nodes, list):
+        raise LivePageCaptureError("browser_cdp_snapshot_invalid")
+    matches = []
+    for node in nodes:
+        if not isinstance(node, Mapping) or node.get("dom_node_type") != 1:
+            continue
+        attributes = node.get("attributes")
+        attributes = attributes if isinstance(attributes, Mapping) else {}
+        bounds = node.get("bounds")
+        if attributes.get("id") != "topology-canvas" or not isinstance(bounds, list) or len(bounds) != 4:
+            continue
+        try:
+            x, y, width, height = (float(item) for item in bounds)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if width > 1 and height > 1 and x >= 0 and y >= 0:
+            matches.append((node, x, y, width, height))
+    if not matches:
+        return []
+    if len(matches) != 1:
+        raise LivePageCaptureError("execution_canvas_ambiguous")
+    node, x, y, width, height = matches[0]
+    result = cdp_call(
+        "Page.captureScreenshot",
+        format="png",
+        fromSurface=True,
+        captureBeyondViewport=False,
+        clip={"x": x, "y": y, "width": width, "height": height, "scale": 1},
+    )
+    encoded = str(result.get("data", "")).strip()
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+        image_width, image_height = _png_size(raw)
+    except (ValueError, struct.error) as exc:
+        raise LivePageCaptureError("execution_canvas_capture_invalid") from exc
+    if len(raw) > 5 * 1024 * 1024:
+        raise LivePageCaptureError("execution_canvas_capture_too_large")
+    return [
+        {
+            "canvas_id": "topology-canvas",
+            "width": image_width,
+            "height": image_height,
+            "client_width": width,
+            "client_height": height,
+            "bbox": [x, y, width, height],
+            "data_url": f"data:image/png;base64,{encoded}",
+            "source_kind": "native_canvas",
+            "source_type": "browser_harness_cdp_clip",
+            "capture_method": "Page.captureScreenshot",
+            "source_ref": "#topology-canvas",
+            "source_canvas_id": "topology-canvas",
+            "frame_id": str(node.get("frame_id", "")),
+            "frame_url": page_url,
+            "document_id": f"cdp-document:{node.get('document_index', 0)}",
+            "region_selector": "#topology-canvas",
+            "capture_kind": "native_canvas",
+            "roi_status": "verified",
+            "device_pixel_ratio": image_width / width,
+            "visible_ratio": 1.0,
+            "coordinate_space": {
+                "type": "canvas_screenshot_pixels",
+                "page_bbox": [x, y, width, height],
+            },
+        }
+    ]
+
+
+def _capture_preview(
+    cdp_call: Callable[..., Mapping[str, Any]],
+) -> str:
+    result = cdp_call(
+        "Page.captureScreenshot",
+        format="jpeg",
+        quality=55,
+        fromSurface=True,
+        captureBeyondViewport=False,
+    )
+    encoded = str(result.get("data", "")).strip()
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except ValueError as exc:
+        raise LivePageCaptureError("browser_preview_capture_invalid") from exc
+    if not raw.startswith(b"\xff\xd8") or not raw.endswith(b"\xff\xd9") or len(raw) > 2 * 1024 * 1024:
+        raise LivePageCaptureError("browser_preview_capture_invalid")
+    return f"data:image/jpeg;base64,{encoded}"
+
+
+def _png_size(raw: bytes) -> tuple[int, int]:
+    if len(raw) < 24 or raw[:8] != b"\x89PNG\r\n\x1a\n" or raw[12:16] != b"IHDR":
+        raise ValueError("invalid PNG")
+    width, height = struct.unpack(">II", raw[16:24])
+    if width < 1 or height < 1:
+        raise ValueError("invalid PNG dimensions")
+    return width, height
 
 
 def _flatten_frames(value: Any) -> list[dict[str, str]]:
@@ -245,6 +358,9 @@ def _dom_projection(scene: Mapping[str, Any]) -> dict[str, Any]:
                     attributes.get("data-owner-business-id", "")
                 )[:200],
                 "test_id": str(attributes.get("data-testid", ""))[:200],
+                "selected_asset_id": str(
+                    attributes.get("data-selected-asset-id", "")
+                )[:200],
                 "bbox": list(bounds),
                 "disabled": bool(node.get("disabled", False)),
                 "actionable": bool(node.get("interaction_candidate", False)),

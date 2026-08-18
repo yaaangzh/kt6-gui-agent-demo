@@ -48,13 +48,14 @@ B 组已经实现：
 Manifest/SHA-256 完整性校验、覆盖率/公平性/安全门禁，以及 JSON、CSV、Markdown、
 HTML 报告生成流程。
 
-2026-08-17 `feature/browser-executor` 完整回归为 525 项通过、47 项跳过；Browser
-Harness 执行层及相邻安全链定向回归为 77 项通过、1 项真实浏览器 E2E 因环境未启用而跳过。
+2026-08-18 `feature/browser-executor` 完整回归为 536 项通过、47 项跳过；真实浏览器
+E2E 因环境未启用而跳过。
 这只证明开发环境自动化路径通过；真实 Chromium/CDP、真实 NCE/FEBS 页面和测试区
 内部 GLM5.1 endpoint 尚未现场验收。UI Operation DAG 始终为 `dry_run_only=true`、
-`safe_for_execution=false`。`feature/browser-executor` 已增加默认关闭的 click-only
-Browser Harness Runtime，并增加真实 `execution-test.html`、基于本次 UI Graph 的
-Fixture Planner、点击前 live frame/identity/hit-test 复核和 AP 详情 OutcomeVerifier。
+`safe_for_execution=false`。`feature/browser-executor` 已固定 `kt6.action-plan.v1`，
+由受限中文规则生成可读六步计划；用户确认后 ScenarioRunner 每步重新 capture，DOM
+经过 SafeDOMAction，Canvas 只在对应步骤做一次真实像素识别和 live box 重绑定。
+Verifier Registry 分别验证详情面板、拓扑就绪和 Canvas 选择结果。
 当前开发机缺少 Python 3.12 与已连接 Chromium，真实浏览器 E2E 和真实 NCE 现场验收
 仍未完成。
 
@@ -183,8 +184,15 @@ kt6_backend/execution/browser_harness_client.py
 kt6_backend/execution/browser_executor.py
 kt6_backend/execution/target_resolver.py
 kt6_backend/execution/live_page_capture.py
-kt6_backend/execution/fixture_planner.py
+kt6_backend/execution/natural_language_parser.py
+kt6_backend/execution/plan_generator.py
+kt6_backend/execution/plan_validator.py
+kt6_backend/execution/scenario_runner.py
+kt6_backend/execution/scenario_service.py
+kt6_backend/execution/grounding.py
+kt6_backend/execution/fixture_canvas_vision.py
 kt6_backend/execution/verifier.py
+kt6_backend/execution/verifier_registry.py
 kt6_backend/execution_e2e_cli.py
 kt6_backend/runtime.py
 browser_sidecar/capture-ui-graph.mjs
@@ -219,6 +227,9 @@ tests/test_dom_action_binding.py
 tests/test_safe_dom_actions.py
 tests/test_safe_dom_action_plan.py
 tests/test_browser_executor.py
+tests/test_execution_scenario.py
+tests/test_execution_e2e.py
+tests/test_outcome_verifier.py
 tests/test_asset_action_integration.py
 tests/test_dom_action_api.py
 tests/test_browser_extension_assets.py
@@ -400,19 +411,19 @@ GET  /api/dom-actions/plans/{plan_id}
 GET  /api/dom-actions/audit
 ```
 
-`feature/browser-executor` 提供第一条可重复 DOM 闭环：
+`feature/browser-executor` 提供第一条可重复 DOM + Canvas 多步骤闭环：
 
 ```powershell
 python -m kt6_backend.execution_e2e_cli
 ```
 
-该命令启动真实 `demo/execution-test.html`，通过 Browser Harness 固定 CDP 方法现场采集
-DOMSnapshot/AXTree，并让 PagePerception 生成 UI Graph。Fixture Intent 只有
-`goal=open_asset_details + asset_id=ap_001`，Fixture Planner 必须从本次真实图选择
-`target_node_id`；仓库没有 `mock_ui_graph.json`。click 后页面动态创建 AP_001 详情面板，
-再次 capture 后由 `AssetDetailOutcomeVerifier` 校验前后变化。三次 UI Graph 与结果写入
-`runtime_data/execution_e2e/<时间>/`。当前 Canvas 只作为真实测试页区域存在，Canvas
-Grounder 和 Canvas 点击未在本阶段同时开发。
+该命令把固定中文任务转换成六步 `kt6.action-plan.v1`，启动真实
+`demo/execution-test.html`，再通过 Browser Harness 固定 CDP 方法现场采集
+DOMSnapshot/AXTree 和目标 Canvas 像素。ScenarioRunner 每步使用 fresh capture：DOM
+目标从当前 UI Graph Grounding 后走完整 SafeDOMAction；Canvas 目标只在对应步骤识别一次
+真实像素，并与实时 Canvas box 重新绑定。详情、拓扑就绪和 Canvas 选择分别由确定性
+Verifier 检查，不能把 click 回执当成成功。计划、逐次 UI Graph 与结果写入
+`runtime_data/execution_scenarios/<run_id>/`；仓库没有 `mock_ui_graph.json`。
 
 ### 3.4 三方案评测报告
 

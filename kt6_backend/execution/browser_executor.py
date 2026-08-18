@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from .browser_harness_client import BrowserHarnessClient, BrowserHarnessError
-from .models import BrowserAction, BrowserExecutionResult
+from .models import BrowserAction, BrowserExecutionResult, BrowserTarget, CanvasTarget
 
 
 class BrowserExecutor(Protocol):
@@ -29,7 +29,12 @@ class HarnessBrowserExecutor:
         if action.op != "click":
             return BrowserExecutionResult(False, "unsupported_browser_action")
         try:
-            receipt = self.client.click_backend_node(action.target)
+            if isinstance(action.target, BrowserTarget):
+                receipt = self.client.click_backend_node(action.target)
+            elif isinstance(action.target, CanvasTarget):
+                receipt = self.client.click_canvas_target(action.target)
+            else:
+                return BrowserExecutionResult(False, "unsupported_browser_target")
         except BrowserHarnessError as exc:
             return BrowserExecutionResult(False, exc.error_code)
         return BrowserExecutionResult(

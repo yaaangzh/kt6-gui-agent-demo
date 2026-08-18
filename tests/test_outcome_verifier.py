@@ -4,7 +4,12 @@ import unittest
 from kt6_backend.asset_inventory import AssetResolver, InMemoryAssetInventoryAdapter
 from kt6_backend.dom_action_binding import DOMActionBindingService
 from kt6_backend.execution.target_resolver import UIGraphTargetResolver
-from kt6_backend.execution.verifier import AssetDetailOutcomeVerifier
+from kt6_backend.execution.verifier import (
+    AssetDetailOutcomeVerifier,
+    CanvasSelectionVerifier,
+    PageReadyVerifier,
+)
+from kt6_backend.execution.verifier_registry import OutcomeVerifierRegistry
 from kt6_backend.safe_dom_actions import SafeDOMActionService
 from tests.test_browser_executor import GraphCaptureProvider, RecordingExecutor, cdp_graph
 from tests.test_dom_action_binding import ASSETS, device_snapshot
@@ -35,7 +40,7 @@ def details_snapshot(capture_id: str, created_at: float, *, panel: bool = False)
                 "selector": "#asset-detail-panel",
                 "parent_ref": "",
                 "test_id": "asset-detail-panel",
-                "asset_id": "ap_001",
+                "owner_business_id": "ap_001",
                 "label": "AP_001 详情",
                 "actionable": False,
             }
@@ -55,6 +60,48 @@ def details_graph() -> dict:
 
 
 class AssetDetailOutcomeVerifierTest(unittest.TestCase):
+    def test_registry_selects_page_and_canvas_verifiers_by_contract(self):
+        registry = OutcomeVerifierRegistry(
+            [PageReadyVerifier(), CanvasSelectionVerifier()]
+        )
+        before = details_snapshot("capture-before", 100.0)
+        page_after = details_snapshot("capture-page", 101.0)
+        page_after["dom"]["elements"].append(
+            {
+                "test_id": "topology-page",
+                "owner_business_id": "ap_001",
+                "bbox": [0, 0, 500, 400],
+            }
+        )
+        page_verified, page_verifier = registry.verify_expected(
+            expected={
+                "type": "page_ready",
+                "page": "topology",
+                "asset_id": "ap_001",
+            },
+            action_id="open_topology",
+            before=before,
+            after=page_after,
+        )
+        canvas_after = details_snapshot("capture-canvas", 102.0)
+        canvas_after["dom"]["elements"].append(
+            {
+                "test_id": "canvas-selection-result",
+                "selected_asset_id": "ap_001",
+            }
+        )
+        canvas_verified, canvas_verifier = registry.verify_expected(
+            expected={"type": "canvas_asset_selected", "asset_id": "ap_001"},
+            action_id="select_canvas_asset",
+            before=page_after,
+            after=canvas_after,
+        )
+
+        self.assertTrue(page_verified)
+        self.assertEqual(page_verifier, "topology_page_dom")
+        self.assertTrue(canvas_verified)
+        self.assertEqual(canvas_verifier, "canvas_selection_dom")
+
     def test_requires_a_new_capture_with_the_exact_asset_panel(self):
         verifier = AssetDetailOutcomeVerifier()
         before = details_snapshot("capture-before", 100.0)
@@ -69,7 +116,7 @@ class AssetDetailOutcomeVerifierTest(unittest.TestCase):
             )
         )
         wrong_asset = copy.deepcopy(after)
-        wrong_asset["dom"]["elements"][-1]["asset_id"] = "ap_002"
+        wrong_asset["dom"]["elements"][-1]["owner_business_id"] = "ap_002"
         self.assertFalse(
             verifier.verify(
                 action_id="open_asset_details",
@@ -104,7 +151,9 @@ class AssetDetailOutcomeVerifierTest(unittest.TestCase):
             clock=lambda: 101.0,
             executor=RecordingExecutor(),
             target_resolver=UIGraphTargetResolver(),
-            outcome_verifier=AssetDetailOutcomeVerifier(),
+            outcome_verifiers=OutcomeVerifierRegistry(
+                [AssetDetailOutcomeVerifier()]
+            ),
         )
         prepared = service.prepare(
             asset_reference="AP1",
@@ -157,7 +206,9 @@ class AssetDetailOutcomeVerifierTest(unittest.TestCase):
             clock=lambda: 101.0,
             executor=RecordingExecutor(),
             target_resolver=UIGraphTargetResolver(),
-            outcome_verifier=AssetDetailOutcomeVerifier(),
+            outcome_verifiers=OutcomeVerifierRegistry(
+                [AssetDetailOutcomeVerifier()]
+            ),
         )
         prepared = service.prepare(
             asset_reference="AP1",

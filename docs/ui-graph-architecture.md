@@ -179,6 +179,14 @@ Browser Harness 仅承担 daemon、CDP transport 和坐标点击，不接收任�
 OutcomeVerifier，进入 `verified` 后才能判定成功。第一阶段保留现有 Playwright/CDP
 只读 Sidecar，不合并感知连接。
 
+功能分支另定义 `kt6.action-plan.v1` 作为 Planner 与 ScenarioRunner 的稳定契约。
+测试阶段只有“自然语言 → Intent → Action Plan”是规则 Fixture；Plan 只包含语义动作，
+不允许 selector、backend node id 或坐标。ScenarioRunner 对每个 step 重新 capture：
+DOM click 走完整资产/控件/preflight 链，wait 用重复感知代替固定 sleep；Canvas click
+只接受 `execution-fixture-canvas-cv` 从本次真实裁剪像素得到的 bbox，再与 live Canvas
+content box 组合得到点击点。视觉 UI Graph 仍保持 analysis-only，执行授权来自独立的
+fixture Canvas policy、固定 URL 和实时 frame/element/hit-test 门禁，而不是图自报字段。
+
 ## 安全边界与运维检查
 
 - Sidecar、KT6 后端和 GLM5.1 都部署在测试区内，数据不越区。
@@ -201,9 +209,10 @@ kt6_backend/ui_graph.py          多源 UI Graph 构建与文本序列化
 kt6_backend/ui_graph_reasoner.py 内部 GLM HTTP 契约
 kt6_backend/ui_operation_graph.py 操作 DAG 严格校验
 kt6_backend/ui_graph_planning.py 建图、推理与验证的 dry-run 服务
-kt6_backend/execution/          Browser Harness、Fixture Planner、目标重绑定与结果验证
+kt6_backend/execution/          Action Plan、ScenarioRunner、Grounding Registry 与 Browser Harness
 kt6_backend/execution/live_page_capture.py 固定 CDP 方法的真实测试页采集适配
-kt6_backend/execution_e2e_cli.py 真实页面 DOM 闭环的一键运行入口
+kt6_backend/execution_e2e_cli.py 自然语言 DOM + Canvas 闭环的一键运行入口
 kt6_backend/safe_dom_actions.py 资产/权限/fresh capture/令牌门禁、执行和验证状态
-demo/execution-test.html        DOM + Canvas 真实测试页面
+demo/execution-test.html        DOM + Canvas 真实目标页面
+demo/execution-runner.html      计划确认、执行状态和最新页面预览控制台
 ```

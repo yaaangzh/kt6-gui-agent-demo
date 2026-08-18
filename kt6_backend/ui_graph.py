@@ -785,7 +785,14 @@ def _observation(
         source["parent_frame_id"] = parent_frame_id
     if declared_source.get("kind") and declared_source.get("kind") != spec.modality:
         source["declared_kind"] = _text(declared_source.get("kind"), 100)
-    for key in ("backend_node_id", "canvas_id", "producer_id", "producer_version"):
+    for key in (
+        "backend_node_id",
+        "canvas_id",
+        "canvas_width",
+        "canvas_height",
+        "producer_id",
+        "producer_version",
+    ):
         value = item.get(key, declared_source.get(key))
         if value is not None and value != "":
             source[key] = _bounded(value)

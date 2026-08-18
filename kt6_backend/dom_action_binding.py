@@ -78,6 +78,25 @@ DEFAULT_DOM_ACTION_POLICIES = (
             {"online", "offline", "degraded", "unknown"}
         ),
     ),
+    DOMActionPolicy(
+        action_id="open_topology",
+        asset_types=frozenset({"ap", "switch", "gateway", "device"}),
+        aliases=frozenset(
+            {
+                "open_topology",
+                "navigation.topology",
+                "打开拓扑",
+                "进入拓扑",
+                "拓扑",
+            }
+        ),
+        permission="assets.read",
+        risk_level="read-only",
+        control_action_ids=frozenset({"open_topology", "navigation.topology"}),
+        allowed_asset_states=frozenset(
+            {"online", "offline", "degraded", "unknown"}
+        ),
+    ),
 )
 
 

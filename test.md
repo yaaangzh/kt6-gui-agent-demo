@@ -80,9 +80,11 @@ KT6_UI_TARS_API_ALLOWED_HOSTS=<获批服务精确主机名>
 ```dotenv
 KT6_BROWSER_EXECUTION_DRIVER=browser_harness
 KT6_BROWSER_HARNESS_CDP_URL=http://127.0.0.1:9222
+KT6_VISION_DRIVER=execution_fixture
 ```
 
-未设置这两个变量时，`dry_run=false` 继续 fail closed。CDP 地址只允许 loopback。
+`execution_fixture` 要替换 `.env` 中其他 `KT6_VISION_DRIVER`/hybrid 配置，不能同时启用。
+未设置 Browser Harness 两个变量时，`dry_run=false` 继续 fail closed。CDP 地址只允许 loopback。
 
 ## 4. 公共自动化回归
 
@@ -90,7 +92,7 @@ KT6_BROWSER_HARNESS_CDP_URL=http://127.0.0.1:9222
 python -m unittest discover -s tests
 ```
 
-2026-08-13 开发机最近一次结果：
+各分支开发机最近一次结果（日期见有单独标注的行，其余为 2026-08-13）：
 
 | 分支 | 结果 |
 |---|---|
@@ -99,7 +101,7 @@ python -m unittest discover -s tests
 | `eval-browser-use` | 456 tests OK，46 skipped |
 | `eval-ui-tars` | 457 tests OK，46 skipped |
 | `ui-graph-textflow-cdp` | 508 tests OK，46 skipped |
-| `feature/browser-executor` | 525 tests OK，47 skipped |
+| `feature/browser-executor` | 536 tests OK，47 skipped（2026-08-18） |
 | `br_omniParser` | 461 tests OK，46 skipped |
 
 测试数量会随公共同步增加，以当前命令最终 `OK` 为准。公共配置和报告定向测试：
@@ -223,6 +225,7 @@ browser-harness --doctor
 
 ```powershell
 python -m unittest `
+  tests.test_execution_scenario `
   tests.test_browser_executor `
   tests.test_outcome_verifier `
   tests.test_execution_e2e `
@@ -234,9 +237,8 @@ python -m unittest `
   tests.test_app
 ```
 
-先跑仓库自带的真实页面 DOM 闭环。Fixture 只提供“打开 AP_001 详情”目标，不提供
-UI Graph、backend node id 或坐标；命令会启动测试页、现场采集、生成三次 UI Graph、
-执行 click 并验证新 capture：
+先跑仓库自带的自然语言 DOM + Canvas 闭环。系统把固定中文任务展开为六步
+`kt6.action-plan.v1`；计划中没有 UI Graph、backend node id、selector 或坐标：
 
 ```powershell
 python -m kt6_backend.execution_e2e_cli
@@ -245,38 +247,41 @@ python -m kt6_backend.execution_e2e_cli
 成功输出位于：
 
 ```text
-runtime_data/execution_e2e/<UTC时间>/
-  initial-ui-graph.json
-  fresh-ui-graph.json
-  after-ui-graph.json
+runtime_data/execution_scenarios/<run_id>/
+  action-plan.json
+  capture-*-ui-graph.json
   result.json
 ```
 
-`result.json` 必须同时满足 `execution_status=executed_pending_verification`、
-`verification_status=verified`、`outcome_verified=true`。若希望把真实浏览器场景纳入
+`result.json` 必须为 `status=success`，六个 step 均为 `completed`，三个动作的后续
+verify/wait 都必须由新 capture 通过确定性 Verifier。若希望把真实浏览器场景纳入
 unittest，可在根目录 `.env` 增加 `KT6_RUN_BROWSER_E2E=1`；未配置时只跳过这一项实机
 用例，其余契约测试照常运行。当前开发机只有 Python 3.14，尚未安装要求的 Python 3.12
 和 Browser Harness，因此本机只能完成自动化契约回归，实机闭环需在准备好的环境运行。
 
-实机只使用可恢复的“打开 AP_001 详情”类任务，步骤如下：
+也可以启动后端后，在普通浏览器打开：
+
+```text
+http://127.0.0.1:8787/execution-runner.html
+```
+
+Runner 页面与受控 Chromium Target Tab 必须是两个独立页面；不要让 Browser Harness
+把控制台自身当作目标标签页。先点“生成计划”检查六个中文步骤，再点“确认并开始执行”。
+当前 URL 只允许仓库测试页，规则解析器只支持详情、拓扑和 Canvas 选择三个测试意图。
+
+实机步骤如下：
 
 1. Chrome/Edge 以 loopback remote debugging 启动，NCE 标签页已登录且页面状态可恢复。
-2. 用现有扩展采集 DOM，用 `browser_sidecar/capture-ui-graph.mjs` 采集同一页面的 CDP
-   snapshot；第一阶段将两份证据放进同一次 `POST /api/perception/captures` 请求，其中
-   Sidecar JSON 位于 `cdp_snapshot` 字段。不要声称扩展与 Sidecar 已自动实时合并。
-3. `POST /api/ui-operations/plan`，检查 click 指向带正整数 backend node id 的 CDP
-   candidate；DAG 本身仍为 `dry_run_only=true`。
-4. 依次调用 `/api/dom-actions/prepare` 与 `/api/dom-actions/preflight`，使用不同的新鲜
-   capture、准确 asset/action 确认和所需权限取得一次性 token。
-5. 调用 `/api/dom-actions/execute`，传入 token、`dry_run=false`、该 fresh capture 的
-   `graph_id` 和已经验证的 `target_node_id`。只有 CDP 节点的 `#id`、owner、action 与
-   DOM 绑定完全一致，并且执行瞬间的 frame、DOM 属性和 hit-test 仍匹配时才会交给
-   Browser Harness。
-6. 预期 HTTP 202，状态为 `executed_pending_verification`。这只证明 click 已派发；
-   重新进行 KT6 capture，再调用 `POST /api/dom-actions/verify`；只有确定性验证返回
-   `verified` 后，才能在业务评测中记为成功。
+2. `POST /api/execution/plans` 只生成计划；确认没有坐标、selector 和 backend node id。
+3. `POST /api/execution/runs` 必须带 `confirmed=true`，立即返回 run_id；前端轮询
+   `GET /api/execution/runs/{run_id}`，避免阻塞页面。
+4. 两个 DOM click 都执行“capture → Grounding → prepare → fresh capture → preflight →
+   live frame/identity/hit-test → click”；详情用 verify，拓扑加载用轮询 wait。
+5. Canvas step 才进行一次截图裁剪和像素识别；CanvasGrounder 使用本次 bbox 比例，点击
+   前重新读取 live Canvas box 并做 hit-test，不复用第一步坐标。
+6. 最后新 capture 必须看到 `canvas-selection-result` 且资产 ID 一致，才能返回 SUCCESS。
 
-执行回执写入内存审计接口 `GET /api/dom-actions/audit`，计划进度通过
+DOM 执行回执写入内存审计接口 `GET /api/dom-actions/audit`，计划进度通过
 `GET /api/dom-actions/plans/{plan_id}` 查看；Browser Harness 隔离工作区位于
 `runtime_data/browser_harness_workspace/`。当前代码不自动生成执行录像，也不把点击回执
 当作评测成功证据。

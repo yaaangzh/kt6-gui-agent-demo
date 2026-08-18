@@ -18,8 +18,20 @@ from .dom_action_binding import DOMActionBindingService
 from .env_config import load_project_env
 from .execution.browser_executor import HarnessBrowserExecutor
 from .execution.browser_harness_client import BrowserHarnessClient
+from .execution.fixture_canvas_vision import ExecutionFixtureCanvasVisionAdapter
+from .execution.grounding import TargetGrounderRegistry
+from .execution.scenario_runner import ScenarioRunner
+from .execution.scenario_service import (
+    ExecutionScenarioService,
+    ExecutionScenarioServiceError,
+)
 from .execution.target_resolver import UIGraphTargetResolver
-from .execution.verifier import AssetDetailOutcomeVerifier
+from .execution.verifier import (
+    AssetDetailOutcomeVerifier,
+    CanvasSelectionVerifier,
+    PageReadyVerifier,
+)
+from .execution.verifier_registry import OutcomeVerifierRegistry
 from .http_canvas_vision import HTTPTopologyVisionAdapter
 from .hybrid_canvas_vision import HybridCanvasVisionAdapter
 from .local_cv_canvas_vision import LocalCVTopologyVisionAdapter
@@ -121,10 +133,36 @@ def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | N
         return None
 
     selected_driver = (driver or "http").strip().lower()
-    if selected_driver not in {"http", "codeagent_cli", "local_cv_ocr", "hybrid"}:
+    if selected_driver not in {
+        "http",
+        "codeagent_cli",
+        "local_cv_ocr",
+        "hybrid",
+        "execution_fixture",
+    }:
         raise ValueError(
-            f"{VISION_DRIVER_ENV} must be http, codeagent_cli, local_cv_ocr or hybrid"
+            f"{VISION_DRIVER_ENV} must be http, codeagent_cli, local_cv_ocr, "
+            "hybrid or execution_fixture"
         )
+
+    if selected_driver == "execution_fixture":
+        conflicting = [
+            name
+            for name, value in (
+                (VISION_ENDPOINT_ENV, endpoint),
+                (VISION_API_KEY_ENV, api_key),
+                (VISION_TIMEOUT_ENV, timeout_text),
+                (CODEAGENT_EXECUTABLE_ENV, codeagent_executable),
+                (CODEAGENT_AGENT_ENV, codeagent_agent),
+                (HYBRID_MODEL_DRIVER_ENV, hybrid_model_driver),
+            )
+            if value is not None
+        ]
+        if conflicting:
+            raise ValueError(
+                f"{', '.join(conflicting)} must not be configured for execution_fixture"
+            )
+        return ExecutionFixtureCanvasVisionAdapter()
 
     if selected_driver == "local_cv_ocr":
         conflicting = [
@@ -367,15 +405,21 @@ class AppServices:
     asset_resolver: AssetResolver
     dom_action_binding: DOMActionBindingService
     safe_dom_actions: SafeDOMActionService
+    outcome_verifiers: OutcomeVerifierRegistry
+    execution_scenarios: ExecutionScenarioService
     ui_graph_planning: UIGraphPlanningService
     tools: MockBusinessTools
     runtime: KT6Runtime
 
 
-def create_services(root: Path = ROOT) -> AppServices:
+def create_services(
+    root: Path = ROOT,
+    *,
+    canvas_vision_override: CanvasVisionAdapter | None = None,
+) -> AppServices:
     root = root.resolve()
     load_project_env(root)
-    canvas_vision = _create_canvas_vision_from_env(root)
+    canvas_vision = canvas_vision_override or _create_canvas_vision_from_env(root)
     ui_graph_reasoner = _create_ui_graph_reasoner_from_env()
     browser_executor, browser_target_resolver = (
         _create_browser_executor_from_env(root)
@@ -403,12 +447,35 @@ def create_services(root: Path = ROOT) -> AppServices:
     asset_inventory = JSONAssetInventoryAdapter(root / "data" / "mock_assets.json")
     asset_resolver = AssetResolver(asset_inventory)
     dom_action_binding = DOMActionBindingService(asset_resolver)
+    outcome_verifiers = OutcomeVerifierRegistry(
+        [
+            AssetDetailOutcomeVerifier(),
+            PageReadyVerifier(),
+            CanvasSelectionVerifier(),
+        ]
+    )
     safe_dom_actions = SafeDOMActionService(
         dom_action_binding,
         page_perception,
         executor=browser_executor,
         target_resolver=browser_target_resolver,
-        outcome_verifier=AssetDetailOutcomeVerifier(),
+        outcome_verifiers=outcome_verifiers,
+    )
+    scenario_runner = (
+        ScenarioRunner(
+            page_perception=page_perception,
+            safe_dom_actions=safe_dom_actions,
+            browser_executor=browser_executor,
+            grounders=TargetGrounderRegistry(),
+            verifiers=outcome_verifiers,
+        )
+        if browser_executor is not None
+        and isinstance(canvas_vision, ExecutionFixtureCanvasVisionAdapter)
+        else None
+    )
+    execution_scenarios = ExecutionScenarioService(
+        root=root,
+        runner=scenario_runner,
     )
     ui_graph_planning = UIGraphPlanningService(page_perception, ui_graph_reasoner)
     tools = MockBusinessTools(
@@ -428,6 +495,8 @@ def create_services(root: Path = ROOT) -> AppServices:
         asset_resolver=asset_resolver,
         dom_action_binding=dom_action_binding,
         safe_dom_actions=safe_dom_actions,
+        outcome_verifiers=outcome_verifiers,
+        execution_scenarios=execution_scenarios,
         ui_graph_planning=ui_graph_planning,
         tools=tools,
         runtime=runtime,
@@ -517,6 +586,8 @@ class KT6Handler(SimpleHTTPRequestHandler):
                         ],
                         "outcome_verification": "fresh_kt6_capture_deterministic",
                     },
+                    "execution_scenarios": services.execution_scenarios.health(),
+                    "outcome_verifiers": services.outcome_verifiers.health(),
                 },
             )
             return
@@ -585,6 +656,19 @@ class KT6Handler(SimpleHTTPRequestHandler):
         if path == "/api/dom-actions/audit":
             self._json(200, {"events": services.safe_dom_actions.audit_events()})
             return
+        execution_run_prefix = "/api/execution/runs/"
+        if path.startswith(execution_run_prefix):
+            run_id = path[len(execution_run_prefix) :]
+            if not run_id or "/" in run_id:
+                self._json(404, {"error": "not found"})
+                return
+            try:
+                run = services.execution_scenarios.get_run(run_id)
+            except ExecutionScenarioServiceError as exc:
+                self._json(404, {"error": exc.error_code})
+                return
+            self._json(200, run)
+            return
         capture_job_prefix = "/api/perception/capture-jobs/"
         if path.startswith(capture_job_prefix):
             job_id = path[len(capture_job_prefix) :]
@@ -652,6 +736,8 @@ class KT6Handler(SimpleHTTPRequestHandler):
                 "/api/dom-actions/preflight",
                 "/api/dom-actions/execute",
                 "/api/dom-actions/verify",
+                "/api/execution/plans",
+                "/api/execution/runs",
                 "/api/ui-operations/plan",
             }
             or (path.startswith("/api/tasks/") and path.endswith("/actions"))
@@ -666,6 +752,42 @@ class KT6Handler(SimpleHTTPRequestHandler):
             return
         except ValueError as exc:
             self._json(400, {"error": str(exc)})
+            return
+        if path == "/api/execution/plans":
+            try:
+                generated = services.execution_scenarios.generate_plan(
+                    start_url=str(payload.get("start_url", "")),
+                    user_request=str(payload.get("user_request", "")),
+                )
+            except ValueError as exc:
+                self._json(
+                    422,
+                    {"error": getattr(exc, "error_code", "plan_invalid")},
+                )
+                return
+            self._json(200, generated)
+            return
+        if path == "/api/execution/runs":
+            plan = payload.get("plan")
+            if not isinstance(plan, dict):
+                self._json(400, {"error": "plan must be an object"})
+                return
+            try:
+                run = services.execution_scenarios.start_run(
+                    plan=plan,
+                    confirmed=payload.get("confirmed") is True,
+                )
+            except ValueError as exc:
+                self._json(
+                    409,
+                    {
+                        "error": getattr(
+                            exc, "error_code", "execution_run_invalid"
+                        )
+                    },
+                )
+                return
+            self._json(202, run)
             return
         if path == "/api/perception/capture-jobs":
             try:
@@ -835,8 +957,13 @@ def create_server(
     host: str = "127.0.0.1",
     port: int = 8787,
     root: Path = ROOT,
+    *,
+    canvas_vision_override: CanvasVisionAdapter | None = None,
 ) -> tuple[ThreadingHTTPServer, AppServices]:
-    services = create_services(root)
+    services = create_services(
+        root,
+        canvas_vision_override=canvas_vision_override,
+    )
     server = ThreadingHTTPServer((host, port), create_handler(services, root / "demo"))
     return server, services
 

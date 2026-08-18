@@ -62,13 +62,16 @@
         border-radius: 10px;
         background: #fbfcff;
       }
+      [hidden] {
+        display: none !important;
+      }
     </style>
   </head>
   <body>
     <main>
       <section class="panel" aria-labelledby="dom-heading">
         <h1 id="dom-heading">真实 DOM 执行场景</h1>
-        <p>固定目标：打开 AP_001 详情。</p>
+        <p>固定目标：打开 AP_001 详情，进入拓扑，再从真实 Canvas 选择 AP_001。</p>
         <article
           id="ap-001-card"
           class="asset-card"
@@ -91,9 +94,16 @@
         <div id="detail-panel-host" aria-live="polite"></div>
       </section>
 
-      <section class="panel" aria-labelledby="canvas-heading">
+      <section
+        id="topology-page"
+        class="panel"
+        aria-labelledby="canvas-heading"
+        data-testid="topology-page"
+        data-owner-business-id="ap_001"
+        hidden
+      >
         <h2 id="canvas-heading">真实 Canvas 拓扑区域</h2>
-        <p>Canvas Grounder 留到 DOM 闭环通过后接入。</p>
+        <p>节点位置来自本次 Canvas 像素识别，不在执行计划中预置坐标。</p>
         <canvas
           id="topology-canvas"
           width="520"
@@ -109,14 +119,15 @@
       const detailButton = document.getElementById("ap-001-details");
       const detailHost = document.getElementById("detail-panel-host");
       const canvas = document.getElementById("topology-canvas");
+      const topologyPage = document.getElementById("topology-page");
       const context = canvas.getContext("2d");
       const canvasResultHost = document.getElementById("canvas-result-host");
       let selectedAsset = "";
 
-      function drawNode(x, y, label, selected) {
+      function drawNode(x, y, label, color, selected) {
         context.beginPath();
         context.arc(x, y, selected ? 18 : 14, 0, Math.PI * 2);
-        context.fillStyle = selected ? "#ff9f1a" : "#246bfd";
+        context.fillStyle = selected ? "#ff9f1a" : color;
         context.fill();
         context.fillStyle = "#172033";
         context.font = "600 15px sans-serif";
@@ -133,9 +144,9 @@
         context.lineTo(300, 300);
         context.lineTo(450, 150);
         context.stroke();
-        drawNode(150, 150, "AP_001", selectedAsset === "ap_001");
-        drawNode(300, 300, "Switch_001", false);
-        drawNode(450, 150, "AP_002", false);
+        drawNode(150, 150, "AP_001", "#20a67a", selectedAsset === "ap_001");
+        drawNode(300, 300, "Switch_001", "#246bfd", false);
+        drawNode(450, 150, "AP_002", "#8a5cf5", false);
       }
 
       detailButton.addEventListener("click", () => {
@@ -143,9 +154,20 @@
         const panel = document.createElement("section");
         panel.id = "asset-detail-panel";
         panel.dataset.testid = "asset-detail-panel";
-        panel.dataset.assetId = "ap_001";
+        panel.dataset.ownerBusinessId = "ap_001";
         panel.innerHTML =
           "<strong>AP_001 详情</strong><p>管理 IP：10.10.1.20</p><p>状态：Online</p>";
+        const topologyButton = document.createElement("button");
+        topologyButton.id = "open-topology";
+        topologyButton.type = "button";
+        topologyButton.dataset.ownerBusinessId = "ap_001";
+        topologyButton.dataset.actionId = "navigation.topology";
+        topologyButton.textContent = "进入拓扑";
+        topologyButton.addEventListener("click", () => {
+          topologyPage.hidden = false;
+          renderTopology();
+        });
+        panel.appendChild(topologyButton);
         detailHost.appendChild(panel);
       });
 
@@ -159,6 +181,7 @@
         canvasResultHost.replaceChildren();
         const result = document.createElement("div");
         result.id = "canvas-selection-result";
+        result.dataset.testid = "canvas-selection-result";
         result.dataset.selectedAssetId = "ap_001";
         result.textContent = "已选择 AP_001";
         canvasResultHost.appendChild(result);

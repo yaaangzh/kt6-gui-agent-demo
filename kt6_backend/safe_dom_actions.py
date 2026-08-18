@@ -19,7 +19,10 @@ from .execution.target_resolver import (
     TargetResolutionError,
     UIGraphTargetResolver,
 )
-from .execution.verifier import OutcomeVerifier
+from .execution.verifier_registry import (
+    OutcomeVerifierRegistry,
+    OutcomeVerifierRegistryError,
+)
 
 
 class ActionCaptureProvider(Protocol):
@@ -62,7 +65,7 @@ class SafeDOMActionService:
         plan_ttl_seconds: float = 300.0,
         executor: BrowserExecutor | None = None,
         target_resolver: UIGraphTargetResolver | None = None,
-        outcome_verifier: OutcomeVerifier | None = None,
+        outcome_verifiers: OutcomeVerifierRegistry | None = None,
     ):
         self.binder = binder
         self.captures = captures
@@ -72,7 +75,7 @@ class SafeDOMActionService:
         self.plan_ttl_seconds = float(plan_ttl_seconds)
         self.executor = executor
         self.target_resolver = target_resolver
-        self.outcome_verifier = outcome_verifier
+        self.outcome_verifiers = outcome_verifiers
         self._plans: dict[str, dict[str, Any]] = {}
         self._tokens: dict[str, dict[str, Any]] = {}
         self._audit: list[dict[str, Any]] = []
@@ -480,6 +483,21 @@ class SafeDOMActionService:
                     "live_execution_channel_unavailable",
                     claims,
                 )
+            if (
+                self.outcome_verifiers is None
+                or not self.outcome_verifiers.supports_action(claims["action_id"])
+            ):
+                self._update_operation_plan(
+                    claims["plan_id"],
+                    status="blocked",
+                    reason="outcome_verifier_unavailable",
+                    step_id="execute",
+                    step_status="blocked",
+                    step_reason="outcome_verifier_unavailable",
+                )
+                return self._audit_result(
+                    "rejected", "outcome_verifier_unavailable", claims
+                )
             graph_provider = getattr(self.captures, "get_ui_graph", None)
             graph = (
                 graph_provider(claims["capture_id"])
@@ -629,7 +647,7 @@ class SafeDOMActionService:
         context = plan.get("execution_context")
         if not isinstance(context, dict):
             return self._decision("rejected", "execution_context_missing")
-        if self.outcome_verifier is None:
+        if self.outcome_verifiers is None:
             return self._decision("rejected", "outcome_verifier_unavailable")
         before_capture_id = compact_text(
             context.get("before_capture_id"), 200
@@ -652,12 +670,15 @@ class SafeDOMActionService:
         if captured_at < dispatched_at:
             return self._decision("rejected", "post_action_capture_stale")
 
-        verified = self.outcome_verifier.verify(
-            action_id=plan["action_id"],
-            asset_id=plan["asset_id"],
-            before=before,
-            after=after,
-        )
+        try:
+            verified, verifier_id = self.outcome_verifiers.verify_action(
+                action_id=plan["action_id"],
+                asset_id=plan["asset_id"],
+                before=before,
+                after=after,
+            )
+        except OutcomeVerifierRegistryError as exc:
+            return self._decision("rejected", exc.error_code)
         status = "verified" if verified else "verify_failed"
         reason = (
             "outcome_verified_from_fresh_capture"
@@ -681,9 +702,7 @@ class SafeDOMActionService:
             "before_capture_id": before_capture_id,
             "capture_id": after_capture_id,
             "outcome_verified": verified,
-            "verifier_id": str(
-                getattr(self.outcome_verifier, "verifier_id", "outcome_verifier")
-            ),
+            "verifier_id": verifier_id,
             "timestamp": self.clock(),
             "safe_for_execution": False,
         }

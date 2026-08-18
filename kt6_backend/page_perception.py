@@ -2146,6 +2146,8 @@ class PagePerceptionService:
                         "evidence_sources": evidence_sources,
                         "geometry_source": geometry_source,
                         "canvas_id": frame.canvas_id if frame else "",
+                        "canvas_width": frame.width if frame else 0,
+                        "canvas_height": frame.height if frame else 0,
                         "frame_id": frame.frame_id if frame else "",
                         "source_kind": frame.source_kind if frame else "",
                         "trust": "adapter_observed",
