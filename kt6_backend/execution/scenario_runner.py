@@ -7,12 +7,13 @@ from pathlib import Path
 from typing import Any
 
 from ..page_perception import PagePerceptionService
-from ..safe_dom_actions import SafeDOMActionService
+from .action_guard import ScenarioActionGuard, ScenarioActionGuardError
 from .browser_executor import HarnessBrowserExecutor
 from .browser_harness_client import BrowserHarnessError
-from .grounding import GroundedDOMStep, GroundingError, TargetGrounderRegistry
-from .models import BrowserAction, CanvasTarget
+from .grounding import GroundingError, TargetGrounderRegistry
+from .models import BrowserAction, BrowserTarget, CanvasTarget
 from .plan_validator import ActionPlanValidator
+from .url_policy import ExecutionURLPolicy, ExecutionURLPolicyError
 from .verifier_registry import OutcomeVerifierRegistry, OutcomeVerifierRegistryError
 
 
@@ -23,28 +24,43 @@ class ScenarioExecutionError(RuntimeError):
 
 
 class ScenarioRunner:
-    """Execute a validated plan against fresh browser evidence at every step."""
+    """Execute a semantic plan against fresh unified perception at every step."""
 
     def __init__(
         self,
         *,
         page_perception: PagePerceptionService,
-        safe_dom_actions: SafeDOMActionService,
         browser_executor: HarnessBrowserExecutor,
         grounders: TargetGrounderRegistry,
         verifiers: OutcomeVerifierRegistry,
+        url_policy: ExecutionURLPolicy,
+        action_guard: ScenarioActionGuard | None = None,
         clock: Callable[[], float] = time.time,
         wait: Callable[[float], None] = time.sleep,
     ):
         self.page_perception = page_perception
-        self.safe_dom_actions = safe_dom_actions
         self.browser_executor = browser_executor
         self.client = browser_executor.client
         self.grounders = grounders
         self.verifiers = verifiers
+        self.url_policy = url_policy
+        self.action_guard = action_guard or ScenarioActionGuard(clock=clock)
         self.clock = clock
         self.wait = wait
         self.validator = ActionPlanValidator()
+
+    def inspect(self, start_url: str) -> dict[str, Any]:
+        target_url = self.url_policy.validate(start_url)
+        current_url = self.client.navigate_to(target_url)
+        browser_session = self.client.bind_page_target(current_url)
+        snapshot, graph, preview = self._capture()
+        return {
+            "browser_session": browser_session,
+            "capture_id": snapshot["capture_id"],
+            "graph_id": graph["graph_id"],
+            "ui_graph": graph,
+            "preview_data_url": preview,
+        }
 
     def run(
         self,
@@ -52,12 +68,17 @@ class ScenarioRunner:
         *,
         run_id: str,
         out_dir: Path,
+        confirmed: bool,
         update: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
+        if not confirmed:
+            raise ScenarioExecutionError("execution_confirmation_required")
         action_plan = self.validator.validate(plan)
+        target_url = self.url_policy.validate(action_plan["start_url"])
         out_dir.mkdir(parents=True, exist_ok=False)
-        self.client.reset_execution_fixture(action_plan["start_url"])
-        browser_session = self.client.bind_page_target(action_plan["start_url"])
+        _write_json(out_dir / "action-plan.json", action_plan)
+        current_url = self.client.navigate_to(target_url)
+        browser_session = self.client.bind_page_target(current_url)
         step_results: list[dict[str, Any]] = []
         pending: dict[str, Any] | None = None
         capture_sequence = 0
@@ -68,33 +89,21 @@ class ScenarioRunner:
 
         def capture(
             label: str,
-            *,
-            include_canvas: bool = False,
         ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
             nonlocal capture_sequence
             capture_sequence += 1
-            payload = self.client.capture_page_payload(
-                expected_page_url=action_plan["start_url"],
-                include_canvas=include_canvas,
-            )
-            preview = str(payload.pop("preview_data_url", ""))
-            ingested = self.page_perception.ingest(payload)
-            capture_id = ingested["capture_id"]
-            graph = self.page_perception.get_ui_graph(capture_id)
-            snapshot = self.page_perception.get_action_snapshot(capture_id)
-            if graph is None or snapshot is None:
-                raise ScenarioExecutionError("scenario_capture_incomplete")
+            snapshot, graph, preview = self._capture()
             graph_name = f"capture-{capture_sequence:03d}-{label}-ui-graph.json"
             _write_json(out_dir / graph_name, graph)
             emit(
                 {
-                    "capture_id": capture_id,
+                    "capture_id": snapshot["capture_id"],
                     "graph_id": graph["graph_id"],
                     "latest_preview": preview,
                     "capture_file": graph_name,
                 }
             )
-            return snapshot, graph, ingested
+            return snapshot, graph, {"capture_file": graph_name}
 
         try:
             for step_index, step in enumerate(action_plan["steps"], start=1):
@@ -111,7 +120,6 @@ class ScenarioRunner:
                         step,
                         pending=pending,
                         capture=capture,
-                        run_id=run_id,
                     )
                 elif step["op"] == "verify":
                     result, pending = self._verify(
@@ -152,11 +160,27 @@ class ScenarioRunner:
                 "capture_count": capture_sequence,
                 "output_dir": str(out_dir),
             }
-            _write_json(out_dir / "action-plan.json", action_plan)
             _write_json(out_dir / "result.json", result)
             return result
-        except (BrowserHarnessError, GroundingError, OutcomeVerifierRegistryError) as exc:
+        except (
+            BrowserHarnessError,
+            ExecutionURLPolicyError,
+            GroundingError,
+            OutcomeVerifierRegistryError,
+            ScenarioActionGuardError,
+        ) as exc:
             raise ScenarioExecutionError(exc.error_code) from exc
+
+    def _capture(self) -> tuple[dict[str, Any], dict[str, Any], str]:
+        payload = self.client.capture_page_payload(include_canvas=True)
+        preview = str(payload.pop("preview_data_url", ""))
+        ingested = self.page_perception.ingest(payload)
+        capture_id = ingested["capture_id"]
+        graph = self.page_perception.get_ui_graph(capture_id)
+        snapshot = self.page_perception.get_action_snapshot(capture_id)
+        if graph is None or snapshot is None:
+            raise ScenarioExecutionError("scenario_capture_incomplete")
+        return snapshot, graph, preview
 
     def _click(
         self,
@@ -164,89 +188,41 @@ class ScenarioRunner:
         *,
         pending: dict[str, Any] | None,
         capture: Callable[[str], tuple[dict[str, Any], dict[str, Any], dict[str, Any]]],
-        run_id: str,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         if pending is not None:
             raise ScenarioExecutionError("scenario_previous_outcome_unverified")
-        before, graph, _ = capture(
-            f"{step['id']}-before",
-            include_canvas=step["target"].get("source") == "canvas",
-        )
+        before, graph, _ = capture(f"{step['id']}-before")
         grounded = self.grounders.resolve(step["target"], graph)
-        if isinstance(grounded, GroundedDOMStep):
-            prepared = self.safe_dom_actions.prepare(
-                asset_reference=grounded.asset_id,
-                action=grounded.action_id,
-                page_capture_id=grounded.capture_id,
-                scope={"site_id": "site_1"},
-                task_id=run_id,
-                principal_id="execution-runner",
-            )
-            if prepared.get("status") != "prepared":
-                raise ScenarioExecutionError(
-                    str(prepared.get("reason", "scenario_prepare_failed"))
-                )
+        if isinstance(grounded, BrowserTarget):
             fresh, fresh_graph, _ = capture(f"{step['id']}-fresh")
             fresh_grounded = self.grounders.resolve(step["target"], fresh_graph)
-            if not isinstance(fresh_grounded, GroundedDOMStep):
+            if not isinstance(fresh_grounded, BrowserTarget):
                 raise ScenarioExecutionError("scenario_grounding_modality_changed")
-            ready = self.safe_dom_actions.preflight(
-                plan_id=prepared["plan_id"],
-                current_capture_id=fresh_grounded.capture_id,
-                confirmed=True,
-                confirmed_asset_id=fresh_grounded.asset_id,
-                confirmed_action=fresh_grounded.action_id,
-                permissions=["assets.read"],
-            )
-            if ready.get("status") != "ready":
-                raise ScenarioExecutionError(
-                    str(ready.get("reason", "scenario_preflight_failed"))
-                )
-            dispatched = self.safe_dom_actions.execute(
-                execution_token=ready["execution_token"],
-                dry_run=False,
-                graph_id=fresh_grounded.graph_id,
-                target_node_id=fresh_grounded.target_node_id,
-            )
-            if dispatched.get("status") != "executed_pending_verification":
-                raise ScenarioExecutionError(
-                    str(dispatched.get("reason", "scenario_execution_failed"))
-                )
-            return (
-                {
-                    "grounder": fresh_grounded.grounder_id,
-                    "capture_id": fresh_grounded.capture_id,
-                    "graph_id": fresh_grounded.graph_id,
-                    "target_node_id": fresh_grounded.target_node_id,
-                    "execution_status": dispatched["status"],
-                },
-                {
-                    "kind": "dom",
-                    "action_id": fresh_grounded.action_id,
-                    "asset_id": fresh_grounded.asset_id,
-                    "plan_id": prepared["plan_id"],
-                    "before": fresh,
-                },
-            )
-        if not isinstance(grounded, CanvasTarget):
-            raise ScenarioExecutionError("scenario_grounding_failed")
+            if self.action_guard.fingerprint(grounded) != self.action_guard.fingerprint(
+                fresh_grounded
+            ):
+                raise ScenarioExecutionError("scenario_grounding_changed")
+            grounded = fresh_grounded
+            before = fresh
+            graph = fresh_graph
+        token = self.action_guard.authorize(grounded)
+        self.action_guard.consume(token, grounded)
         execution = self.browser_executor.execute(BrowserAction("click", grounded))
         if not execution.success:
             raise ScenarioExecutionError(execution.error_code)
         return (
             {
-                "grounder": "canvas_ui_graph",
-                "capture_id": str(before.get("capture_id", "")),
+                "grounder": "dom_ui_graph"
+                if isinstance(grounded, BrowserTarget)
+                else "canvas_ui_graph",
+                "capture_id": str(graph.get("capture_id", "")),
                 "graph_id": str(graph.get("graph_id", "")),
                 "target_node_id": grounded.node_id,
-                "canvas_backend_node_id": grounded.canvas_backend_node_id,
                 "execution_status": "executed_pending_verification",
             },
             {
-                "kind": "canvas",
-                "action_id": "select_canvas_asset",
-                "asset_id": grounded.asset_id,
                 "before": before,
+                "before_graph": graph,
             },
         )
 
@@ -262,29 +238,17 @@ class ScenarioRunner:
         after, graph, _ = capture(f"{step['id']}-verify")
         verified, verifier_id = self.verifiers.verify_expected(
             expected=step["expected"],
-            action_id=pending["action_id"],
+            action_id="",
             before=pending["before"],
             after=after,
+            before_graph=pending["before_graph"],
+            after_graph=graph,
         )
         if not verified:
-            if pending["kind"] == "dom":
-                self.safe_dom_actions.verify_outcome(
-                    plan_id=pending["plan_id"],
-                    current_capture_id=str(after.get("capture_id", "")),
-                )
             raise ScenarioExecutionError("scenario_expected_outcome_missing")
-        if pending["kind"] == "dom":
-            finalized = self.safe_dom_actions.verify_outcome(
-                plan_id=pending["plan_id"],
-                current_capture_id=str(after.get("capture_id", "")),
-            )
-            if finalized.get("status") != "verified":
-                raise ScenarioExecutionError(
-                    str(finalized.get("reason", "scenario_verification_failed"))
-                )
         return (
             {
-                "capture_id": str(after.get("capture_id", "")),
+                "capture_id": str(graph.get("capture_id", "")),
                 "graph_id": str(graph.get("graph_id", "")),
                 "verifier": verifier_id,
                 "outcome_verified": True,
@@ -308,23 +272,16 @@ class ScenarioRunner:
             after, graph, _ = capture(f"{step['id']}-wait-{attempt}")
             verified, verifier_id = self.verifiers.verify_expected(
                 expected=step["expected"],
-                action_id=pending["action_id"],
+                action_id="",
                 before=pending["before"],
                 after=after,
+                before_graph=pending["before_graph"],
+                after_graph=graph,
             )
             if verified:
-                if pending["kind"] == "dom":
-                    finalized = self.safe_dom_actions.verify_outcome(
-                        plan_id=pending["plan_id"],
-                        current_capture_id=str(after.get("capture_id", "")),
-                    )
-                    if finalized.get("status") != "verified":
-                        raise ScenarioExecutionError(
-                            str(finalized.get("reason", "scenario_verification_failed"))
-                        )
                 return (
                     {
-                        "capture_id": str(after.get("capture_id", "")),
+                        "capture_id": str(graph.get("capture_id", "")),
                         "graph_id": str(graph.get("graph_id", "")),
                         "verifier": verifier_id,
                         "attempts": attempt,

@@ -18,7 +18,7 @@ from .dom_action_binding import DOMActionBindingService
 from .env_config import load_project_env
 from .execution.browser_executor import HarnessBrowserExecutor
 from .execution.browser_harness_client import BrowserHarnessClient
-from .execution.fixture_canvas_vision import ExecutionFixtureCanvasVisionAdapter
+from .execution.action_planner import ActionPlanner, OpenAIActionPlanner
 from .execution.grounding import TargetGrounderRegistry
 from .execution.scenario_runner import ScenarioRunner
 from .execution.scenario_service import (
@@ -30,12 +30,15 @@ from .execution.verifier import (
     AssetDetailOutcomeVerifier,
     CanvasSelectionVerifier,
     PageReadyVerifier,
+    UIGraphOutcomeVerifier,
 )
 from .execution.verifier_registry import OutcomeVerifierRegistry
+from .execution.url_policy import ExecutionURLPolicy
 from .http_canvas_vision import HTTPTopologyVisionAdapter
 from .hybrid_canvas_vision import HybridCanvasVisionAdapter
 from .local_cv_canvas_vision import LocalCVTopologyVisionAdapter
 from .memory import SQLiteMemoryStore
+from .openai_compatible_api import OpenAICompatibleChatClient
 from .page_capture_jobs import PageCaptureJobCapacityError, PageCaptureJobService
 from .page_perception import PagePerceptionService, SQLitePageCaptureStore
 from .perception import HybridPerception
@@ -73,6 +76,14 @@ UI_GRAPH_REASONER_ALLOWED_HOSTS_ENV = "KT6_UI_GRAPH_REASONER_ALLOWED_HOSTS"
 UI_GRAPH_REASONER_TIMEOUT_ENV = "KT6_UI_GRAPH_REASONER_TIMEOUT_SECONDS"
 BROWSER_EXECUTION_DRIVER_ENV = "KT6_BROWSER_EXECUTION_DRIVER"
 BROWSER_HARNESS_CDP_URL_ENV = "KT6_BROWSER_HARNESS_CDP_URL"
+EXECUTION_ALLOWED_HOSTS_ENV = "KT6_EXECUTION_ALLOWED_HOSTS"
+MODEL_API_PROVIDER_ENV = "KT6_MODEL_API_PROVIDER"
+MODEL_API_BASE_URL_ENV = "KT6_MODEL_API_BASE_URL"
+MODEL_API_KEY_ENV = "KT6_MODEL_API_KEY"
+MODEL_API_MODEL_ENV = "KT6_MODEL_API_MODEL"
+MODEL_API_ALLOWED_HOSTS_ENV = "KT6_MODEL_API_ALLOWED_HOSTS"
+MODEL_API_MAX_TOKENS_ENV = "KT6_MODEL_API_MAX_TOKENS"
+MODEL_API_TIMEOUT_ENV = "KT6_MODEL_API_TIMEOUT_SECONDS"
 DEFAULT_VISION_TIMEOUT_SECONDS = 30.0
 DEFAULT_CODEAGENT_TIMEOUT_SECONDS = 120.0
 DEFAULT_UI_GRAPH_REASONER_TIMEOUT_SECONDS = 60.0
@@ -138,31 +149,11 @@ def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | N
         "codeagent_cli",
         "local_cv_ocr",
         "hybrid",
-        "execution_fixture",
     }:
         raise ValueError(
             f"{VISION_DRIVER_ENV} must be http, codeagent_cli, local_cv_ocr, "
-            "hybrid or execution_fixture"
+            "or hybrid"
         )
-
-    if selected_driver == "execution_fixture":
-        conflicting = [
-            name
-            for name, value in (
-                (VISION_ENDPOINT_ENV, endpoint),
-                (VISION_API_KEY_ENV, api_key),
-                (VISION_TIMEOUT_ENV, timeout_text),
-                (CODEAGENT_EXECUTABLE_ENV, codeagent_executable),
-                (CODEAGENT_AGENT_ENV, codeagent_agent),
-                (HYBRID_MODEL_DRIVER_ENV, hybrid_model_driver),
-            )
-            if value is not None
-        ]
-        if conflicting:
-            raise ValueError(
-                f"{', '.join(conflicting)} must not be configured for execution_fixture"
-            )
-        return ExecutionFixtureCanvasVisionAdapter()
 
     if selected_driver == "local_cv_ocr":
         conflicting = [
@@ -362,8 +353,62 @@ def _create_ui_graph_reasoner_from_env() -> HTTPUIGraphReasoner | None:
     )
 
 
+def _create_execution_url_policy_from_env() -> ExecutionURLPolicy:
+    hosts_text = _optional_env(EXECUTION_ALLOWED_HOSTS_ENV)
+    hosts = tuple(
+        host.strip() for host in (hosts_text or "").split(",") if host.strip()
+    )
+    return ExecutionURLPolicy(hosts)
+
+
+def _create_action_planner_from_env() -> ActionPlanner | None:
+    values = {
+        MODEL_API_PROVIDER_ENV: _optional_env(MODEL_API_PROVIDER_ENV),
+        MODEL_API_BASE_URL_ENV: _optional_env(MODEL_API_BASE_URL_ENV),
+        MODEL_API_KEY_ENV: _optional_env(MODEL_API_KEY_ENV),
+        MODEL_API_MODEL_ENV: _optional_env(MODEL_API_MODEL_ENV),
+        MODEL_API_ALLOWED_HOSTS_ENV: _optional_env(MODEL_API_ALLOWED_HOSTS_ENV),
+        MODEL_API_MAX_TOKENS_ENV: _optional_env(MODEL_API_MAX_TOKENS_ENV),
+        MODEL_API_TIMEOUT_ENV: _optional_env(MODEL_API_TIMEOUT_ENV),
+    }
+    required = (
+        MODEL_API_PROVIDER_ENV,
+        MODEL_API_BASE_URL_ENV,
+        MODEL_API_KEY_ENV,
+        MODEL_API_MODEL_ENV,
+    )
+    if not any(values.values()):
+        return None
+    missing = [name for name in required if values[name] is None]
+    if missing:
+        raise ValueError(f"{', '.join(missing)} are required for the action planner")
+    allowed_hosts = tuple(
+        host.strip()
+        for host in (values[MODEL_API_ALLOWED_HOSTS_ENV] or "").split(",")
+        if host.strip()
+    )
+    try:
+        max_tokens = int(values[MODEL_API_MAX_TOKENS_ENV] or "4096")
+        timeout_seconds = float(values[MODEL_API_TIMEOUT_ENV] or "60")
+    except ValueError as exc:
+        raise ValueError("model API token and timeout settings are invalid") from exc
+    client = OpenAICompatibleChatClient(
+        base_url=values[MODEL_API_BASE_URL_ENV] or "",
+        api_key=values[MODEL_API_KEY_ENV] or "",
+        model=values[MODEL_API_MODEL_ENV] or "",
+        timeout_seconds=timeout_seconds,
+        max_tokens=max_tokens,
+        allowed_hosts=allowed_hosts,
+    )
+    return OpenAIActionPlanner(
+        client=client,
+        provider=values[MODEL_API_PROVIDER_ENV] or "",
+    )
+
+
 def _create_browser_executor_from_env(
     root: Path,
+    url_policy: ExecutionURLPolicy,
 ) -> tuple[HarnessBrowserExecutor | None, UIGraphTargetResolver | None]:
     """Build the opt-in click runtime without starting a browser at app import."""
 
@@ -384,11 +429,16 @@ def _create_browser_executor_from_env(
         raise ValueError(
             f"{BROWSER_HARNESS_CDP_URL_ENV} is required for browser_harness"
         )
+    if not url_policy.allowed_hosts:
+        raise ValueError(
+            f"{EXECUTION_ALLOWED_HOSTS_ENV} is required for browser_harness"
+        )
     client = BrowserHarnessClient(
         cdp_url=cdp_url,
         workspace=Path(root).resolve()
         / "runtime_data"
         / "browser_harness_workspace",
+        url_policy=url_policy,
     )
     return HarnessBrowserExecutor(client), UIGraphTargetResolver()
 
@@ -416,13 +466,16 @@ def create_services(
     root: Path = ROOT,
     *,
     canvas_vision_override: CanvasVisionAdapter | None = None,
+    action_planner_override: ActionPlanner | None = None,
 ) -> AppServices:
     root = root.resolve()
     load_project_env(root)
     canvas_vision = canvas_vision_override or _create_canvas_vision_from_env(root)
+    url_policy = _create_execution_url_policy_from_env()
+    action_planner = action_planner_override or _create_action_planner_from_env()
     ui_graph_reasoner = _create_ui_graph_reasoner_from_env()
     browser_executor, browser_target_resolver = (
-        _create_browser_executor_from_env(root)
+        _create_browser_executor_from_env(root, url_policy)
     )
     runtime_dir = root / "runtime_data"
     memory = SQLiteMemoryStore(runtime_dir / "kt6_memory.sqlite3")
@@ -452,7 +505,8 @@ def create_services(
             AssetDetailOutcomeVerifier(),
             PageReadyVerifier(),
             CanvasSelectionVerifier(),
-        ]
+        ],
+        ui_graph_verifier=UIGraphOutcomeVerifier(),
     )
     safe_dom_actions = SafeDOMActionService(
         dom_action_binding,
@@ -464,18 +518,23 @@ def create_services(
     scenario_runner = (
         ScenarioRunner(
             page_perception=page_perception,
-            safe_dom_actions=safe_dom_actions,
             browser_executor=browser_executor,
-            grounders=TargetGrounderRegistry(),
+            grounders=TargetGrounderRegistry(
+                canvas_producer_id=(
+                    str(getattr(canvas_vision, "adapter_id", "")) or None
+                )
+            ),
             verifiers=outcome_verifiers,
+            url_policy=url_policy,
         )
         if browser_executor is not None
-        and isinstance(canvas_vision, ExecutionFixtureCanvasVisionAdapter)
         else None
     )
     execution_scenarios = ExecutionScenarioService(
         root=root,
         runner=scenario_runner,
+        planner=action_planner,
+        url_policy=url_policy,
     )
     ui_graph_planning = UIGraphPlanningService(page_perception, ui_graph_reasoner)
     tools = MockBusinessTools(
@@ -959,10 +1018,12 @@ def create_server(
     root: Path = ROOT,
     *,
     canvas_vision_override: CanvasVisionAdapter | None = None,
+    action_planner_override: ActionPlanner | None = None,
 ) -> tuple[ThreadingHTTPServer, AppServices]:
     services = create_services(
         root,
         canvas_vision_override=canvas_vision_override,
+        action_planner_override=action_planner_override,
     )
     server = ThreadingHTTPServer((host, port), create_handler(services, root / "demo"))
     return server, services

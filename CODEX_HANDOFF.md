@@ -52,10 +52,13 @@ HTML 报告生成流程。
 E2E 因环境未启用而跳过。
 这只证明开发环境自动化路径通过；真实 Chromium/CDP、真实 NCE/FEBS 页面和测试区
 内部 GLM5.1 endpoint 尚未现场验收。UI Operation DAG 始终为 `dry_run_only=true`、
-`safe_for_execution=false`。`feature/browser-executor` 已固定 `kt6.action-plan.v1`，
-由受限中文规则生成可读六步计划；用户确认后 ScenarioRunner 每步重新 capture，DOM
-经过 SafeDOMAction，Canvas 只在对应步骤做一次真实像素识别和 live box 重绑定。
-Verifier Registry 分别验证详情面板、拓扑就绪和 Canvas 选择结果。
+`safe_for_execution=false`。`feature/browser-executor` 已固定 `kt6.action-plan.v1`
+作为模型到 Runner 的语义契约；规划由可配置 LLM Planner 生成语义目标，经
+ActionPlanValidator 兜底校验。用户确认后 ScenarioRunner 每步重新 capture，
+TargetGrounderRegistry 优先使用 DOM/CDP Grounding，缺失时回退 Canvas/Vision Grounding；
+DOM 目标经 fresh capture 复核后受控 click，Canvas 目标在对应步骤做一次真实像素识别和
+live box 重绑定。UIGraphOutcomeVerifier 用新 capture 的 UI Graph 验证
+element_visible、element_selected 或 page_changed。
 当前开发机缺少 Python 3.12 与已连接 Chromium，真实浏览器 E2E 和真实 NCE 现场验收
 仍未完成。
 
@@ -184,13 +187,15 @@ kt6_backend/execution/browser_harness_client.py
 kt6_backend/execution/browser_executor.py
 kt6_backend/execution/target_resolver.py
 kt6_backend/execution/live_page_capture.py
-kt6_backend/execution/natural_language_parser.py
-kt6_backend/execution/plan_generator.py
+kt6_backend/execution/action_planner.py
 kt6_backend/execution/plan_validator.py
 kt6_backend/execution/scenario_runner.py
 kt6_backend/execution/scenario_service.py
 kt6_backend/execution/grounding.py
-kt6_backend/execution/fixture_canvas_vision.py
+kt6_backend/execution/semantic_target.py
+kt6_backend/execution/url_policy.py
+kt6_backend/execution/action_guard.py
+kt6_backend/execution/models.py
 kt6_backend/execution/verifier.py
 kt6_backend/execution/verifier_registry.py
 kt6_backend/execution_e2e_cli.py
@@ -411,18 +416,19 @@ GET  /api/dom-actions/plans/{plan_id}
 GET  /api/dom-actions/audit
 ```
 
-`feature/browser-executor` 提供第一条可重复 DOM + Canvas 多步骤闭环：
+`feature/browser-executor` 提供可重复的通用 GUI 多步骤闭环：
 
 ```powershell
-python -m kt6_backend.execution_e2e_cli
+python -m kt6_backend.execution_e2e_cli --url <获批测试页> --task "打开 AP_001 的详情并进入拓扑"
 ```
 
-该命令把固定中文任务转换成六步 `kt6.action-plan.v1`，启动真实
-`demo/execution-test.html`，再通过 Browser Harness 固定 CDP 方法现场采集
-DOMSnapshot/AXTree 和目标 Canvas 像素。ScenarioRunner 每步使用 fresh capture：DOM
-目标从当前 UI Graph Grounding 后走完整 SafeDOMAction；Canvas 目标只在对应步骤识别一次
-真实像素，并与实时 Canvas box 重新绑定。详情、拓扑就绪和 Canvas 选择分别由确定性
-Verifier 检查，不能把 click 回执当成成功。计划、逐次 UI Graph 与结果写入
+该命令先通过 URL Safety Policy 校验目标 URL，再感知真实页面并调用 LLM 生成语义
+`kt6.action-plan.v1`，不再固定中文任务、固定测试页或规则解析器。Browser Harness 通过
+固定 CDP 方法现场采集 DOMSnapshot/AXTree 和目标 Canvas 像素。ScenarioRunner 每步使用
+fresh capture：TargetGrounderRegistry 优先 DOM/CDP，缺失时回退 Canvas/Vision；Canvas
+目标只在对应步骤识别一次真实像素，并与实时 Canvas box 重新绑定。每个 click 之后由
+新 capture 的 UIGraphOutcomeVerifier 检查 element_visible、element_selected 或
+page_changed，不能把 click 回执当成成功。计划、逐次 UI Graph 与结果写入
 `runtime_data/execution_scenarios/<run_id>/`；仓库没有 `mock_ui_graph.json`。
 
 ### 3.4 三方案评测报告

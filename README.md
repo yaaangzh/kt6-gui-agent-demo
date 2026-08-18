@@ -651,14 +651,16 @@ kt6_backend/
   dom_action_binding.py        设备主体和所属 DOM 动作控件的双重绑定
   safe_dom_actions.py          新鲜页面复核、一次性令牌、审计与可选 click 派发
   execution/                   Action Plan、ScenarioRunner、Grounding、验证与 Browser Harness 适配
-  execution/natural_language_parser.py 受限自然语言到 Intent 的测试转换器
-  execution/plan_generator.py  Intent 到 `kt6.action-plan.v1` 的确定性展开
+  execution/action_planner.py  可配置 LLM Planner 生成语义 `kt6.action-plan.v1`
   execution/plan_validator.py  Agent/Runner 之间的严格计划契约
-  execution/scenario_runner.py 每步 fresh capture 的 DOM + Canvas 执行循环
-  execution/grounding.py       DOM/CDP 与 Canvas 像素目标现场 Grounding
+  execution/semantic_target.py 语义目标与 UI Graph 节点的确定性匹配
+  execution/grounding.py       DOM/CDP 优先、Canvas/Vision 兜底的现场 Grounding
+  execution/scenario_runner.py 每步 fresh capture 的通用 click/verify/wait 执行循环
+  execution/url_policy.py      导航目标的精确 host 白名单
+  execution/action_guard.py    一次性点击令牌与目标指纹复核
   execution/verifier_registry.py 按预期类型选择确定性 Verifier
-  execution/live_page_capture.py 固定 CDP 方法的真实测试页与 Canvas 像素采集
-  execution_e2e_cli.py         自然语言 DOM + Canvas 六步闭环的一键测试入口
+  execution/live_page_capture.py 固定 CDP 方法的真实页面与 Canvas 像素采集
+  execution_e2e_cli.py         任意获批 URL + 自然语言任务的一键闭环入口
   local_cv_canvas_vision.py    本地 RapidOCR/OpenCV 单图片视觉 Adapter
   codeagent_canvas_vision.py   本机 CodeAgent read-tool 视觉 Adapter
   http_canvas_vision.py        生产 HTTP 视觉 Adapter 与严格输入输出协议
@@ -779,20 +781,21 @@ python -m unittest `
   tests.test_app
 ```
 
-`feature/browser-executor` 的第一条真实页面闭环固定为“打开 AP_001 详情，然后进入
-拓扑并选择 AP_001”。完成
+`feature/browser-executor` 的真实页面闭环是“任意获批 URL + 自然语言任务 → 统一页面感知
+→ LLM 生成 `kt6.action-plan.v1` → Grounding → 受控 click → 重新感知 → Verify”。完成
 Python 3.12、Browser Harness 和 `.env` 配置后执行：
 
 ```powershell
-python -m kt6_backend.execution_e2e_cli
+python -m kt6_backend.execution_e2e_cli --url <获批测试页> --task "打开 AP_001 的详情并进入拓扑"
 ```
 
-命令会把自然语言展开为六步 Action Plan，启动专用 `demo/execution-test.html`，现场采集
-DOM/CDP，并只在 Canvas click 步骤裁剪真实像素。DOM 操作经过完整 SafeDOMAction，
-Canvas 坐标由本次像素组件和实时 Canvas box 共同计算；每个动作后由对应 Verifier 检查
-新 capture。Action Plan、逐次 UI Graph 和 `result.json` 保存在
-`runtime_data/execution_scenarios/<run_id>/`。也可打开 `execution-runner.html` 先查看中文
-计划再确认执行。当前开发机没有 Python 3.12
+命令先通过 URL Safety Policy 校验目标 URL，再感知真实页面并调用规划模型生成语义计划，
+不再固定测试页或规则解析器。计划中没有 UI Graph、backend node id、selector 或坐标；
+DOM 目标走 DOM/CDP Grounding，缺失时回退 Canvas/Vision Grounding，Canvas 坐标由本次
+像素识别和实时 Canvas box 共同计算。每个动作后由新 capture 的确定性 Verifier 检查
+结果。Action Plan、逐次 UI Graph 和 `result.json` 保存在
+`runtime_data/execution_scenarios/<run_id>/`。也可打开 `execution-runner.html` 填入 URL 与
+任务，先查看语义计划再确认执行。当前开发机没有 Python 3.12
 和已连接 Chromium，因此实机 E2E 仍需在准备好的浏览器环境运行，不能用单元测试代替。
 
 当前仓库没有 FEBS/NCE 前端源码，因此扩展尚未嵌入目标系统；它只是外部采集桥梁。

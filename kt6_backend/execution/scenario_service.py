@@ -7,10 +7,10 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from .natural_language_parser import NaturalLanguageIntentParser
-from .plan_generator import FixturePlanGenerator
+from .action_planner import ActionPlanner, ActionPlannerError
 from .plan_validator import ActionPlanValidator
 from .scenario_runner import ScenarioExecutionError, ScenarioRunner, _write_json
+from .url_policy import ExecutionURLPolicy, ExecutionURLPolicyError
 
 
 class ExecutionScenarioServiceError(ValueError):
@@ -20,34 +20,66 @@ class ExecutionScenarioServiceError(ValueError):
 
 
 class ExecutionScenarioService:
-    FIXTURE_URL = "http://127.0.0.1:8787/execution-test.html"
-
-    def __init__(self, *, root: Path, runner: ScenarioRunner | None):
+    def __init__(
+        self,
+        *,
+        root: Path,
+        runner: ScenarioRunner | None,
+        planner: ActionPlanner | None,
+        url_policy: ExecutionURLPolicy,
+    ):
         self.root = Path(root).resolve()
         self.runner = runner
-        self.parser = NaturalLanguageIntentParser()
-        self.generator = FixturePlanGenerator()
+        self.planner = planner
+        self.url_policy = url_policy
         self.validator = ActionPlanValidator()
         self._runs: dict[str, dict[str, Any]] = {}
         self._lock = threading.RLock()
 
     def generate_plan(self, *, start_url: str, user_request: str) -> dict[str, Any]:
-        if str(start_url).strip() != self.FIXTURE_URL:
-            raise ExecutionScenarioServiceError("execution_start_url_not_allowed")
-        intents = self.parser.parse(user_request)
-        plan = self.generator.generate(
-            start_url=self.FIXTURE_URL,
-            user_request=str(user_request).strip(),
-            intents=intents,
-        )
-        validated = self.validator.validate(plan)
+        if self.runner is None:
+            raise ExecutionScenarioServiceError("execution_runner_not_configured")
+        if self.planner is None:
+            raise ExecutionScenarioServiceError("execution_planner_not_configured")
+        try:
+            target_url = self.url_policy.validate(start_url)
+            request = str(user_request).strip()
+            if not request or len(request) > 2_000:
+                raise ExecutionScenarioServiceError("execution_request_invalid")
+            inspection = self.runner.inspect(target_url)
+            validated = self.planner.plan(
+                start_url=target_url,
+                user_request=request,
+                ui_graph=inspection["ui_graph"],
+            )
+            validated = self.validator.validate(validated)
+            if (
+                validated["start_url"] != target_url
+                or validated["user_request"] != request
+            ):
+                raise ExecutionScenarioServiceError(
+                    "execution_planner_context_mismatch"
+                )
+        except (
+            ActionPlannerError,
+            ExecutionURLPolicyError,
+            ScenarioExecutionError,
+        ) as exc:
+            raise ExecutionScenarioServiceError(exc.error_code) from exc
         return {
             "plan": validated,
             "readable_steps": [
                 self._readable_step(step) for step in validated["steps"]
             ],
             "requires_confirmation": True,
-            "runner_configured": self.runner is not None,
+            "runner_configured": True,
+            "planner": {
+                "planner_id": self.planner.planner_id,
+                "model": self.planner.planner_model,
+            },
+            "planning_capture_id": inspection["capture_id"],
+            "planning_graph_id": inspection["graph_id"],
+            "planning_preview": inspection["preview_data_url"],
         }
 
     def start_run(
@@ -61,8 +93,10 @@ class ExecutionScenarioService:
         if self.runner is None:
             raise ExecutionScenarioServiceError("execution_runner_not_configured")
         validated = self.validator.validate(plan)
-        if validated["start_url"] != self.FIXTURE_URL:
-            raise ExecutionScenarioServiceError("execution_start_url_not_allowed")
+        try:
+            self.url_policy.validate(validated["start_url"])
+        except ExecutionURLPolicyError as exc:
+            raise ExecutionScenarioServiceError(exc.error_code) from exc
         with self._lock:
             if any(item["status"] in {"queued", "running"} for item in self._runs.values()):
                 raise ExecutionScenarioServiceError("execution_runner_busy")
@@ -81,8 +115,10 @@ class ExecutionScenarioService:
         if self.runner is None:
             raise ExecutionScenarioServiceError("execution_runner_not_configured")
         validated = self.validator.validate(plan)
-        if validated["start_url"] != self.FIXTURE_URL:
-            raise ExecutionScenarioServiceError("execution_start_url_not_allowed")
+        try:
+            self.url_policy.validate(validated["start_url"])
+        except ExecutionURLPolicyError as exc:
+            raise ExecutionScenarioServiceError(exc.error_code) from exc
         run_id = f"run_{uuid.uuid4().hex[:16]}"
         with self._lock:
             self._runs[run_id] = self._new_record(run_id, validated)
@@ -107,9 +143,10 @@ class ExecutionScenarioService:
             )
         return {
             "configured": self.runner is not None,
-            "mode": "fixture_natural_language_plan",
+            "planner_configured": self.planner is not None,
+            "mode": "generic_llm_action_plan",
             "active_runs": active,
-            "supported_url": self.FIXTURE_URL,
+            "url_policy": self.url_policy.health(),
         }
 
     def _run(self, run_id: str, plan: dict[str, Any]) -> None:
@@ -129,6 +166,7 @@ class ExecutionScenarioService:
                 plan,
                 run_id=run_id,
                 out_dir=out_dir,
+                confirmed=True,
                 update=update,
             )
         except (ScenarioExecutionError, OSError, ValueError) as exc:
@@ -167,17 +205,14 @@ class ExecutionScenarioService:
     def _readable_step(step: Mapping[str, Any]) -> str:
         if step["op"] == "click":
             target = step["target"]
-            if target.get("source") == "canvas":
-                return f"在拓扑中选择 {target['name']}"
-            if target["action"] == "open_asset_details":
-                return f"打开 {target['asset_id'].upper()} 详情"
-            return "打开拓扑"
+            return f"点击：{target['query']}"
         expected = step["expected"]
-        if expected["type"] == "asset_detail_visible":
-            return f"确认 {expected['asset_id'].upper()} 详情已经出现"
-        if expected["type"] == "page_ready":
-            return "等待拓扑页面加载"
-        return f"确认 {expected['asset_id'].upper()} 已被选中"
+        if expected["type"] == "page_changed":
+            return "确认页面已经跳转"
+        target = expected["target"]
+        prefix = "等待" if step["op"] == "wait" else "确认"
+        state = "已选中" if expected["type"] == "element_selected" else "已出现"
+        return f"{prefix}：{target['query']} {state}"
 
 
 __all__ = ["ExecutionScenarioService", "ExecutionScenarioServiceError"]

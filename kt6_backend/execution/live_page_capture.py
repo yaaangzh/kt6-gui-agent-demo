@@ -6,9 +6,9 @@ import struct
 import time
 from collections.abc import Callable, Mapping
 from typing import Any
-from urllib.parse import urlsplit
 
 from ..cdp_snapshot import normalize_cdp_snapshot
+from .url_policy import ExecutionURLPolicy, ExecutionURLPolicyError
 
 
 _SIMPLE_DOM_ID = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
@@ -20,40 +20,40 @@ class LivePageCaptureError(RuntimeError):
         self.error_code = error_code
 
 
-def reset_execution_fixture(
+def navigate_to(
     cdp_call: Callable[..., Mapping[str, Any]],
     page_url: str,
-) -> None:
-    parsed = urlsplit(str(page_url).strip())
-    if (
-        parsed.scheme != "http"
-        or (parsed.hostname or "").casefold() not in {"localhost", "127.0.0.1"}
-        or parsed.path != "/execution-test.html"
-        or parsed.username
-        or parsed.password
-        or parsed.fragment
-    ):
-        raise LivePageCaptureError("execution_fixture_url_invalid")
-    response = cdp_call("Page.navigate", url=page_url)
+    *,
+    url_policy: ExecutionURLPolicy,
+) -> str:
+    try:
+        target_url = url_policy.validate(page_url)
+    except ExecutionURLPolicyError as exc:
+        raise LivePageCaptureError(exc.error_code) from exc
+    response = cdp_call("Page.navigate", url=target_url)
     if response.get("errorText"):
-        raise LivePageCaptureError("execution_fixture_navigation_failed")
-    deadline = time.monotonic() + 5.0
+        raise LivePageCaptureError("browser_navigation_failed")
+    deadline = time.monotonic() + 15.0
     while time.monotonic() < deadline:
         frame_tree = cdp_call("Page.getFrameTree")
         current_url = str(
             frame_tree.get("frameTree", {}).get("frame", {}).get("url", "")
         ).strip()
-        if current_url == page_url:
+        if current_url.startswith(("http://", "https://")):
+            try:
+                allowed_url = url_policy.validate(current_url)
+            except ExecutionURLPolicyError as exc:
+                raise LivePageCaptureError(exc.error_code) from exc
             time.sleep(0.1)
-            return
+            return allowed_url
         time.sleep(0.05)
-    raise LivePageCaptureError("execution_fixture_navigation_timeout")
+    raise LivePageCaptureError("browser_navigation_timeout")
 
 
 def capture_live_page_payload(
     cdp_call: Callable[..., Mapping[str, Any]],
     *,
-    expected_page_url: str,
+    url_policy: ExecutionURLPolicy,
     include_canvas: bool = True,
 ) -> dict[str, Any]:
     page = cdp_call("Page.getFrameTree")
@@ -62,8 +62,10 @@ def capture_live_page_payload(
     if not isinstance(main_frame, Mapping):
         raise LivePageCaptureError("browser_page_unavailable")
     page_url = str(main_frame.get("url", "")).strip()
-    if page_url != expected_page_url:
-        raise LivePageCaptureError("browser_page_changed")
+    try:
+        page_url = url_policy.validate(page_url)
+    except ExecutionURLPolicyError as exc:
+        raise LivePageCaptureError(exc.error_code) from exc
     frames = _flatten_frames(frame_tree)
     snapshot = cdp_call(
         "DOMSnapshot.captureSnapshot",
@@ -106,7 +108,7 @@ def capture_live_page_payload(
     height = int(float(viewport.get("clientHeight", 0)))
     if width < 1 or height < 1:
         raise LivePageCaptureError("browser_viewport_unavailable")
-    title = "KT6 Execution Harness"
+    title = "Browser Page"
     for document in normalized.get("frames", []):
         if (
             isinstance(document, Mapping)
@@ -175,19 +177,34 @@ def _capture_canvases(
         attributes = node.get("attributes")
         attributes = attributes if isinstance(attributes, Mapping) else {}
         bounds = node.get("bounds")
-        if attributes.get("id") != "topology-canvas" or not isinstance(bounds, list) or len(bounds) != 4:
+        if (
+            str(node.get("dom_node_name", "")).casefold() != "canvas"
+            or not isinstance(bounds, list)
+            or len(bounds) != 4
+        ):
             continue
         try:
             x, y, width, height = (float(item) for item in bounds)
         except (TypeError, ValueError, OverflowError):
             continue
         if width > 1 and height > 1 and x >= 0 and y >= 0:
-            matches.append((node, x, y, width, height))
+            matches.append((node, attributes, x, y, width, height))
     if not matches:
         return []
-    if len(matches) != 1:
-        raise LivePageCaptureError("execution_canvas_ambiguous")
-    node, x, y, width, height = matches[0]
+    matches.sort(
+        key=lambda item: (
+            -(item[4] * item[5]),
+            int(item[0].get("backend_node_id") or 0),
+        )
+    )
+    node, attributes, x, y, width, height = matches[0]
+    backend_id = int(node.get("backend_node_id") or 0)
+    declared_id = str(attributes.get("id", "")).strip()
+    canvas_id = (
+        declared_id
+        if _SIMPLE_DOM_ID.fullmatch(declared_id)
+        else f"canvas-{backend_id}"
+    )
     result = cdp_call(
         "Page.captureScreenshot",
         format="png",
@@ -205,7 +222,7 @@ def _capture_canvases(
         raise LivePageCaptureError("execution_canvas_capture_too_large")
     return [
         {
-            "canvas_id": "topology-canvas",
+            "canvas_id": canvas_id,
             "width": image_width,
             "height": image_height,
             "client_width": width,
@@ -215,12 +232,16 @@ def _capture_canvases(
             "source_kind": "native_canvas",
             "source_type": "browser_harness_cdp_clip",
             "capture_method": "Page.captureScreenshot",
-            "source_ref": "#topology-canvas",
-            "source_canvas_id": "topology-canvas",
+            "source_ref": (
+                f"#{declared_id}"
+                if _SIMPLE_DOM_ID.fullmatch(declared_id)
+                else f"backend:{backend_id}"
+            ),
+            "source_canvas_id": canvas_id,
             "frame_id": str(node.get("frame_id", "")),
             "frame_url": page_url,
             "document_id": f"cdp-document:{node.get('document_index', 0)}",
-            "region_selector": "#topology-canvas",
+            "region_selector": f"#{declared_id}" if declared_id else "",
             "capture_kind": "native_canvas",
             "roi_status": "verified",
             "device_pixel_ratio": image_width / width,
@@ -391,5 +412,5 @@ def _dom_projection(scene: Mapping[str, Any]) -> dict[str, Any]:
 __all__ = [
     "LivePageCaptureError",
     "capture_live_page_payload",
-    "reset_execution_fixture",
+    "navigate_to",
 ]

@@ -289,6 +289,17 @@ def _reasoning_graph_text(
             high = middle - 1
     return best_text, copy.deepcopy(best_payload["projection"])
 
+
+def project_ui_graph_for_reasoning(
+    graph: Mapping[str, Any],
+    *,
+    max_bytes: int = 256 * 1024,
+) -> str:
+    """Return the existing bounded model view for another validated planner."""
+
+    text, _projection = _reasoning_graph_text(graph, max_bytes=max_bytes)
+    return text
+
 class UIGraphPlanningService:
     """Turn a retained UI Graph into a validated, non-executable operation DAG."""
 
@@ -398,4 +409,5 @@ __all__ = [
     "UIGraphNotFoundError",
     "UIGraphPlanningService",
     "UIGraphReasonerNotConfiguredError",
+    "project_ui_graph_for_reasoning",
 ]

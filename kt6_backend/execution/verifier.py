@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Mapping, Protocol
 
 from ..asset_inventory import compact_text, strong_identity_key
+from .semantic_target import matching_nodes, node_selected
 
 
 class OutcomeVerifier(Protocol):
@@ -142,6 +143,50 @@ class CanvasSelectionVerifier:
         )
 
 
+class UIGraphOutcomeVerifier:
+    """Verify generic model-planned outcomes from two fresh UI Graphs."""
+
+    verifier_id = "ui_graph_state"
+    expected_types = frozenset(
+        {"element_visible", "element_selected", "page_changed"}
+    )
+
+    def verify(
+        self,
+        *,
+        expected: Mapping[str, Any],
+        before: Mapping[str, Any],
+        after: Mapping[str, Any],
+    ) -> bool:
+        if before.get("capture_id") == after.get("capture_id"):
+            return False
+        expected_type = compact_text(expected.get("type"), 100)
+        if expected_type == "page_changed":
+            before_page = before.get("page")
+            after_page = after.get("page")
+            if not isinstance(before_page, Mapping) or not isinstance(
+                after_page, Mapping
+            ):
+                return False
+            return compact_text(before_page.get("url"), 2048) != compact_text(
+                after_page.get("url"), 2048
+            )
+        target = expected.get("target")
+        if not isinstance(target, Mapping):
+            return False
+        before_matches = matching_nodes(target, before)
+        after_matches = matching_nodes(target, after)
+        if len(after_matches) != 1:
+            return False
+        if expected_type == "element_visible":
+            return len(before_matches) == 0
+        if expected_type == "element_selected":
+            return node_selected(after_matches[0]) and not (
+                len(before_matches) == 1 and node_selected(before_matches[0])
+            )
+        return False
+
+
 def _fresh_transition(
     before: Mapping[str, Any],
     after: Mapping[str, Any],
@@ -200,4 +245,5 @@ __all__ = [
     "CanvasSelectionVerifier",
     "OutcomeVerifier",
     "PageReadyVerifier",
+    "UIGraphOutcomeVerifier",
 ]

@@ -80,11 +80,18 @@ KT6_UI_TARS_API_ALLOWED_HOSTS=<获批服务精确主机名>
 ```dotenv
 KT6_BROWSER_EXECUTION_DRIVER=browser_harness
 KT6_BROWSER_HARNESS_CDP_URL=http://127.0.0.1:9222
-KT6_VISION_DRIVER=execution_fixture
+KT6_EXECUTION_ALLOWED_HOSTS=127.0.0.1,<获批测试主机>
+KT6_MODEL_API_PROVIDER=<供应商或内网网关标识>
+KT6_MODEL_API_BASE_URL=https://<获批网关>/v1
+KT6_MODEL_API_KEY=<本机密钥>
+KT6_MODEL_API_MODEL=<精确模型名>
+KT6_MODEL_API_ALLOWED_HOSTS=<获批网关精确主机名>
 ```
 
-`execution_fixture` 要替换 `.env` 中其他 `KT6_VISION_DRIVER`/hybrid 配置，不能同时启用。
-未设置 Browser Harness 两个变量时，`dry_run=false` 继续 fail closed。CDP 地址只允许 loopback。
+规划模型复用 `KT6_MODEL_API_*`；Canvas 感知复用 `KT6_VISION_DRIVER`（http、
+codeagent_cli、local_cv_ocr 或 hybrid），没有 `execution_fixture` 专用识别器。目标 URL
+必须精确命中 `KT6_EXECUTION_ALLOWED_HOSTS` 白名单，否则导航 fail closed。未设置
+Browser Harness 两个变量时，`dry_run=false` 继续 fail closed。CDP 地址只允许 loopback。
 
 ## 4. 公共自动化回归
 
@@ -237,11 +244,12 @@ python -m unittest `
   tests.test_app
 ```
 
-先跑仓库自带的自然语言 DOM + Canvas 闭环。系统把固定中文任务展开为六步
-`kt6.action-plan.v1`；计划中没有 UI Graph、backend node id、selector 或坐标：
+实机闭环是“任意获批 URL + 自然语言任务 → 统一页面感知 → LLM 生成 `kt6.action-plan.v1`
+→ 实时 Grounding → 受控 click → 重新感知 → 确定性 Verify”。计划中没有 UI Graph、
+backend node id、selector 或坐标，也不再依赖固定测试页或规则解析器：
 
 ```powershell
-python -m kt6_backend.execution_e2e_cli
+python -m kt6_backend.execution_e2e_cli --url http://127.0.0.1:8787/execution-test.html --task "打开 AP_001 的详情并进入拓扑"
 ```
 
 成功输出位于：
@@ -253,7 +261,7 @@ runtime_data/execution_scenarios/<run_id>/
   result.json
 ```
 
-`result.json` 必须为 `status=success`，六个 step 均为 `completed`，三个动作的后续
+`result.json` 必须为 `status=success`，每个 step 均为 `completed`，每个 click 的后续
 verify/wait 都必须由新 capture 通过确定性 Verifier。若希望把真实浏览器场景纳入
 unittest，可在根目录 `.env` 增加 `KT6_RUN_BROWSER_E2E=1`；未配置时只跳过这一项实机
 用例，其余契约测试照常运行。当前开发机只有 Python 3.14，尚未安装要求的 Python 3.12
@@ -266,20 +274,22 @@ http://127.0.0.1:8787/execution-runner.html
 ```
 
 Runner 页面与受控 Chromium Target Tab 必须是两个独立页面；不要让 Browser Harness
-把控制台自身当作目标标签页。先点“生成计划”检查六个中文步骤，再点“确认并开始执行”。
-当前 URL 只允许仓库测试页，规则解析器只支持详情、拓扑和 Canvas 选择三个测试意图。
+把控制台自身当作目标标签页。在输入框填入任意获批 URL 和自然语言任务，先点“生成计划”
+检查语义步骤（无坐标、selector、backend node id），再点“确认并开始执行”。
 
 实机步骤如下：
 
-1. Chrome/Edge 以 loopback remote debugging 启动，NCE 标签页已登录且页面状态可恢复。
-2. `POST /api/execution/plans` 只生成计划；确认没有坐标、selector 和 backend node id。
+1. Chrome/Edge 以 loopback remote debugging 启动，目标标签页已登录且页面状态可恢复。
+2. `POST /api/execution/plans` 传入 `start_url` 与 `user_request`；先通过 URL Safety
+   Policy 校验，再感知页面并调用 LLM 生成计划；确认没有坐标、selector 和 backend node id。
 3. `POST /api/execution/runs` 必须带 `confirmed=true`，立即返回 run_id；前端轮询
    `GET /api/execution/runs/{run_id}`，避免阻塞页面。
-4. 两个 DOM click 都执行“capture → Grounding → prepare → fresh capture → preflight →
-   live frame/identity/hit-test → click”；详情用 verify，拓扑加载用轮询 wait。
-5. Canvas step 才进行一次截图裁剪和像素识别；CanvasGrounder 使用本次 bbox 比例，点击
-   前重新读取 live Canvas box 并做 hit-test，不复用第一步坐标。
-6. 最后新 capture 必须看到 `canvas-selection-result` 且资产 ID 一致，才能返回 SUCCESS。
+4. 每个 click 执行“capture → Grounding（DOM/CDP 优先，缺失时回退 Canvas/Vision）→
+   fresh capture → live frame/identity/hit-test → click”；随后用 verify/wait 再次感知。
+5. Canvas/Vision 目标使用本次截图识别的 bbox 比例，点击前重新读取 live Canvas box 并
+   做 hit-test，不复用第一步坐标。
+6. 最后新 capture 必须满足对应 Verifier（element_visible、element_selected 或
+   page_changed），才能返回 SUCCESS。
 
 DOM 执行回执写入内存审计接口 `GET /api/dom-actions/audit`，计划进度通过
 `GET /api/dom-actions/plans/{plan_id}` 查看；Browser Harness 隔离工作区位于

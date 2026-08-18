@@ -9,99 +9,253 @@ import tempfile
 import unittest
 import zlib
 
-from kt6_backend.execution.fixture_canvas_vision import (
-    ExecutionFixtureCanvasVisionAdapter,
-)
-from kt6_backend.execution.grounding import (
-    CanvasGrounder,
-    GroundedDOMStep,
-    GroundingError,
-)
-from kt6_backend.execution.models import BrowserExecutionResult, CanvasTarget
+from kt6_backend.execution.action_planner import OpenAIActionPlanner
+from kt6_backend.execution.browser_executor import HarnessBrowserExecutor
+from kt6_backend.execution.grounding import TargetGrounderRegistry
 from kt6_backend.execution.live_page_capture import _capture_canvases
-from kt6_backend.execution.natural_language_parser import (
-    NaturalLanguageIntentParser,
-    NaturalLanguageParseError,
-)
-from kt6_backend.execution.plan_generator import FixturePlanGenerator
+from kt6_backend.execution.models import BrowserExecutionResult, BrowserTarget, CanvasTarget
 from kt6_backend.execution.plan_validator import (
+    ACTION_PLAN_SCHEMA_VERSION,
     ActionPlanValidationError,
     ActionPlanValidator,
 )
-from kt6_backend.execution.scenario_service import ExecutionScenarioService
 from kt6_backend.execution.scenario_runner import ScenarioRunner
-from kt6_backend.vision_recognition import CanvasFrame
+from kt6_backend.execution.scenario_service import (
+    ExecutionScenarioService,
+    ExecutionScenarioServiceError,
+)
+from kt6_backend.execution.url_policy import (
+    ExecutionURLPolicy,
+    ExecutionURLPolicyError,
+)
+from kt6_backend.execution.verifier import UIGraphOutcomeVerifier
+from kt6_backend.execution.verifier_registry import OutcomeVerifierRegistry
 
 
-FIXTURE_URL = "http://127.0.0.1:8787/execution-test.html"
-REQUEST = "打开 AP_001 的详情，然后进入拓扑页面并在拓扑中选中 AP_001"
+URL = "https://nce.test/devices"
+TASK = "打开 AP_001 详情"
 
 
-class ActionPlanContractTest(unittest.TestCase):
-    def test_natural_language_expands_to_six_semantic_steps(self):
-        intents = NaturalLanguageIntentParser().parse(REQUEST)
-        plan = FixturePlanGenerator().generate(
-            start_url=FIXTURE_URL,
-            user_request=REQUEST,
-            intents=intents,
-        )
-        validated = ActionPlanValidator().validate(plan)
+def semantic_plan(*, start_url=URL, user_request=TASK):
+    return {
+        "schema_version": ACTION_PLAN_SCHEMA_VERSION,
+        "scenario_id": "generic-query-1",
+        "start_url": start_url,
+        "user_request": user_request,
+        "steps": [
+            {
+                "id": "step-1",
+                "op": "click",
+                "target": {"query": "AP_001 详情", "asset_id": "ap_001"},
+            },
+            {
+                "id": "step-2",
+                "op": "verify",
+                "expected": {
+                    "type": "element_visible",
+                    "target": {"query": "AP_001 详情面板"},
+                },
+            },
+        ],
+    }
 
-        self.assertEqual(
-            [item["intent"] for item in intents],
-            ["open_asset_details", "open_topology", "select_canvas_asset"],
-        )
-        self.assertEqual(
-            [step["op"] for step in validated["steps"]],
-            ["click", "verify", "click", "wait", "click", "verify"],
-        )
-        serialized = repr(validated)
-        self.assertNotIn("backend_node_id", serialized)
-        self.assertNotIn("selector", serialized)
-        self.assertNotIn("x_ratio", serialized)
 
-    def test_parser_and_validator_reject_unknown_language_or_coordinates(self):
-        with self.assertRaises(NaturalLanguageParseError):
-            NaturalLanguageIntentParser().parse("随便操作一下")
-        generated = ExecutionScenarioService(root=Path("."), runner=None).generate_plan(
-            start_url=FIXTURE_URL,
-            user_request=REQUEST,
-        )
-        tampered = copy.deepcopy(generated["plan"])
-        tampered["steps"][0]["target"]["x"] = 10
-        with self.assertRaises(ActionPlanValidationError):
-            ActionPlanValidator().validate(tampered)
-
-    def test_validator_rejects_mismatched_outcome_before_execution(self):
-        generated = ExecutionScenarioService(root=Path("."), runner=None).generate_plan(
-            start_url=FIXTURE_URL,
-            user_request=REQUEST,
-        )
-        tampered = copy.deepcopy(generated["plan"])
-        tampered["steps"][1]["expected"] = {
-            "type": "canvas_asset_selected",
-            "asset_id": "ap_001",
+def graph(capture_id, *, include_result=False, vision=False):
+    nodes = [
+        {
+            "id": "cdp:detail-button",
+            "kind": "control",
+            "name": "AP_001 详情",
+            "business_id": "ap_001",
+            "owner_business_id": "ap_001",
+            "action_id": "device.details",
+            "role": "button",
+            "disabled": False,
+            "actionable": False,
+            "can_click_now": False,
+            "safe_for_execution": False,
+            "bbox": [10, 10, 80, 30],
+            "attributes": {
+                "id": "ap-detail",
+                "data-owner-business-id": "ap_001",
+                "data-action-id": "device.details",
+            },
+            "source": {
+                "kind": "cdp",
+                "backend_node_id": 101,
+                "frame_id": "main",
+                "frame_url": URL,
+            },
+            "interaction": {"candidate": True, "status": "candidate_only"},
         }
-
-        with self.assertRaisesRegex(
-            ActionPlanValidationError,
-            "action_plan_sequence_invalid",
-        ):
-            ActionPlanValidator().validate(tampered)
-
-    def test_service_returns_readable_plan_before_execution(self):
-        generated = ExecutionScenarioService(root=Path("."), runner=None).generate_plan(
-            start_url=FIXTURE_URL,
-            user_request=REQUEST,
+    ]
+    if include_result:
+        nodes.append(
+            {
+                "id": "cdp:detail-panel",
+                "kind": "text",
+                "name": "AP_001 详情面板",
+                "attributes": {"id": "detail-panel"},
+                "source": {"kind": "cdp"},
+                "interaction": {"candidate": False, "status": "analysis_only"},
+                "safe_for_execution": False,
+            }
         )
+    if vision:
+        nodes.extend(
+            [
+                {
+                    "id": "vision:ap-001",
+                    "kind": "business_object",
+                    "name": "AP_001",
+                    "business_id": "ap_001",
+                    "confidence": 0.91,
+                    "bbox": [100, 50, 40, 40],
+                    "safe_for_execution": False,
+                    "source": {
+                        "kind": "vision",
+                        "producer_id": "local-cv-ocr",
+                        "canvas_id": "network-map",
+                        "canvas_width": 400,
+                        "canvas_height": 200,
+                        "frame_id": "main",
+                    },
+                    "interaction": {"candidate": False, "status": "analysis_only"},
+                },
+                {
+                    "id": "cdp:canvas",
+                    "kind": "container",
+                    "name": "Network map",
+                    "attributes": {"id": "network-map"},
+                    "source": {
+                        "kind": "cdp",
+                        "backend_node_id": 202,
+                        "frame_id": "main",
+                        "frame_url": URL,
+                    },
+                    "interaction": {"candidate": False, "status": "analysis_only"},
+                    "safe_for_execution": False,
+                },
+            ]
+        )
+    return {
+        "schema_version": "kt6.ui-graph.v1",
+        "graph_id": f"uig:{capture_id}",
+        "capture_id": capture_id,
+        "page": {"url": URL, "title": "NCE"},
+        "analysis_only": True,
+        "execution_authorized": False,
+        "safe_for_execution": False,
+        "nodes": nodes,
+        "edges": [],
+        "issues": [],
+        "stats": {"truncated": False},
+    }
 
-        self.assertEqual(len(generated["readable_steps"]), 6)
-        self.assertTrue(generated["requires_confirmation"])
-        self.assertFalse(generated["runner_configured"])
+
+class URLAndPlanContractTest(unittest.TestCase):
+    def test_url_policy_allows_exact_approved_host(self):
+        policy = ExecutionURLPolicy(["nce.test"])
+        self.assertEqual(policy.validate(URL), URL)
+        with self.assertRaises(ExecutionURLPolicyError):
+            policy.validate("https://other.test/devices")
+
+    def test_plan_is_semantic_and_click_is_paired_with_outcome(self):
+        validated = ActionPlanValidator().validate(semantic_plan())
+        self.assertEqual(validated["steps"][0]["target"]["query"], "AP_001 详情")
+        self.assertNotIn("source", repr(validated))
+        self.assertNotIn("selector", repr(validated))
+        self.assertNotIn("backend_node_id", repr(validated))
+
+        invalid = semantic_plan()
+        invalid["steps"] = invalid["steps"][:1]
+        with self.assertRaises(ActionPlanValidationError):
+            ActionPlanValidator().validate(invalid)
 
 
-class FixtureCanvasPerceptionTest(unittest.TestCase):
-    def test_live_capture_crops_the_visible_canvas_pixels(self):
+class PlannerAndServiceTest(unittest.TestCase):
+    def test_openai_planner_validates_model_action_plan(self):
+        class Result:
+            def json_content(self):
+                return semantic_plan()
+
+        class Client:
+            model = "approved-model"
+
+            def complete(self, **kwargs):
+                self.messages = kwargs["messages"]
+                return Result()
+
+        client = Client()
+        planner = OpenAIActionPlanner(client=client, provider="internal")
+        result = planner.plan(start_url=URL, user_request=TASK, ui_graph=graph("c1"))
+
+        self.assertEqual(result["schema_version"], ACTION_PLAN_SCHEMA_VERSION)
+        self.assertIn("untrusted page data", client.messages[0]["content"])
+
+    def test_service_inspects_allowed_url_before_model_planning(self):
+        class Runner:
+            def inspect(self, start_url):
+                self.start_url = start_url
+                return {
+                    "capture_id": "capture-plan",
+                    "graph_id": "uig:capture-plan",
+                    "ui_graph": graph("capture-plan"),
+                    "preview_data_url": "data:image/jpeg;base64,/9j/2Q==",
+                }
+
+        class Planner:
+            planner_id = "test-planner"
+            planner_model = "test-model"
+
+            def plan(self, **kwargs):
+                self.ui_graph = kwargs["ui_graph"]
+                return semantic_plan(
+                    start_url=kwargs["start_url"],
+                    user_request=kwargs["user_request"],
+                )
+
+        runner = Runner()
+        planner = Planner()
+        service = ExecutionScenarioService(
+            root=Path("."),
+            runner=runner,
+            planner=planner,
+            url_policy=ExecutionURLPolicy(["nce.test"]),
+        )
+        generated = service.generate_plan(start_url=URL, user_request=TASK)
+
+        self.assertEqual(runner.start_url, URL)
+        self.assertEqual(generated["planning_graph_id"], "uig:capture-plan")
+        self.assertEqual(generated["planner"]["model"], "test-model")
+        with self.assertRaises(ExecutionScenarioServiceError):
+            service.generate_plan(
+                start_url="https://other.test/",
+                user_request=TASK,
+            )
+
+
+class UnifiedGroundingTest(unittest.TestCase):
+    def test_registry_prefers_reliable_dom_candidate(self):
+        target = TargetGrounderRegistry(canvas_producer_id="local-cv-ocr").resolve(
+            {"query": "AP_001 详情", "asset_id": "ap_001"},
+            graph("c1", vision=True),
+        )
+        self.assertIsInstance(target, BrowserTarget)
+        self.assertEqual(target.backend_node_id, 101)
+
+    def test_registry_uses_configured_formal_vision_when_dom_is_missing(self):
+        value = graph("c1", vision=True)
+        value["nodes"] = [node for node in value["nodes"] if node["id"] != "cdp:detail-button"]
+        target = TargetGrounderRegistry(canvas_producer_id="local-cv-ocr").resolve(
+            {"query": "AP_001", "asset_id": "ap_001"},
+            value,
+        )
+        self.assertIsInstance(target, CanvasTarget)
+        self.assertEqual(target.canvas_backend_node_id, 202)
+        self.assertEqual(target.producer_id, "local-cv-ocr")
+
+    def test_live_capture_selects_largest_visible_canvas_without_fixed_id(self):
         def chunk(name, data):
             return (
                 struct.pack(">I", len(data))
@@ -114,163 +268,49 @@ class FixtureCanvasPerceptionTest(unittest.TestCase):
         scanlines += b"\x00" + b"\x24\x6b\xfd" * 2
         png = (
             b"\x89PNG\r\n\x1a\n"
-            + chunk("IHDR".encode(), struct.pack(">IIBBBBB", 2, 2, 8, 2, 0, 0, 0))
-            + chunk("IDAT".encode(), zlib.compress(scanlines))
-            + chunk("IEND".encode(), b"")
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 2, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(scanlines))
+            + chunk(b"IEND", b"")
         )
-        calls = []
-
-        def cdp(method, **params):
-            calls.append((method, params))
-            return {"data": base64.b64encode(png).decode("ascii")}
 
         canvases = _capture_canvases(
-            cdp,
+            lambda _method, **_params: {"data": base64.b64encode(png).decode()},
             {
                 "nodes": [
                     {
                         "dom_node_type": 1,
-                        "frame_id": "frame-main",
+                        "dom_node_name": "CANVAS",
+                        "attributes": {"id": "network-map"},
+                        "bounds": [5, 10, 300, 180],
+                        "backend_node_id": 202,
+                        "frame_id": "main",
                         "document_index": 0,
-                        "attributes": {"id": "topology-canvas"},
-                        "bounds": [10, 20, 200, 100],
                     }
                 ]
             },
-            page_url=FIXTURE_URL,
+            page_url=URL,
         )
-
-        self.assertEqual(canvases[0]["width"], 2)
-        self.assertEqual(canvases[0]["height"], 2)
-        self.assertEqual(canvases[0]["bbox"], [10.0, 20.0, 200.0, 100.0])
-        self.assertEqual(calls[0][0], "Page.captureScreenshot")
-
-    def test_adapter_derives_node_boxes_from_real_pixel_values(self):
-        width, height = 60, 20
-        pixels = [(255, 255, 255)] * (width * height)
-        for left, color in (
-            (1, (32, 166, 122)),
-            (21, (36, 107, 253)),
-            (41, (138, 92, 245)),
-        ):
-            for y in range(5, 15):
-                for x in range(left, left + 10):
-                    pixels[y * width + x] = color
-        adapter = ExecutionFixtureCanvasVisionAdapter(
-            pixel_loader=lambda _path: (width, height, pixels)
-        )
-        frame = CanvasFrame(
-            canvas_id="topology-canvas",
-            screenshot_path=Path("unused.png"),
-            screenshot_sha256="a" * 64,
-            mime_type="image/png",
-            width=width,
-            height=height,
-            client_width=width,
-            client_height=height,
-            bbox=(0, 0, width, height),
-        )
-
-        result = adapter.recognize(
-            page={"url": FIXTURE_URL},
-            frames=(frame,),
-        )
-
-        boxes = {item["business_id"]: item["bbox"] for item in result["objects"]}
-        self.assertEqual(boxes["ap_001"], [1, 5, 10, 10])
-        self.assertEqual(boxes["switch_001"], [21, 5, 10, 10])
-        self.assertEqual(boxes["ap_002"], [41, 5, 10, 10])
-
-    def test_canvas_grounder_uses_current_graph_geometry(self):
-        graph = {
-            "schema_version": "kt6.ui-graph.v1",
-            "graph_id": "uig:canvas",
-            "capture_id": "capture-canvas",
-            "page": {"url": FIXTURE_URL},
-            "analysis_only": True,
-            "execution_authorized": False,
-            "safe_for_execution": False,
-            "stats": {"truncated": False},
-            "nodes": [
-                {
-                    "id": "vision:ap1",
-                    "business_id": "ap_001",
-                    "bbox": [100, 120, 30, 30],
-                    "confidence": 0.99,
-                    "safe_for_execution": False,
-                    "source": {
-                        "kind": "vision",
-                        "producer_id": "execution-fixture-canvas-cv",
-                        "canvas_id": "topology-canvas",
-                        "canvas_width": 520,
-                        "canvas_height": 420,
-                    },
-                },
-                {
-                    "id": "cdp:canvas",
-                    "source": {
-                        "kind": "cdp",
-                        "backend_node_id": 900,
-                        "frame_id": "frame-main",
-                        "frame_url": FIXTURE_URL,
-                    },
-                    "attributes": {"id": "topology-canvas"},
-                },
-            ],
-        }
-
-        target = CanvasGrounder().resolve(
-            {
-                "source": "canvas",
-                "action": "select_canvas_asset",
-                "asset_id": "ap_001",
-                "name": "AP_001",
-            },
-            graph,
-        )
-
-        self.assertEqual(target.canvas_backend_node_id, 900)
-        self.assertAlmostEqual(target.x_ratio, 115 / 520, places=6)
-        self.assertAlmostEqual(target.y_ratio, 135 / 420, places=6)
-        changed = copy.deepcopy(graph)
-        changed["nodes"][0]["source"]["producer_id"] = "untrusted"
-        with self.assertRaises(GroundingError):
-            CanvasGrounder().resolve(
-                {
-                    "source": "canvas",
-                    "action": "select_canvas_asset",
-                    "asset_id": "ap_001",
-                    "name": "AP_001",
-                },
-                changed,
-            )
+        self.assertEqual(canvases[0]["canvas_id"], "network-map")
+        self.assertEqual(canvases[0]["region_selector"], "#network-map")
 
 
-class ScenarioRunnerContractTest(unittest.TestCase):
-    def test_runner_uses_fresh_capture_for_every_step(self):
-        generated = ExecutionScenarioService(root=Path("."), runner=None).generate_plan(
-            start_url=FIXTURE_URL,
-            user_request=REQUEST,
-        )
-
+class GenericScenarioRunnerTest(unittest.TestCase):
+    def test_runner_executes_real_grounded_click_and_verifies_new_graph(self):
         class Client:
             def __init__(self):
-                self.capture_count = 0
-                self.canvas_flags = []
+                self.sequence = 0
 
-            def reset_execution_fixture(self, page_url):
-                self.page_url = page_url
+            def navigate_to(self, page_url):
+                return page_url
 
             def bind_page_target(self, page_url):
                 return {"target_id": "target-1", "page_url": page_url}
 
-            def capture_page_payload(self, *, expected_page_url, include_canvas=True):
-                self.capture_count += 1
-                self.canvas_flags.append(include_canvas)
+            def capture_page_payload(self, *, include_canvas=True):
+                self.sequence += 1
                 return {
-                    "page_url": expected_page_url,
-                    "sequence": self.capture_count,
-                    "include_canvas": include_canvas,
+                    "sequence": self.sequence,
+                    "page_url": URL,
                     "preview_data_url": "data:image/jpeg;base64,/9j/2Q==",
                 }
 
@@ -288,96 +328,44 @@ class ScenarioRunnerContractTest(unittest.TestCase):
                 return {"capture_id": capture_id}
 
             def get_ui_graph(self, capture_id):
-                return {
-                    "schema_version": "kt6.ui-graph.v1",
-                    "graph_id": f"uig:{capture_id}",
-                    "capture_id": capture_id,
-                    "page": {"url": FIXTURE_URL},
-                    "analysis_only": True,
-                    "execution_authorized": False,
-                    "safe_for_execution": False,
-                    "stats": {"truncated": False},
-                    "nodes": [],
-                }
+                sequence = int(capture_id.rsplit("-", 1)[1])
+                return graph(capture_id, include_result=sequence >= 3)
 
             def get_action_snapshot(self, capture_id):
                 return copy.deepcopy(self.snapshots[capture_id])
-
-        class Grounders:
-            def resolve(self, target, graph):
-                if target.get("source") == "canvas":
-                    return CanvasTarget(
-                        node_id="vision:ap1",
-                        canvas_backend_node_id=900,
-                        frame_id="frame-main",
-                        frame_url=FIXTURE_URL,
-                        page_url=FIXTURE_URL,
-                        canvas_dom_id="topology-canvas",
-                        asset_id="ap_001",
-                        x_ratio=0.3,
-                        y_ratio=0.4,
-                        producer_id="execution-fixture-canvas-cv",
-                    )
-                return GroundedDOMStep(
-                    graph_id=graph["graph_id"],
-                    capture_id=graph["capture_id"],
-                    target_node_id="cdp:target",
-                    asset_id=target["asset_id"],
-                    action_id=target["action"],
-                )
-
-        class SafeActions:
-            def __init__(self):
-                self.plan = 0
-
-            def prepare(self, **_kwargs):
-                self.plan += 1
-                return {"status": "prepared", "plan_id": f"plan-{self.plan}"}
-
-            def preflight(self, **_kwargs):
-                return {"status": "ready", "execution_token": "token"}
-
-            def execute(self, **_kwargs):
-                return {"status": "executed_pending_verification"}
-
-            def verify_outcome(self, **_kwargs):
-                return {"status": "verified"}
 
         class Executor:
             def __init__(self, client):
                 self.client = client
 
             def execute(self, _action):
-                return BrowserExecutionResult(True, "", backend_node_id=900, x=1, y=1)
-
-        class Verifiers:
-            def verify_expected(self, **_kwargs):
-                return True, "fixture-verifier"
+                return BrowserExecutionResult(True, "", backend_node_id=101, x=20, y=20)
 
         client = Client()
-        scratch_root = Path.cwd() / ".test-tmp"
-        scratch_root.mkdir(exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=scratch_root) as temp_dir:
-            runner = ScenarioRunner(
-                page_perception=Perception(),
-                safe_dom_actions=SafeActions(),
-                browser_executor=Executor(client),
-                grounders=Grounders(),
-                verifiers=Verifiers(),
-                clock=lambda: 10.0,
-                wait=lambda _seconds: None,
-            )
+        runner = ScenarioRunner(
+            page_perception=Perception(),
+            browser_executor=Executor(client),
+            grounders=TargetGrounderRegistry(),
+            verifiers=OutcomeVerifierRegistry(
+                [], ui_graph_verifier=UIGraphOutcomeVerifier()
+            ),
+            url_policy=ExecutionURLPolicy(["nce.test"]),
+            clock=lambda: 10.0,
+            wait=lambda _seconds: None,
+        )
+        scratch = Path.cwd() / ".test-tmp"
+        scratch.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as temp_dir:
             result = runner.run(
-                generated["plan"],
-                run_id="run-test",
+                semantic_plan(),
+                run_id="run-generic",
                 out_dir=Path(temp_dir) / "evidence",
+                confirmed=True,
             )
 
         self.assertEqual(result["status"], "success")
-        self.assertEqual(len(result["steps"]), 6)
-        self.assertEqual(result["capture_count"], 8)
-        self.assertEqual(client.capture_count, 8)
-        self.assertEqual(client.canvas_flags.count(True), 1)
+        self.assertEqual(result["capture_count"], 3)
+        self.assertEqual(len(result["steps"]), 2)
 
 
 if __name__ == "__main__":

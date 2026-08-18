@@ -40,10 +40,10 @@
         <h1>KT6 GUI Execution Runner</h1>
         <div class="form">
           <label>目标网页
-            <input id="start-url" value="http://127.0.0.1:8787/execution-test.html" />
+            <input id="start-url" placeholder="https://approved-test-host/path" />
           </label>
           <label>你想完成什么？
-            <textarea id="user-request">打开 AP_001 的详情，然后进入拓扑页面，再在拓扑中选中 AP_001</textarea>
+            <textarea id="user-request" placeholder="例如：打开 AP_001 的详情并进入拓扑"></textarea>
           </label>
           <div class="actions">
             <button id="generate">生成计划</button>
@@ -104,10 +104,15 @@
         byId("workspace").hidden = false;
         byId("show-json").disabled = false;
         byId("execute").disabled = !state.generated.runner_configured;
+        if (state.generated.planning_preview) byId("preview").src = state.generated.planning_preview;
+        byId("capture").textContent = state.generated.planning_capture_id
+          ? `planning capture: ${state.generated.planning_capture_id}`
+          : "尚未采集";
+        byId("graph-id").textContent = state.generated.planning_graph_id || "-";
       }
 
       async function generate() {
-        message("正在生成确定性计划……");
+        message("正在感知目标页面并调用规划模型……");
         try {
           state.generated = await api("/api/execution/plans", {
             method: "POST",

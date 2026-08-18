@@ -38,11 +38,14 @@ class ExecutionE2EAssetsTest(unittest.TestCase):
     "requires Python 3.12, Browser Harness and a connected Chromium",
 )
 class RealBrowserExecutionE2ETest(unittest.TestCase):
-    def test_natural_language_dom_and_canvas_scenario(self):
-        result = run_scenario_e2e()
+    def test_generic_natural_language_scenario(self):
+        result = run_scenario_e2e(
+            start_url="http://127.0.0.1:8787/execution-test.html",
+            user_request="打开 AP_001 的详情，然后进入拓扑页面，再在拓扑中选中 AP_001",
+        )
 
         self.assertEqual(result["status"], "success")
-        self.assertEqual(len(result["steps"]), 6)
+        self.assertTrue(result["steps"])
         self.assertTrue(all(step["status"] == "completed" for step in result["steps"]))
 
 

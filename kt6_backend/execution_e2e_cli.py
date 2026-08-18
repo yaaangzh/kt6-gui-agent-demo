@@ -3,68 +3,50 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import threading
 from pathlib import Path
 from typing import Any
 
-from .app import create_server
-from .execution.fixture_canvas_vision import ExecutionFixtureCanvasVisionAdapter
+from .app import create_services
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FIXTURE_PAGE_URL = "http://127.0.0.1:8787/execution-test.html"
-FIXTURE_REQUEST = "打开 AP_001 的详情，然后进入拓扑页面，再在拓扑中选中 AP_001"
 
 
-def run_scenario_e2e(*, out_dir: Path | None = None) -> dict[str, Any]:
-    server, services = create_server(
-        host="127.0.0.1",
-        port=8787,
-        root=ROOT,
-        canvas_vision_override=ExecutionFixtureCanvasVisionAdapter(),
+def run_scenario_e2e(
+    *,
+    start_url: str,
+    user_request: str,
+) -> dict[str, Any]:
+    services = create_services(ROOT)
+    generated = services.execution_scenarios.generate_plan(
+        start_url=start_url,
+        user_request=user_request,
     )
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        generated = services.execution_scenarios.generate_plan(
-            start_url=FIXTURE_PAGE_URL,
-            user_request=FIXTURE_REQUEST,
-        )
-        if out_dir is None:
-            status = services.execution_scenarios.run_sync(generated["plan"])
-        else:
-            runner = services.execution_scenarios.runner
-            if runner is None:
-                raise RuntimeError("execution_runner_not_configured")
-            result = runner.run(
-                generated["plan"],
-                run_id="run_cli",
-                out_dir=out_dir,
-            )
-            status = {"status": result["status"], "result": result}
-        result = dict(status["result"])
-        result["readable_steps"] = generated["readable_steps"]
-        return result
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
+    status = services.execution_scenarios.run_sync(generated["plan"])
+    result = dict(status["result"])
+    result["readable_steps"] = generated["readable_steps"]
+    result["planner"] = generated["planner"]
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Run the natural-language KT6 DOM + Canvas execution E2E."
+        description="Run one generic KT6 model-planned browser scenario."
     )
-    parser.add_argument("--out-dir", type=Path)
+    parser.add_argument("--url", required=True, help="approved target page URL")
+    parser.add_argument("--task", required=True, help="natural-language task")
     args = parser.parse_args(argv)
     try:
-        result = run_scenario_e2e(out_dir=args.out_dir)
+        result = run_scenario_e2e(
+            start_url=args.url,
+            user_request=args.task,
+        )
     except (RuntimeError, OSError, ValueError) as exc:
         print(
             json.dumps(
                 {
                     "status": "failed",
-                    "error_code": getattr(exc, "error_code", str(exc)),
+                    "error_code": getattr(exc, "error_code", "execution_failed"),
                 },
                 ensure_ascii=False,
             ),

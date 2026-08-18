@@ -10,9 +10,10 @@ from urllib.parse import urlsplit
 from .live_page_capture import (
     LivePageCaptureError,
     capture_live_page_payload,
-    reset_execution_fixture,
+    navigate_to,
 )
 from .models import BrowserTarget, CanvasTarget
+from .url_policy import ExecutionURLPolicy, ExecutionURLPolicyError
 
 
 class BrowserHarnessError(RuntimeError):
@@ -29,12 +30,14 @@ class BrowserHarnessClient:
         *,
         cdp_url: str,
         workspace: Path,
+        url_policy: ExecutionURLPolicy,
         cdp_call: Callable[..., Mapping[str, Any]] | None = None,
         click_call: Callable[[float, float], Any] | None = None,
         ensure_daemon: Callable[[], Any] | None = None,
     ):
         self.cdp_url = self._loopback_cdp_url(cdp_url)
         self.workspace = Path(workspace).resolve()
+        self.url_policy = url_policy
         self._cdp_call = cdp_call
         self._click_call = click_call
         self._ensure_daemon = ensure_daemon
@@ -115,9 +118,15 @@ class BrowserHarnessClient:
             attributes = self._attributes(live_node.get("attributes"))
             if (
                 attributes.get("id") != target.dom_id
-                or attributes.get("data-owner-business-id")
-                != target.owner_business_id
-                or attributes.get("data-action-id") != target.action_id
+                or (
+                    target.owner_business_id
+                    and attributes.get("data-owner-business-id")
+                    != target.owner_business_id
+                )
+                or (
+                    target.action_id
+                    and attributes.get("data-action-id") != target.action_id
+                )
             ):
                 raise BrowserHarnessError("browser_target_changed")
             response = self._cdp_call(
@@ -210,31 +219,34 @@ class BrowserHarnessClient:
             raise BrowserHarnessError("browser_harness_click_failed") from exc
         return {"backend_node_id": backend_node_id, "x": x, "y": y}
 
-    def reset_execution_fixture(self, page_url: str) -> None:
+    def navigate_to(self, page_url: str) -> str:
         try:
             self._load_runtime()
             self._bound_target_id = ""
             self._bound_page_url = ""
-            reset_execution_fixture(self._cdp_call, page_url)
+            return navigate_to(
+                self._cdp_call,
+                page_url,
+                url_policy=self.url_policy,
+            )
         except LivePageCaptureError as exc:
             raise BrowserHarnessError(exc.error_code) from exc
         except Exception as exc:
-            raise BrowserHarnessError("execution_fixture_navigation_failed") from exc
+            raise BrowserHarnessError("browser_navigation_failed") from exc
 
     def capture_page_payload(
         self,
         *,
-        expected_page_url: str,
         include_canvas: bool = True,
     ) -> dict[str, Any]:
         """Capture the live page through fixed CDP methods for the E2E harness."""
 
         try:
             self._load_runtime()
-            self._assert_bound_target(expected_page_url)
+            self._assert_bound_target(None)
             return capture_live_page_payload(
                 self._cdp_call,
-                expected_page_url=expected_page_url,
+                url_policy=self.url_policy,
                 include_canvas=include_canvas,
             )
         except LivePageCaptureError as exc:
@@ -349,11 +361,9 @@ class BrowserHarnessClient:
             raise BrowserHarnessError("browser_target_box_invalid")
         return round(x, 3), round(y, 3)
 
-    def _assert_bound_target(self, expected_page_url: str) -> None:
+    def _assert_bound_target(self, expected_page_url: str | None) -> None:
         if not self._bound_target_id:
-            return
-        if expected_page_url != self._bound_page_url:
-            raise BrowserHarnessError("browser_session_page_changed")
+            raise BrowserHarnessError("browser_session_not_bound")
         result = self._cdp_call("Target.getTargets")
         targets = result.get("targetInfos")
         matches = [
@@ -362,10 +372,16 @@ class BrowserHarnessClient:
             if isinstance(item, Mapping)
             and str(item.get("targetId", "")).strip() == self._bound_target_id
             and str(item.get("type", "")) == "page"
-            and str(item.get("url", "")).strip() == expected_page_url
         ] if isinstance(targets, list) else []
         if len(matches) != 1:
             raise BrowserHarnessError("browser_session_target_changed")
+        current_url = str(matches[0].get("url", "")).strip()
+        try:
+            current_url = self.url_policy.validate(current_url)
+        except ExecutionURLPolicyError as exc:
+            raise BrowserHarnessError(exc.error_code) from exc
+        if expected_page_url is not None and current_url != expected_page_url:
+            raise BrowserHarnessError("browser_session_page_changed")
 
     @staticmethod
     def _inside_viewport(x: float, y: float, value: Any) -> bool:
