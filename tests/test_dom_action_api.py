@@ -123,6 +123,20 @@ class DOMActionAPITest(unittest.TestCase):
                 self.assertEqual(completed_status["status"], "dry_run_ok")
                 self.assertFalse(completed_status["safe_for_execution"])
 
+                verify_rejected = self.post(
+                    base_url,
+                    "/api/dom-actions/verify",
+                    {
+                        "plan_id": prepared["plan_id"],
+                        "page_capture_id": current["capture_id"],
+                    },
+                    expected_status=409,
+                )
+                self.assertEqual(
+                    verify_rejected["reason"],
+                    "outcome_verification_not_pending",
+                )
+
                 rejected = self.post(
                     base_url,
                     "/api/dom-actions/execute",

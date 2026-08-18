@@ -16,7 +16,7 @@ KT6 / FreeStyleCopilot 是无线网络运维 PoC，把自然语言意图、页�
 | `eval-browser-use` | Browser Use/CDP + 任意获批 OpenAI-compatible 规划模型 API |
 | `eval-ui-tars` | 通用规划模型 API + 独立 UI-TARS 视觉定位 API + Playwright |
 | `ui-graph-textflow-cdp` | CDP、多源 UI Graph、操作 DAG 的实验分支 |
-| `feature/browser-executor` | 在 UI Graph 分支上验证 Browser Harness click 执行层 |
+| `feature/browser-executor` | 真实页面感知、Browser Harness click 与确定性结果验证 |
 | `br_omniParser` | 已停止的 OmniParser 试点，仅保留历史对照，不混入当前方案 |
 
 功能实验保持分支隔离；公共基础设施必须同步到所有仍保留的分支。公共修改包括：
@@ -132,8 +132,10 @@ UI Graph 统一 `dom/cdp/page_api/vision/text` 来源，并生成 `locate/click/
 Browser Harness 只作为 click-only Browser Runtime：上层必须先通过 UI Graph/DAG、
 资产与控件绑定、权限确认、fresh capture、指纹和一次性令牌。执行器只接收已经解析的
 正整数 CDP backend node id，不接收模型生成的 CDP 方法、JavaScript 或 Python。
-点击派发不等于业务成功；在新的 KT6 capture 完成确定性验证前，状态必须保持
-`executed_pending_verification`。只读 Playwright/CDP Sidecar 保持独立，不在本阶段重构。
+点击前还必须实时复核 frame、DOM identity 和 hit-test。点击派发不等于业务成功；
+在新的 KT6 capture 完成确定性验证前，状态必须保持 `executed_pending_verification`。
+E2E 只 Mock Intent/Planner 决策，不能提交或使用 `mock_ui_graph.json`；UI Graph 必须由
+真实页面现场生成。只读 Playwright/CDP Sidecar 保持独立，不在本阶段重构。
 
 ### 4.6 `br_omniParser`
 

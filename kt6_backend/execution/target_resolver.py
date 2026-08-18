@@ -115,11 +115,33 @@ class UIGraphTargetResolver:
             or parsed_page.password
         ):
             raise TargetResolutionError("browser_target_page_missing")
+        frame_url = compact_text(source.get("frame_url"), 2048)
+        control_frame_id = compact_text(control.get("frame_id"), 200)
+        control_frame_url = compact_text(control.get("frame_url"), 2048)
+        parent_frame_id = compact_text(source.get("parent_frame_id"), 200)
+        same_frame_space = bool(
+            control_frame_id
+            and control_frame_id == frame_id
+            and control_frame_url
+            and control_frame_url == frame_url
+        )
+        main_frame_bridge = bool(
+            control_frame_id == "0"
+            and not parent_frame_id
+            and control_frame_url == page_url
+            and frame_url == page_url
+        )
+        if not same_frame_space and not main_frame_bridge:
+            raise TargetResolutionError("browser_target_frame_mismatch")
         return BrowserTarget(
             node_id=node_id,
             backend_node_id=backend_node_id,
             frame_id=frame_id,
+            frame_url=frame_url,
             page_url=page_url,
+            dom_id=selector_match.group(1),
+            owner_business_id=owner,
+            action_id=control_action,
         )
 
     @staticmethod

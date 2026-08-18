@@ -7,6 +7,13 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 
+from .live_page_capture import (
+    LivePageCaptureError,
+    capture_live_page_payload,
+    reset_execution_fixture,
+)
+from .models import BrowserTarget
+
 
 class BrowserHarnessError(RuntimeError):
     def __init__(self, error_code: str):
@@ -35,10 +42,9 @@ class BrowserHarnessClient:
 
     def click_backend_node(
         self,
-        backend_node_id: int,
-        *,
-        expected_page_url: str,
+        target: BrowserTarget,
     ) -> dict[str, Any]:
+        backend_node_id = target.backend_node_id
         if (
             isinstance(backend_node_id, bool)
             or not isinstance(backend_node_id, int)
@@ -56,8 +62,31 @@ class BrowserHarnessClient:
             current_url = str(
                 page.get("frameTree", {}).get("frame", {}).get("url", "")
             ).strip()
-            if current_url != expected_page_url:
+            if current_url != target.page_url:
                 raise BrowserHarnessError("browser_page_changed")
+            live_frame = self._frame_by_id(page.get("frameTree"), target.frame_id)
+            if live_frame is None or str(live_frame.get("url", "")).strip() != target.frame_url:
+                raise BrowserHarnessError("browser_target_frame_changed")
+            described = self._cdp_call(
+                "DOM.describeNode",
+                backendNodeId=backend_node_id,
+                depth=0,
+                pierce=True,
+            )
+            live_node = described.get("node")
+            if not isinstance(live_node, Mapping):
+                raise BrowserHarnessError("browser_target_changed")
+            live_backend_id = live_node.get("backendNodeId")
+            if live_backend_id != backend_node_id:
+                raise BrowserHarnessError("browser_target_changed")
+            attributes = self._attributes(live_node.get("attributes"))
+            if (
+                attributes.get("id") != target.dom_id
+                or attributes.get("data-owner-business-id")
+                != target.owner_business_id
+                or attributes.get("data-action-id") != target.action_id
+            ):
+                raise BrowserHarnessError("browser_target_changed")
             response = self._cdp_call(
                 "DOM.getBoxModel",
                 backendNodeId=backend_node_id,
@@ -70,6 +99,13 @@ class BrowserHarnessClient:
             )
             if not self._inside_viewport(x, y, viewport):
                 raise BrowserHarnessError("browser_target_not_visible")
+            hit = self._cdp_call(
+                "DOM.getNodeForLocation",
+                x=int(round(x)),
+                y=int(round(y)),
+            )
+            if hit.get("backendNodeId") != backend_node_id:
+                raise BrowserHarnessError("browser_target_occluded")
             self._click_call(x, y)
         except BrowserHarnessError:
             raise
@@ -80,6 +116,59 @@ class BrowserHarnessClient:
             "x": x,
             "y": y,
         }
+
+    def reset_execution_fixture(self, page_url: str) -> None:
+        try:
+            self._load_runtime()
+            reset_execution_fixture(self._cdp_call, page_url)
+        except LivePageCaptureError as exc:
+            raise BrowserHarnessError(exc.error_code) from exc
+        except Exception as exc:
+            raise BrowserHarnessError("execution_fixture_navigation_failed") from exc
+
+    def capture_page_payload(self, *, expected_page_url: str) -> dict[str, Any]:
+        """Capture the live page through fixed CDP methods for the E2E harness."""
+
+        try:
+            self._load_runtime()
+            return capture_live_page_payload(
+                self._cdp_call,
+                expected_page_url=expected_page_url,
+            )
+        except LivePageCaptureError as exc:
+            raise BrowserHarnessError(exc.error_code) from exc
+        except Exception as exc:
+            raise BrowserHarnessError("browser_harness_capture_failed") from exc
+
+    @staticmethod
+    def _attributes(value: Any) -> dict[str, str]:
+        if not isinstance(value, (list, tuple)) or len(value) % 2:
+            raise BrowserHarnessError("browser_target_changed")
+        attributes: dict[str, str] = {}
+        for index in range(0, len(value), 2):
+            name = str(value[index]).strip()
+            if name:
+                attributes[name] = str(value[index + 1])
+        return attributes
+
+    @classmethod
+    def _frame_by_id(
+        cls,
+        value: Any,
+        frame_id: str,
+    ) -> Mapping[str, Any] | None:
+        if not isinstance(value, Mapping):
+            return None
+        frame = value.get("frame")
+        if isinstance(frame, Mapping) and str(frame.get("id", "")) == frame_id:
+            return frame
+        children = value.get("childFrames")
+        if isinstance(children, list):
+            for child in children:
+                matched = cls._frame_by_id(child, frame_id)
+                if matched is not None:
+                    return matched
+        return None
 
     def _load_runtime(self) -> None:
         if self._ready:

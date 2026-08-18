@@ -48,12 +48,15 @@ B 组已经实现：
 Manifest/SHA-256 完整性校验、覆盖率/公平性/安全门禁，以及 JSON、CSV、Markdown、
 HTML 报告生成流程。
 
-2026-08-17 `feature/browser-executor` 完整回归为 516 项通过、46 项跳过；Browser
-Harness 执行层及相邻安全链定向回归为 68 项通过。
+2026-08-17 `feature/browser-executor` 完整回归为 525 项通过、47 项跳过；Browser
+Harness 执行层及相邻安全链定向回归为 77 项通过、1 项真实浏览器 E2E 因环境未启用而跳过。
 这只证明开发环境自动化路径通过；真实 Chromium/CDP、真实 NCE/FEBS 页面和测试区
 内部 GLM5.1 endpoint 尚未现场验收。UI Operation DAG 始终为 `dry_run_only=true`、
 `safe_for_execution=false`。`feature/browser-executor` 已增加默认关闭的 click-only
-Browser Harness Runtime，但尚未完成真实 NCE 点击和动作后业务结果现场验收。
+Browser Harness Runtime，并增加真实 `execution-test.html`、基于本次 UI Graph 的
+Fixture Planner、点击前 live frame/identity/hit-test 复核和 AP 详情 OutcomeVerifier。
+当前开发机缺少 Python 3.12 与已连接 Chromium，真实浏览器 E2E 和真实 NCE 现场验收
+仍未完成。
 
 详细设计见 [docs/ui-graph-architecture.md](./docs/ui-graph-architecture.md)，完整 A/B
 测试手册见 [test.md](./test.md)。TextFlow 只作为“输入 → 中间文本图 → 推理器”的
@@ -179,6 +182,10 @@ kt6_backend/safe_dom_actions.py
 kt6_backend/execution/browser_harness_client.py
 kt6_backend/execution/browser_executor.py
 kt6_backend/execution/target_resolver.py
+kt6_backend/execution/live_page_capture.py
+kt6_backend/execution/fixture_planner.py
+kt6_backend/execution/verifier.py
+kt6_backend/execution_e2e_cli.py
 kt6_backend/runtime.py
 browser_sidecar/capture-ui-graph.mjs
 browser_extension/manifest.json
@@ -377,9 +384,10 @@ D:\yangzehui\FreeStyleCopilot\browser_extension
 7. 默认配置下 `execute(dry_run=false)` 仍返回 `live_execution_channel_unavailable`。
    功能分支只有显式配置 Browser Harness 后才接受实时 click，并额外要求本次
    `graph_id/target_node_id` 与 fresh capture 一致，CDP 节点具备 backend id，且其稳定
-   `#id`、owner、action 与 SafeDOMAction 绑定完全一致。点击后状态为
-   `executed_pending_verification`；所有 `safe_for_execution` 仍为 `false`，新的 KT6
-   capture 完成业务验证前不能记为成功。
+   `#id`、owner、action 与 SafeDOMAction 绑定完全一致。点击前 Browser Harness 还会
+   重新核对 live frame、节点属性和中心点 hit-test。点击后状态为
+   `executed_pending_verification`；调用新的结果验证接口并由 fresh KT6 capture 观察到
+   预期业务状态后才进入 `verified`。所有 `safe_for_execution` 仍为 `false`。
 
 接口：
 
@@ -387,9 +395,24 @@ D:\yangzehui\FreeStyleCopilot\browser_extension
 POST /api/dom-actions/prepare
 POST /api/dom-actions/preflight
 POST /api/dom-actions/execute
+POST /api/dom-actions/verify
 GET  /api/dom-actions/plans/{plan_id}
 GET  /api/dom-actions/audit
 ```
+
+`feature/browser-executor` 提供第一条可重复 DOM 闭环：
+
+```powershell
+python -m kt6_backend.execution_e2e_cli
+```
+
+该命令启动真实 `demo/execution-test.html`，通过 Browser Harness 固定 CDP 方法现场采集
+DOMSnapshot/AXTree，并让 PagePerception 生成 UI Graph。Fixture Intent 只有
+`goal=open_asset_details + asset_id=ap_001`，Fixture Planner 必须从本次真实图选择
+`target_node_id`；仓库没有 `mock_ui_graph.json`。click 后页面动态创建 AP_001 详情面板，
+再次 capture 后由 `AssetDetailOutcomeVerifier` 校验前后变化。三次 UI Graph 与结果写入
+`runtime_data/execution_e2e/<时间>/`。当前 Canvas 只作为真实测试页区域存在，Canvas
+Grounder 和 Canvas 点击未在本阶段同时开发。
 
 ### 3.4 三方案评测报告
 
@@ -794,7 +817,8 @@ python -m kt6_backend.topology_hybrid_cli `
 - 模型推断语义、未定位节点坐标和页面自报的业务 ID 不可直接用于 GUI 点击。
 - 只有 CV 或渲染器提供的可验证几何信息可以参与真实定位。
 - DOM 安全链路已完成资产解析、双重绑定、复核和令牌；默认仍是 dry-run，功能分支已
-  接入受控 Browser Harness click，但未完成真实 NCE 与动作后业务结果验收。
+  接入受控 Browser Harness click、live identity/hit-test 和 AP 详情结果验证，但尚未在
+  Python 3.12 + 真实 Chromium 环境运行仓库 E2E，也未完成真实 NCE 验收。
 - 当前 capture、权限、资产数据、业务语义、指标和设备动作仍有 Mock/测试边界。
 - 生产必须接入服务端身份授权、可信浏览器会话和点击前原子 live DOM 复核，或优先
   使用以 canonical asset_id 为参数的受控设备 API。
@@ -927,12 +951,14 @@ GLM 输出可以直接描述任意点击目标或产生循环依赖
    CDP、page_api、vision、text 来源标记、父子/owner 边和交互候选是否符合页面事实。
 3. 接入测试区内部 GLM5.1，记录 UI Graph 构建耗时、prompt/response 耗时、任务成功率、
    目标命中率、无效计划率和安全拒绝率；同时保留原方案的同口径数据。
-4. 在 `feature/browser-executor` 用可恢复任务验证“定位父容器 -> 子控件 -> 安全授权 ->
-   Browser Harness click -> 新 capture -> 结果验证”；点击回执不得直接算任务成功。
+4. 在 Python 3.12 + Browser Harness + 真实 Chromium 环境先运行
+   `python -m kt6_backend.execution_e2e_cli`，确认仓库测试页闭环；再用相同链路验证真实
+   NCE 可恢复任务。点击回执不得直接算任务成功。
 5. 规划结果需要接执行链时，只桥接已有 DOM 安全动作链，并继续要求强资产身份、稳定
    rebind、服务端权限、二次采集和 preflight；不要让 GLM 或 UI Graph 直接执行动作。
 6. 将 `JSONAssetInventoryAdapter` 替换成经过认证的 NCE/FEBS 资产查询，把权限、用户和
-   scope 换成服务端身份会话；完成确定性 OutcomeVerifier 与回滚前不要扩大 click 范围。
+   scope 换成服务端身份会话；为真实 NCE 动作增加对应 OutcomeVerifier 与回滚前不要
+   扩大 click 范围。
 7. 继续复测 `1.png`、`2.png`、`3.png` 并建立人工节点/链路真值和多图片黄金数据集，
    不再用“链接越多越好”判断准确率。
 8. 后续再处理超过 900 秒的离线任务预算和正式 events 恢复 CLI；不要让这些工作阻塞

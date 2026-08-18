@@ -99,7 +99,7 @@ python -m unittest discover -s tests
 | `eval-browser-use` | 456 tests OK，46 skipped |
 | `eval-ui-tars` | 457 tests OK，46 skipped |
 | `ui-graph-textflow-cdp` | 508 tests OK，46 skipped |
-| `feature/browser-executor` | 516 tests OK，46 skipped |
+| `feature/browser-executor` | 525 tests OK，47 skipped |
 | `br_omniParser` | 461 tests OK，46 skipped |
 
 测试数量会随公共同步增加，以当前命令最终 `OK` 为准。公共配置和报告定向测试：
@@ -224,6 +224,8 @@ browser-harness --doctor
 ```powershell
 python -m unittest `
   tests.test_browser_executor `
+  tests.test_outcome_verifier `
+  tests.test_execution_e2e `
   tests.test_safe_dom_actions `
   tests.test_safe_dom_action_plan `
   tests.test_dom_action_api `
@@ -231,6 +233,30 @@ python -m unittest `
   tests.test_ui_operation_graph `
   tests.test_app
 ```
+
+先跑仓库自带的真实页面 DOM 闭环。Fixture 只提供“打开 AP_001 详情”目标，不提供
+UI Graph、backend node id 或坐标；命令会启动测试页、现场采集、生成三次 UI Graph、
+执行 click 并验证新 capture：
+
+```powershell
+python -m kt6_backend.execution_e2e_cli
+```
+
+成功输出位于：
+
+```text
+runtime_data/execution_e2e/<UTC时间>/
+  initial-ui-graph.json
+  fresh-ui-graph.json
+  after-ui-graph.json
+  result.json
+```
+
+`result.json` 必须同时满足 `execution_status=executed_pending_verification`、
+`verification_status=verified`、`outcome_verified=true`。若希望把真实浏览器场景纳入
+unittest，可在根目录 `.env` 增加 `KT6_RUN_BROWSER_E2E=1`；未配置时只跳过这一项实机
+用例，其余契约测试照常运行。当前开发机只有 Python 3.14，尚未安装要求的 Python 3.12
+和 Browser Harness，因此本机只能完成自动化契约回归，实机闭环需在准备好的环境运行。
 
 实机只使用可恢复的“打开 AP_001 详情”类任务，步骤如下：
 
@@ -244,9 +270,11 @@ python -m unittest `
    capture、准确 asset/action 确认和所需权限取得一次性 token。
 5. 调用 `/api/dom-actions/execute`，传入 token、`dry_run=false`、该 fresh capture 的
    `graph_id` 和已经验证的 `target_node_id`。只有 CDP 节点的 `#id`、owner、action 与
-   DOM 绑定完全一致时才会交给 Browser Harness。
+   DOM 绑定完全一致，并且执行瞬间的 frame、DOM 属性和 hit-test 仍匹配时才会交给
+   Browser Harness。
 6. 预期 HTTP 202，状态为 `executed_pending_verification`。这只证明 click 已派发；
-   重新进行 KT6 capture，确认 AP_001 详情面板后，才能在业务评测中记为成功。
+   重新进行 KT6 capture，再调用 `POST /api/dom-actions/verify`；只有确定性验证返回
+   `verified` 后，才能在业务评测中记为成功。
 
 执行回执写入内存审计接口 `GET /api/dom-actions/audit`，计划进度通过
 `GET /api/dom-actions/plans/{plan_id}` 查看；Browser Harness 隔离工作区位于

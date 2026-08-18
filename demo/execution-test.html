@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>KT6 Execution Harness</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: Inter, "Microsoft YaHei", sans-serif;
+        background: #f5f7fb;
+        color: #172033;
+      }
+      body {
+        margin: 0;
+        padding: 32px;
+      }
+      main {
+        display: grid;
+        grid-template-columns: minmax(320px, 420px) minmax(540px, 1fr);
+        gap: 24px;
+        max-width: 1120px;
+        margin: 0 auto;
+      }
+      .panel {
+        background: white;
+        border: 1px solid #dce2ee;
+        border-radius: 14px;
+        padding: 22px;
+        box-shadow: 0 8px 28px rgba(32, 52, 86, 0.08);
+      }
+      .asset-card {
+        display: grid;
+        gap: 12px;
+        margin-top: 18px;
+        padding: 18px;
+        border: 1px solid #cfd8e8;
+        border-radius: 10px;
+      }
+      button {
+        width: max-content;
+        border: 0;
+        border-radius: 8px;
+        padding: 10px 18px;
+        background: #246bfd;
+        color: white;
+        cursor: pointer;
+        font-weight: 700;
+      }
+      #asset-detail-panel {
+        margin-top: 18px;
+        padding: 16px;
+        border-left: 4px solid #20a67a;
+        background: #ecfbf5;
+      }
+      canvas {
+        display: block;
+        width: 520px;
+        height: 420px;
+        max-width: 100%;
+        border: 1px solid #dce2ee;
+        border-radius: 10px;
+        background: #fbfcff;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="panel" aria-labelledby="dom-heading">
+        <h1 id="dom-heading">真实 DOM 执行场景</h1>
+        <p>固定目标：打开 AP_001 详情。</p>
+        <article
+          id="ap-001-card"
+          class="asset-card"
+          data-asset-id="ap_001"
+          data-business-id="ap_001"
+          data-management-ip="10.10.1.20"
+          data-serial-number="MOCK-AP-001"
+          data-site-id="site_1"
+          data-asset-version="1"
+        >
+          <strong>AP_001</strong>
+          <span>状态：Online</span>
+          <button
+            id="ap-001-details"
+            type="button"
+            data-owner-business-id="ap_001"
+            data-action-id="device.details"
+          >查看详情</button>
+        </article>
+        <div id="detail-panel-host" aria-live="polite"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="canvas-heading">
+        <h2 id="canvas-heading">真实 Canvas 拓扑区域</h2>
+        <p>Canvas Grounder 留到 DOM 闭环通过后接入。</p>
+        <canvas
+          id="topology-canvas"
+          width="520"
+          height="420"
+          role="img"
+          aria-label="AP_001、Switch_001 与 AP_002 拓扑"
+        ></canvas>
+        <div id="canvas-result-host" aria-live="polite"></div>
+      </section>
+    </main>
+
+    <script>
+      const detailButton = document.getElementById("ap-001-details");
+      const detailHost = document.getElementById("detail-panel-host");
+      const canvas = document.getElementById("topology-canvas");
+      const context = canvas.getContext("2d");
+      const canvasResultHost = document.getElementById("canvas-result-host");
+      let selectedAsset = "";
+
+      function drawNode(x, y, label, selected) {
+        context.beginPath();
+        context.arc(x, y, selected ? 18 : 14, 0, Math.PI * 2);
+        context.fillStyle = selected ? "#ff9f1a" : "#246bfd";
+        context.fill();
+        context.fillStyle = "#172033";
+        context.font = "600 15px sans-serif";
+        context.textAlign = "center";
+        context.fillText(label, x, y - 28);
+      }
+
+      function renderTopology() {
+        context.clearRect(0, 0, canvas.width, canvas.height);
+        context.strokeStyle = "#75839b";
+        context.lineWidth = 3;
+        context.beginPath();
+        context.moveTo(150, 150);
+        context.lineTo(300, 300);
+        context.lineTo(450, 150);
+        context.stroke();
+        drawNode(150, 150, "AP_001", selectedAsset === "ap_001");
+        drawNode(300, 300, "Switch_001", false);
+        drawNode(450, 150, "AP_002", false);
+      }
+
+      detailButton.addEventListener("click", () => {
+        if (document.getElementById("asset-detail-panel")) return;
+        const panel = document.createElement("section");
+        panel.id = "asset-detail-panel";
+        panel.dataset.testid = "asset-detail-panel";
+        panel.dataset.assetId = "ap_001";
+        panel.innerHTML =
+          "<strong>AP_001 详情</strong><p>管理 IP：10.10.1.20</p><p>状态：Online</p>";
+        detailHost.appendChild(panel);
+      });
+
+      canvas.addEventListener("click", (event) => {
+        const bounds = canvas.getBoundingClientRect();
+        const x = (event.clientX - bounds.left) * (canvas.width / bounds.width);
+        const y = (event.clientY - bounds.top) * (canvas.height / bounds.height);
+        if (Math.hypot(x - 150, y - 150) > 28) return;
+        selectedAsset = "ap_001";
+        renderTopology();
+        canvasResultHost.replaceChildren();
+        const result = document.createElement("div");
+        result.id = "canvas-selection-result";
+        result.dataset.selectedAssetId = "ap_001";
+        result.textContent = "已选择 AP_001";
+        canvasResultHost.appendChild(result);
+      });
+
+      renderTopology();
+    </script>
+  </body>
+</html>

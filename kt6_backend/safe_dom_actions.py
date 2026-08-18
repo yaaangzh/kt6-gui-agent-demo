@@ -19,6 +19,7 @@ from .execution.target_resolver import (
     TargetResolutionError,
     UIGraphTargetResolver,
 )
+from .execution.verifier import OutcomeVerifier
 
 
 class ActionCaptureProvider(Protocol):
@@ -61,6 +62,7 @@ class SafeDOMActionService:
         plan_ttl_seconds: float = 300.0,
         executor: BrowserExecutor | None = None,
         target_resolver: UIGraphTargetResolver | None = None,
+        outcome_verifier: OutcomeVerifier | None = None,
     ):
         self.binder = binder
         self.captures = captures
@@ -70,6 +72,7 @@ class SafeDOMActionService:
         self.plan_ttl_seconds = float(plan_ttl_seconds)
         self.executor = executor
         self.target_resolver = target_resolver
+        self.outcome_verifier = outcome_verifier
         self._plans: dict[str, dict[str, Any]] = {}
         self._tokens: dict[str, dict[str, Any]] = {}
         self._audit: list[dict[str, Any]] = []
@@ -546,6 +549,15 @@ class SafeDOMActionService:
                 return self._audit_result(
                     "failed", execution.error_code, claims, executed=False
                 )
+            with self._lock:
+                plan = self._plans.get(claims["plan_id"])
+                if plan is not None:
+                    plan["execution_context"] = {
+                        "before_capture_id": claims["capture_id"],
+                        "dispatched_at": self.clock(),
+                        "executor_id": self.executor.executor_id,
+                        "target_node_id": target.node_id,
+                    }
             self._update_operation_plan(
                 claims["plan_id"],
                 status="executed_pending_verification",
@@ -562,6 +574,7 @@ class SafeDOMActionService:
                 step_status="pending",
                 step_reason="fresh_kt6_capture_required",
             )
+
             return self._audit_result(
                 "executed_pending_verification",
                 "browser_action_dispatched_pending_outcome_verification",
@@ -600,6 +613,86 @@ class SafeDOMActionService:
             executed=False,
             target=copy.deepcopy(current["control"]),
         )
+
+    def verify_outcome(
+        self,
+        *,
+        plan_id: str,
+        current_capture_id: str,
+    ) -> dict[str, Any]:
+        with self._lock:
+            plan = copy.deepcopy(self._plans.get(plan_id))
+        if not plan:
+            return self._decision("rejected", "plan_not_found")
+        if plan["operation_plan"]["status"] != "executed_pending_verification":
+            return self._decision("rejected", "outcome_verification_not_pending")
+        context = plan.get("execution_context")
+        if not isinstance(context, dict):
+            return self._decision("rejected", "execution_context_missing")
+        if self.outcome_verifier is None:
+            return self._decision("rejected", "outcome_verifier_unavailable")
+        before_capture_id = compact_text(
+            context.get("before_capture_id"), 200
+        )
+        after_capture_id = compact_text(current_capture_id, 200)
+        if not after_capture_id or after_capture_id == before_capture_id:
+            return self._decision("rejected", "post_action_capture_required")
+        before = self.captures.get_action_snapshot(before_capture_id)
+        after = self.captures.get_action_snapshot(after_capture_id)
+        if not before or not after:
+            return self._decision("rejected", "post_action_capture_not_found")
+        coverage_reason = self._dom_coverage_reason(after)
+        if coverage_reason:
+            return self._decision("rejected", coverage_reason)
+        try:
+            captured_at = float(after.get("created_at", 0))
+            dispatched_at = float(context.get("dispatched_at", 0))
+        except (TypeError, ValueError, OverflowError):
+            return self._decision("rejected", "post_action_capture_invalid")
+        if captured_at < dispatched_at:
+            return self._decision("rejected", "post_action_capture_stale")
+
+        verified = self.outcome_verifier.verify(
+            action_id=plan["action_id"],
+            asset_id=plan["asset_id"],
+            before=before,
+            after=after,
+        )
+        status = "verified" if verified else "verify_failed"
+        reason = (
+            "outcome_verified_from_fresh_capture"
+            if verified
+            else "expected_outcome_not_observed"
+        )
+        self._update_operation_plan(
+            plan_id,
+            status=status,
+            reason=reason,
+            step_id="verify_outcome",
+            step_status="completed" if verified else "failed",
+            step_reason=reason,
+        )
+        event = {
+            "status": status,
+            "reason": reason,
+            "plan_id": plan_id,
+            "asset_id": plan["asset_id"],
+            "action_id": plan["action_id"],
+            "before_capture_id": before_capture_id,
+            "capture_id": after_capture_id,
+            "outcome_verified": verified,
+            "verifier_id": str(
+                getattr(self.outcome_verifier, "verifier_id", "outcome_verifier")
+            ),
+            "timestamp": self.clock(),
+            "safe_for_execution": False,
+        }
+        with self._lock:
+            self._audit.append(copy.deepcopy(event))
+        public_plan = self.get_plan(plan_id)
+        if "operation_plan" in public_plan:
+            event["operation_plan"] = public_plan["operation_plan"]
+        return event
 
     def audit_events(self) -> list[dict[str, Any]]:
         with self._lock:

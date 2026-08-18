@@ -19,6 +19,7 @@ from .env_config import load_project_env
 from .execution.browser_executor import HarnessBrowserExecutor
 from .execution.browser_harness_client import BrowserHarnessClient
 from .execution.target_resolver import UIGraphTargetResolver
+from .execution.verifier import AssetDetailOutcomeVerifier
 from .http_canvas_vision import HTTPTopologyVisionAdapter
 from .hybrid_canvas_vision import HybridCanvasVisionAdapter
 from .local_cv_canvas_vision import LocalCVTopologyVisionAdapter
@@ -407,6 +408,7 @@ def create_services(root: Path = ROOT) -> AppServices:
         page_perception,
         executor=browser_executor,
         target_resolver=browser_target_resolver,
+        outcome_verifier=AssetDetailOutcomeVerifier(),
     )
     ui_graph_planning = UIGraphPlanningService(page_perception, ui_graph_reasoner)
     tools = MockBusinessTools(
@@ -508,7 +510,12 @@ class KT6Handler(SimpleHTTPRequestHandler):
                         "supported_operations": ["click"],
                         "raw_cdp_exposed": False,
                         "javascript_exposed": False,
-                        "outcome_verification": "fresh_kt6_capture_required",
+                        "live_revalidation": [
+                            "frame",
+                            "dom_identity",
+                            "hit_test",
+                        ],
+                        "outcome_verification": "fresh_kt6_capture_deterministic",
                     },
                 },
             )
@@ -644,6 +651,7 @@ class KT6Handler(SimpleHTTPRequestHandler):
                 "/api/dom-actions/prepare",
                 "/api/dom-actions/preflight",
                 "/api/dom-actions/execute",
+                "/api/dom-actions/verify",
                 "/api/ui-operations/plan",
             }
             or (path.startswith("/api/tasks/") and path.endswith("/actions"))
@@ -777,6 +785,13 @@ class KT6Handler(SimpleHTTPRequestHandler):
             else:
                 status = 409
             self._json(status, result)
+            return
+        if path == "/api/dom-actions/verify":
+            result = services.safe_dom_actions.verify_outcome(
+                plan_id=str(payload.get("plan_id", "")),
+                current_capture_id=str(payload.get("page_capture_id", "")),
+            )
+            self._json(200 if result["status"] == "verified" else 409, result)
             return
         if path == "/api/tasks":
             query = payload.get("query", "").strip()

@@ -10,7 +10,11 @@ class BrowserTarget:
     node_id: str
     backend_node_id: int
     frame_id: str
+    frame_url: str
     page_url: str
+    dom_id: str
+    owner_business_id: str
+    action_id: str
 
 
 @dataclass(frozen=True)

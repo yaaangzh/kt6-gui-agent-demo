@@ -15,6 +15,10 @@ from kt6_backend.execution.browser_harness_client import (
     BrowserHarnessClient,
     BrowserHarnessError,
 )
+from kt6_backend.execution.fixture_planner import (
+    FixturePlanner,
+    FixturePlanningError,
+)
 from kt6_backend.execution.models import (
     BrowserAction,
     BrowserExecutionResult,
@@ -24,8 +28,11 @@ from kt6_backend.execution.target_resolver import (
     TargetResolutionError,
     UIGraphTargetResolver,
 )
+from kt6_backend.page_perception import PagePerceptionService, SQLitePageCaptureStore
+from kt6_backend.perception_runtime import PerceptionRuntime
 from kt6_backend.safe_dom_actions import SafeDOMActionService
 from tests.test_dom_action_binding import ASSETS, device_snapshot
+from tests.test_page_perception_cdp import cdp_envelope
 
 
 def action_snapshot(capture_id: str, created_at: float) -> dict:
@@ -56,6 +63,8 @@ def cdp_graph(capture_id: str = "capture-current") -> dict:
                 "source": {
                     "kind": "cdp",
                     "frame_id": "frame-main",
+                    "frame_url": "https://nce.example/devices",
+                    "parent_frame_id": "",
                     "backend_node_id": 387,
                 },
                 "attributes": {
@@ -77,6 +86,19 @@ def cdp_graph(capture_id: str = "capture-current") -> dict:
         "edges": [],
         "issues": [],
     }
+
+
+def browser_target() -> BrowserTarget:
+    return BrowserTarget(
+        node_id="cdp:shutdown",
+        backend_node_id=387,
+        frame_id="frame-main",
+        frame_url="https://nce.example/devices",
+        page_url="https://nce.example/devices",
+        dom_id="shutdown-ap-1",
+        owner_business_id="ap_001",
+        action_id="ap.shutdown",
+    )
 
 
 class GraphCaptureProvider:
@@ -111,6 +133,69 @@ class RecordingExecutor:
 
 
 class BrowserHarnessClientTest(unittest.TestCase):
+    def test_capture_builds_dom_and_cdp_payload_from_the_live_snapshot(self):
+        page_url = "https://example.test/topology?capture=1"
+        envelope = cdp_envelope(page_url)
+
+        def cdp(method, **_kwargs):
+            if method == "Page.getFrameTree":
+                return {
+                    "frameTree": {
+                        "frame": {"id": "main-frame", "url": page_url}
+                    }
+                }
+            if method == "DOMSnapshot.captureSnapshot":
+                return envelope["dom_snapshot"]
+            if method == "Accessibility.getFullAXTree":
+                return envelope["ax_tree"]
+            if method == "Browser.getVersion":
+                return {"product": "Chrome/Test", "protocolVersion": "1.3"}
+            if method == "Page.getLayoutMetrics":
+                return {
+                    "cssVisualViewport": {
+                        "clientWidth": 1280,
+                        "clientHeight": 720,
+                    }
+                }
+            self.fail(f"unexpected CDP method: {method}")
+
+        client = BrowserHarnessClient(
+            cdp_url="http://127.0.0.1:9222",
+            workspace=Path("runtime_data/browser-harness-test"),
+            cdp_call=cdp,
+            click_call=lambda _x, _y: None,
+        )
+        payload = client.capture_page_payload(expected_page_url=page_url)
+
+        self.assertEqual(payload["page"]["url"], page_url)
+        self.assertEqual(
+            payload["cdp_snapshot"]["schema_version"],
+            "kt6.cdp-page-snapshot.v1",
+        )
+        button = next(
+            item
+            for item in payload["dom"]["elements"]
+            if item["tag"] == "button"
+        )
+        self.assertEqual(button["frame_id"], "main-frame")
+        self.assertEqual(button["frame_url"], page_url)
+        self.assertTrue(button["actionable"])
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            perception = PagePerceptionService(
+                SQLitePageCaptureStore(root / "captures.sqlite3", root / "assets"),
+                PerceptionRuntime(),
+            )
+            capture = perception.ingest(payload)
+            graph = perception.get_ui_graph(capture["capture_id"])
+        graph_button = next(
+            node
+            for node in graph["nodes"]
+            if node.get("source", {}).get("backend_node_id") == 3
+        )
+        self.assertEqual(graph_button["source"]["frame_url"], page_url)
+        self.assertEqual(graph_button["source"]["parent_frame_id"], "")
+
     def test_click_uses_box_center_and_fixed_helper(self):
         calls: list[tuple] = []
 
@@ -119,7 +204,24 @@ class BrowserHarnessClientTest(unittest.TestCase):
             if method == "Page.getFrameTree":
                 return {
                     "frameTree": {
-                        "frame": {"url": "https://nce.example/devices"}
+                        "frame": {
+                            "id": "frame-main",
+                            "url": "https://nce.example/devices",
+                        }
+                    }
+                }
+            if method == "DOM.describeNode":
+                return {
+                    "node": {
+                        "backendNodeId": 387,
+                        "attributes": [
+                            "id",
+                            "shutdown-ap-1",
+                            "data-owner-business-id",
+                            "ap_001",
+                            "data-action-id",
+                            "ap.shutdown",
+                        ],
                     }
                 }
             if method == "Page.getLayoutMetrics":
@@ -129,6 +231,8 @@ class BrowserHarnessClientTest(unittest.TestCase):
                         "clientHeight": 720,
                     }
                 }
+            if method == "DOM.getNodeForLocation":
+                return {"backendNodeId": 387}
             return {
                 "model": {
                     "content": [10, 20, 30, 20, 30, 40, 10, 40]
@@ -143,19 +247,15 @@ class BrowserHarnessClientTest(unittest.TestCase):
             ensure_daemon=lambda: calls.append(("daemon",)),
         )
 
-        first = client.click_backend_node(
-            387, expected_page_url="https://nce.example/devices"
-        )
-        second = client.click_backend_node(
-            387, expected_page_url="https://nce.example/devices"
-        )
+        first = client.click_backend_node(browser_target())
+        second = client.click_backend_node(browser_target())
 
         self.assertEqual(first, {"backend_node_id": 387, "x": 20.0, "y": 30.0})
         self.assertEqual(second, first)
         self.assertEqual(calls.count(("daemon",)), 1)
         self.assertEqual(calls.count(("click", 20.0, 30.0)), 2)
         self.assertEqual(
-            calls[2],
+            calls[3],
             ("cdp", "DOM.getBoxModel", {"backendNodeId": 387}),
         )
 
@@ -166,24 +266,44 @@ class BrowserHarnessClientTest(unittest.TestCase):
                 workspace=Path("runtime_data/browser-harness-test"),
             )
 
+        def invalid_box_cdp(method, **_kwargs):
+            if method == "Page.getFrameTree":
+                return {
+                    "frameTree": {
+                        "frame": {
+                            "id": "frame-main",
+                            "url": "https://nce.example/devices",
+                        }
+                    }
+                }
+            if method == "DOM.describeNode":
+                return {
+                    "node": {
+                        "backendNodeId": 1,
+                        "attributes": [
+                            "id",
+                            "shutdown-ap-1",
+                            "data-owner-business-id",
+                            "ap_001",
+                            "data-action-id",
+                            "ap.shutdown",
+                        ],
+                    }
+                }
+            return {"model": {"content": [0, 0, 0, 0, 0, 0, 0, 0]}}
+
         client = BrowserHarnessClient(
             cdp_url="http://localhost:9222",
             workspace=Path("runtime_data/browser-harness-test"),
-            cdp_call=lambda method, **_kwargs: (
-                {
-                    "frameTree": {
-                        "frame": {"url": "https://nce.example/devices"}
-                    }
-                }
-                if method == "Page.getFrameTree"
-                else {"model": {"content": [0, 0, 0, 0, 0, 0, 0, 0]}}
-            ),
+            cdp_call=invalid_box_cdp,
             click_call=lambda _x, _y: None,
         )
         with self.assertRaises(BrowserHarnessError) as raised:
-            client.click_backend_node(
-                1, expected_page_url="https://nce.example/devices"
+            invalid_target = browser_target()
+            invalid_target = BrowserTarget(
+                **{**invalid_target.__dict__, "backend_node_id": 1}
             )
+            client.click_backend_node(invalid_target)
         self.assertEqual(raised.exception.error_code, "browser_target_not_visible")
 
     def test_click_rejects_a_different_active_page_before_box_lookup(self):
@@ -193,7 +313,10 @@ class BrowserHarnessClientTest(unittest.TestCase):
             calls.append(method)
             return {
                 "frameTree": {
-                    "frame": {"url": "https://nce.example/other"}
+                    "frame": {
+                        "id": "frame-main",
+                        "url": "https://nce.example/other",
+                    }
                 }
             }
 
@@ -205,15 +328,118 @@ class BrowserHarnessClientTest(unittest.TestCase):
         )
 
         with self.assertRaises(BrowserHarnessError) as raised:
-            client.click_backend_node(
-                387, expected_page_url="https://nce.example/devices"
-            )
+            client.click_backend_node(browser_target())
 
         self.assertEqual(raised.exception.error_code, "browser_page_changed")
         self.assertEqual(calls, ["Page.getFrameTree"])
 
+    def test_click_revalidates_live_attributes_and_hit_target(self):
+        def run(*, live_action="ap.shutdown", hit_backend_id=387):
+            calls: list[str] = []
+
+            def cdp(method, **_kwargs):
+                calls.append(method)
+                if method == "Page.getFrameTree":
+                    return {
+                        "frameTree": {
+                            "frame": {
+                                "id": "frame-main",
+                                "url": "https://nce.example/devices",
+                            }
+                        }
+                    }
+                if method == "DOM.describeNode":
+                    return {
+                        "node": {
+                            "backendNodeId": 387,
+                            "attributes": [
+                                "id",
+                                "shutdown-ap-1",
+                                "data-owner-business-id",
+                                "ap_001",
+                                "data-action-id",
+                                live_action,
+                            ],
+                        }
+                    }
+                if method == "DOM.getBoxModel":
+                    return {
+                        "model": {
+                            "content": [10, 20, 30, 20, 30, 40, 10, 40]
+                        }
+                    }
+                if method == "Page.getLayoutMetrics":
+                    return {
+                        "cssVisualViewport": {
+                            "clientWidth": 1280,
+                            "clientHeight": 720,
+                        }
+                    }
+                return {"backendNodeId": hit_backend_id}
+
+            client = BrowserHarnessClient(
+                cdp_url="http://127.0.0.1:9222",
+                workspace=Path("runtime_data/browser-harness-test"),
+                cdp_call=cdp,
+                click_call=lambda _x, _y: self.fail("click must not run"),
+            )
+            with self.assertRaises(BrowserHarnessError) as raised:
+                client.click_backend_node(browser_target())
+            return raised.exception.error_code, calls
+
+        changed_error, changed_calls = run(live_action="device.details")
+        self.assertEqual(changed_error, "browser_target_changed")
+        self.assertNotIn("DOM.getBoxModel", changed_calls)
+
+        occluded_error, occluded_calls = run(hit_backend_id=999)
+        self.assertEqual(occluded_error, "browser_target_occluded")
+        self.assertIn("DOM.getNodeForLocation", occluded_calls)
+
+    def test_click_rejects_live_frame_change(self):
+        client = BrowserHarnessClient(
+            cdp_url="http://127.0.0.1:9222",
+            workspace=Path("runtime_data/browser-harness-test"),
+            cdp_call=lambda _method, **_kwargs: {
+                "frameTree": {
+                    "frame": {
+                        "id": "another-frame",
+                        "url": "https://nce.example/devices",
+                    }
+                }
+            },
+            click_call=lambda _x, _y: self.fail("click must not run"),
+        )
+
+        with self.assertRaises(BrowserHarnessError) as raised:
+            client.click_backend_node(browser_target())
+
+        self.assertEqual(
+            raised.exception.error_code, "browser_target_frame_changed"
+        )
+
 
 class BrowserExecutionBoundaryTest(unittest.TestCase):
+    def test_fixture_planner_selects_the_current_real_graph_target(self):
+        graph = cdp_graph()
+        graph["nodes"][0]["action_id"] = "device.details"
+        graph["nodes"][0]["attributes"]["data-action-id"] = "device.details"
+        decision = FixturePlanner().plan(
+            graph,
+            {"goal": "open_asset_details", "asset_id": "AP_001"},
+        )
+
+        self.assertEqual(decision["target_node_id"], "cdp:shutdown")
+        self.assertEqual(decision["graph_id"], "uig:current")
+        self.assertNotIn("backend_node_id", decision)
+
+        graph["nodes"].append(copy.deepcopy(graph["nodes"][0]))
+        graph["nodes"][1]["id"] = "cdp:duplicate"
+        with self.assertRaisesRegex(FixturePlanningError, "ambiguous"):
+            FixturePlanner().plan(
+                graph,
+                {"goal": "open_asset_details", "asset_id": "ap_001"},
+            )
+
     def test_executor_only_accepts_click(self):
         client = BrowserHarnessClient(
             cdp_url="http://127.0.0.1:9222",
@@ -222,9 +448,7 @@ class BrowserExecutionBoundaryTest(unittest.TestCase):
             click_call=lambda _x, _y: None,
         )
         executor = HarnessBrowserExecutor(client)
-        target = BrowserTarget(
-            "node-1", 1, "frame-main", "https://nce.example/devices"
-        )
+        target = browser_target()
 
         result = executor.execute(BrowserAction("fill", target))
 
@@ -233,7 +457,12 @@ class BrowserExecutionBoundaryTest(unittest.TestCase):
 
     def test_resolver_requires_exact_cdp_dom_binding(self):
         resolver = UIGraphTargetResolver()
-        control = {"selector": "#shutdown-ap-1", "action_id": "ap.shutdown"}
+        control = {
+            "selector": "#shutdown-ap-1",
+            "action_id": "ap.shutdown",
+            "frame_id": "0",
+            "frame_url": "https://nce.example/devices",
+        }
 
         target = resolver.resolve(
             cdp_graph(),
@@ -263,6 +492,17 @@ class BrowserExecutionBoundaryTest(unittest.TestCase):
                         control=control,
                         asset_id="ap_001",
                     )
+
+        wrong_frame = dict(control, frame_id="7")
+        with self.assertRaisesRegex(TargetResolutionError, "frame_mismatch"):
+            resolver.resolve(
+                cdp_graph(),
+                expected_graph_id="uig:current",
+                capture_id="capture-current",
+                target_node_id="cdp:shutdown",
+                control=wrong_frame,
+                asset_id="ap_001",
+            )
 
     def test_safe_action_dispatches_only_after_token_and_fresh_graph_rebind(self):
         clock = lambda: 101.0

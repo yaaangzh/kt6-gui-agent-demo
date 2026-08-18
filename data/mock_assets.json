@@ -12,7 +12,10 @@
       "floor": "1F",
       "status": "online",
       "version": 1,
-      "allowed_origins": ["https://nce.example"]
+      "allowed_origins": [
+        "https://nce.example",
+        "http://127.0.0.1:8787"
+      ]
     },
     {
       "asset_id": "ap_003",

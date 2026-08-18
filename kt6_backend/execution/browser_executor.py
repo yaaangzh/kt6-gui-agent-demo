@@ -29,10 +29,7 @@ class HarnessBrowserExecutor:
         if action.op != "click":
             return BrowserExecutionResult(False, "unsupported_browser_action")
         try:
-            receipt = self.client.click_backend_node(
-                action.target.backend_node_id,
-                expected_page_url=action.target.page_url,
-            )
+            receipt = self.client.click_backend_node(action.target)
         except BrowserHarnessError as exc:
             return BrowserExecutionResult(False, exc.error_code)
         return BrowserExecutionResult(

@@ -6,8 +6,9 @@
 
 当前阶段结论：**KT6 核心架构、端到端 PoC、三种 Canvas 像素识别驱动，以及 B 组
 多源 UI Graph dry-run 规划已完成；`feature/browser-executor` 已接入默认关闭、仅 click
-的 Browser Harness 浏览器 Runtime；真实业务系统验收、动作后业务结果验证、真实图片
-准确率评测和真实设备下发尚未完成。**
+的 Browser Harness 浏览器 Runtime，并完成专用真实页面上的 Fixture Planner、点击前
+live revalidation 和动作后确定性验证代码；真实浏览器实机运行、真实业务系统验收、
+真实图片准确率评测和真实设备下发尚未完成。**
 
 供其他 Codex 或新开发环境接手时，请同时阅读
 [CODEX_HANDOFF.md](./CODEX_HANDOFF.md)；其中记录了当前工作目录、分阶段拓扑链路、
@@ -32,7 +33,7 @@ UI Graph 新方案保留在 `ui-graph-textflow-cdp`；Browser Harness 执行试�
 |---|---|---|
 | A 组 | `main` | 现有 DOM、Canvas、OpenCV/OCR 和安全动作链基线 |
 | B 组 | `ui-graph-textflow-cdp` | Playwright/CDP、多源 UI Graph、内部 GLM5.1 DAG 规划 |
-| 执行试验 | `feature/browser-executor` | SafeDOMAction + CDP 目标重绑定 + Browser Harness click |
+| 执行试验 | `feature/browser-executor` | 真实页面 → UI Graph → Fixture Planner → 安全 click → 新 capture → OutcomeVerifier |
 
 B 组自动化回归已通过，执行试验分支已经完成 click-only 代码接线；下一阶段是在测试区
 使用真实 Chromium/CDP、真实 NCE/FEBS 页面和内部 GLM5.1 endpoint 验证完整链路。
@@ -57,13 +58,13 @@ B 组自动化回归已通过，执行试验分支已经完成 click-only 代码
 | 多源 UI Graph | 汇合 DOM/CDP/page_api/vision/text，保留节点来源、父子/owner/action/semantic 边及交互候选 |
 | 内部 GLM 结构规划 | 测试区 GLM5.1 只提出 `locate/click/wait/verify` DAG；严格验证后仍为不可执行 dry-run |
 | 在线页面采集 | Chrome/Edge 扩展 v0.5.2，并行采集 DOM/ARIA 与 Canvas/SVG 可见区域截图；耗时识别由后端异步任务执行，弹窗重开可恢复进度 |
-| DOM 安全动作 | 权威资产解析、设备与控件双重绑定、六步计划、新鲜页面复核和一次性令牌；默认 dry-run，功能分支可把已授权 CDP 目标交给 Browser Harness click |
+| DOM 安全动作 | 权威资产解析、设备与控件双重绑定、六步计划、新鲜页面复核和一次性令牌；功能分支在 click 前再次核对 live frame/identity/hit-test，并用新 capture 确定性验证结果 |
 | 感知缓存 | Scene Graph 缓存、`scene_revision`、`HIT/MISS/INCREMENTAL` |
 | 拓扑变化检测 | 节点、位置、链路增删及链路语义属性变化检测；关键变化触发重规划 |
 | 运行记忆 | SQLite 持久化任务、事件、检查点、场景和业务处理结果 |
 | KT5 接入基础 | 感知拓扑与生成拓扑共用统一 Scene Graph 契约 |
 | 三方案评测报告 | 统一归档现有方案、Browser Use、UI-TARS 的截图、感知结果和操作轨迹，使用 Manifest/SHA-256 校验证据完整性，再检查覆盖率、公平性并生成 JSON/CSV/Markdown/HTML 报告 |
-| 自动化测试 | 2026-08-17 `feature/browser-executor` 全量 516 项通过、46 项跳过；各分支结果见 `test.md` |
+| 自动化测试 | 2026-08-17 `feature/browser-executor` 全量 525 项通过、47 项跳过；各分支结果见 `test.md` |
 
 ## 业务场景
 
@@ -564,6 +565,7 @@ POST /api/ui-operations/plan
 POST /api/dom-actions/prepare
 POST /api/dom-actions/preflight
 POST /api/dom-actions/execute
+POST /api/dom-actions/verify
 GET  /api/dom-actions/plans/{plan_id}
 GET  /api/dom-actions/audit
 
@@ -648,6 +650,10 @@ kt6_backend/
   dom_action_binding.py        设备主体和所属 DOM 动作控件的双重绑定
   safe_dom_actions.py          新鲜页面复核、一次性令牌、审计与可选 click 派发
   execution/                   固定动作模型、CDP 目标重绑定与 Browser Harness 适配
+  execution/live_page_capture.py 固定 CDP 方法的真实测试页采集适配
+  execution/fixture_planner.py 只基于本次真实 UI Graph 做确定性 Fixture 决策
+  execution/verifier.py        AP 详情面板确定性结果验证
+  execution_e2e_cli.py         真实页面 DOM 执行闭环的一键测试入口
   local_cv_canvas_vision.py    本地 RapidOCR/OpenCV 单图片视觉 Adapter
   codeagent_canvas_vision.py   本机 CodeAgent read-tool 视觉 Adapter
   http_canvas_vision.py        生产 HTTP 视觉 Adapter 与严格输入输出协议
@@ -687,7 +693,7 @@ tests/                         自动化测试
 python -m unittest discover -s tests
 ```
 
-2026-08-17 `feature/browser-executor` 分支全量结果为 516 项通过、46 项跳过；
+2026-08-17 `feature/browser-executor` 分支全量结果为 525 项通过、47 项跳过；
 后续仍以当前命令输出为准。跳过项来自开发环境缺少可选 RapidOCR/OpenCV 运行依赖，
 不是测试失败。完整的 A/B 测试步骤见 [test.md](./test.md)。覆盖范围包括
 异步 capture job、
@@ -754,6 +760,8 @@ Manifest、文件或这些语义绑定有缺失/改动时，该运行不能参�
 ```powershell
 python -m unittest `
   tests.test_browser_executor `
+  tests.test_outcome_verifier `
+  tests.test_execution_e2e `
   tests.test_page_capture_jobs `
   tests.test_page_perception `
   tests.test_browser_extension_assets `
@@ -764,6 +772,20 @@ python -m unittest `
   tests.test_hybrid_canvas_vision `
   tests.test_app
 ```
+
+`feature/browser-executor` 的第一条真实页面闭环固定为“打开 AP_001 详情”。完成
+Python 3.12、Browser Harness 和 `.env` 配置后执行：
+
+```powershell
+python -m kt6_backend.execution_e2e_cli
+```
+
+命令会启动专用 `demo/execution-test.html`，通过 Browser Harness/CDP 现场采集 DOM 与
+AXTree，经 PagePerception 生成 UI Graph；Fixture Planner 只从该图选择本次目标，不读取
+预制 node ID。安全链派发 click 后再次采集，只有 `AssetDetailOutcomeVerifier` 在新
+capture 中看到唯一的 AP_001 详情面板才返回 `success`。三次真实 UI Graph 和
+`result.json` 保存在 `runtime_data/execution_e2e/<时间>/`。当前开发机没有 Python 3.12
+和已连接 Chromium，因此实机 E2E 仍需在准备好的浏览器环境运行，不能用单元测试代替。
 
 当前仓库没有 FEBS/NCE 前端源码，因此扩展尚未嵌入目标系统；它只是外部采集桥梁。
 Browser Harness click 只有显式配置后才可用，设备 API 下发仍未接入；现场验收前应先在

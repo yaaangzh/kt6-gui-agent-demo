@@ -720,7 +720,17 @@ def _observation(
             item.get("selector"),
         )
     frame_id = _first_text(item.get("frame_id"), declared_source.get("frame_id"))
-    frame_url = _first_text(item.get("frame_url"), declared_source.get("frame_url"))
+    frame_record = (
+        _cdp_frame_record(spec.scene, frame_id)
+        if spec.modality == "cdp"
+        else {}
+    )
+    frame_url = _first_text(
+        item.get("frame_url"),
+        declared_source.get("frame_url"),
+        frame_record.get("document_url"),
+        frame_record.get("url"),
+    )
     document_id = _first_text(
         item.get("document_id"), declared_source.get("document_id")
     )
@@ -770,6 +780,9 @@ def _observation(
         source["document_id"] = document_id
     if frame_url:
         source["frame_url"] = frame_url
+    if spec.modality == "cdp":
+        parent_frame_id = _first_text(frame_record.get("parent_frame_id"))
+        source["parent_frame_id"] = parent_frame_id
     if declared_source.get("kind") and declared_source.get("kind") != spec.modality:
         source["declared_kind"] = _text(declared_source.get("kind"), 100)
     for key in ("backend_node_id", "canvas_id", "producer_id", "producer_version"):
@@ -849,6 +862,22 @@ def _observation(
         document_order=document_order,
         source_rank=source_rank,
     )
+
+
+def _cdp_frame_record(
+    scene: Mapping[str, Any],
+    frame_id: str,
+) -> Mapping[str, Any]:
+    frames = scene.get("frames")
+    if not frame_id or not isinstance(frames, list):
+        return {}
+    matches = [
+        frame
+        for frame in frames
+        if isinstance(frame, Mapping)
+        and _text(frame.get("frame_id"), 200) == frame_id
+    ]
+    return matches[0] if len(matches) == 1 else {}
 
 
 def _assign_observation_ids(observations: list[_Observation]) -> None:
