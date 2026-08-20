@@ -77,7 +77,7 @@ UI_GRAPH_REASONER_ALLOWED_HOSTS_ENV = "KT6_UI_GRAPH_REASONER_ALLOWED_HOSTS"
 UI_GRAPH_REASONER_TIMEOUT_ENV = "KT6_UI_GRAPH_REASONER_TIMEOUT_SECONDS"
 BROWSER_EXECUTION_DRIVER_ENV = "KT6_BROWSER_EXECUTION_DRIVER"
 BROWSER_HARNESS_CDP_URL_ENV = "KT6_BROWSER_HARNESS_CDP_URL"
-EXECUTION_ALLOWED_HOSTS_ENV = "KT6_EXECUTION_ALLOWED_HOSTS"
+EXECUTION_ALLOW_PRIVATE_NETWORKS_ENV = "KT6_EXECUTION_ALLOW_PRIVATE_NETWORKS"
 MODEL_API_PROVIDER_ENV = "KT6_MODEL_API_PROVIDER"
 MODEL_API_BASE_URL_ENV = "KT6_MODEL_API_BASE_URL"
 MODEL_API_KEY_ENV = "KT6_MODEL_API_KEY"
@@ -104,6 +104,18 @@ def _optional_env(name: str) -> str | None:
         return None
     value = value.strip()
     return value or None
+
+
+def _boolean_env(name: str, *, default: bool = False) -> bool:
+    value = _optional_env(name)
+    if value is None:
+        return default
+    normalized = value.casefold()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean")
 
 
 def _create_canvas_vision_from_env(root: Path = ROOT) -> CanvasVisionAdapter | None:
@@ -355,11 +367,11 @@ def _create_ui_graph_reasoner_from_env() -> HTTPUIGraphReasoner | None:
 
 
 def _create_execution_url_policy_from_env() -> ExecutionURLPolicy:
-    hosts_text = _optional_env(EXECUTION_ALLOWED_HOSTS_ENV)
-    hosts = tuple(
-        host.strip() for host in (hosts_text or "").split(",") if host.strip()
+    return ExecutionURLPolicy(
+        allow_private_networks=_boolean_env(
+            EXECUTION_ALLOW_PRIVATE_NETWORKS_ENV,
+        )
     )
-    return ExecutionURLPolicy(hosts)
 
 
 def _create_action_planner_from_env() -> ActionPlanner | None:
@@ -429,10 +441,6 @@ def _create_browser_executor_from_env(
     if cdp_url is None:
         raise ValueError(
             f"{BROWSER_HARNESS_CDP_URL_ENV} is required for browser_harness"
-        )
-    if not url_policy.allowed_hosts:
-        raise ValueError(
-            f"{EXECUTION_ALLOWED_HOSTS_ENV} is required for browser_harness"
         )
     client = BrowserHarnessClient(
         cdp_url=cdp_url,

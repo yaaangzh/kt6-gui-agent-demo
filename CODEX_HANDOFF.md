@@ -61,8 +61,19 @@ live box 重绑定。UIGraphOutcomeVerifier 用新 capture 的 UI Graph 验证
 element_visible、element_disappeared、element_selected、selected、text_present、
 url_changed 或 page_changed；失败按稳定类别（planner_failed、target_not_found、
 target_ambiguous、perception_failed、execution_failed、verify_failed、page_changed）归类。
-当前开发机缺少 Python 3.12 与已连接 Chromium，真实浏览器 E2E 和真实 NCE 现场验收
-仍未完成。
+2026-08-20 在本机隔离安装的 Python 3.12、Chrome CDP 与 Browser Harness 上补做了公开
+页面实机复核。通用 DOM/CDP Grounding 现支持没有 DOM `id`、但具有正整数 backend node
+id 与 fresh capture 语义/属性指纹的候选；0×0 可点击容器只能绑定唯一可见直接子节点，
+点击前固定 `DOM.describeNode` 深度重新验证授权/点击/hit-test 节点仍处于同一实时子树。
+链接会先校验 `href` 解析后的网络地址；`target=_blank` 再绑定本次新增且 opener/URL
+匹配的 page target 供后续 capture。公网 HTTP(S) 无需逐域名配置，本机、私网、链路
+本地和保留地址默认 fail closed；域名解析兼容代理 synthetic DNS，但直接输入其测试
+网段 IP 仍拒绝。`点击百度热搜`，以及无逐域名配置的 `example.com → IANA` 跨域点击，
+均由真实 click 与 `url_changed` Verifier 得到 `status=success`；相关 61 项回归通过、
+1 项按环境开关跳过。百度首次复核时配置 Planner 曾返回 HTTP 402，因此只验证了执行层；
+后续 `example.com` 复核已由正式 `/api/execution/plans` 调用 `deepseek-v4-pro` 生成语义
+计划并原样执行成功，完整 URL + 自然语言 Planner E2E 已通过。Planner 失败时仍不得用
+规则或假计划静默兜底。
 
 详细设计见 [docs/ui-graph-architecture.md](./docs/ui-graph-architecture.md)，完整 A/B
 测试手册见 [test.md](./test.md)。TextFlow 只作为“输入 → 中间文本图 → 推理器”的
@@ -421,7 +432,7 @@ GET  /api/dom-actions/audit
 `feature/browser-executor` 提供可重复的通用 GUI 多步骤闭环：
 
 ```powershell
-python -m kt6_backend.execution_e2e_cli --url <获批测试页> --task "打开 AP_001 的详情并进入拓扑"
+python -m kt6_backend.execution_e2e_cli --url https://example.com/ --task "点击 Learn more 进入说明页面"
 ```
 
 该命令先通过 URL Safety Policy 校验目标 URL，再感知真实页面并调用 LLM 生成语义

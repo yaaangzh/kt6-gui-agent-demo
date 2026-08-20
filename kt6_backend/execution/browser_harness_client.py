@@ -6,7 +6,7 @@ import os
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 from .live_page_capture import (
     LivePageCaptureError,
@@ -109,10 +109,14 @@ class BrowserHarnessClient:
         target: BrowserTarget,
     ) -> dict[str, Any]:
         backend_node_id = target.backend_node_id
+        click_backend_node_id = target.click_backend_node_id
         if (
             isinstance(backend_node_id, bool)
             or not isinstance(backend_node_id, int)
             or backend_node_id < 1
+            or isinstance(click_backend_node_id, bool)
+            or not isinstance(click_backend_node_id, int)
+            or click_backend_node_id < 1
         ):
             raise BrowserHarnessError("invalid_backend_node_id")
         try:
@@ -123,6 +127,19 @@ class BrowserHarnessClient:
         except Exception as exc:
             raise BrowserHarnessError("browser_harness_unavailable") from exc
         try:
+            expected_attributes = dict(target.expected_attributes)
+            destination_url = self._destination_url(
+                target.page_url,
+                expected_attributes,
+            )
+            popup_url = (
+                destination_url
+                if expected_attributes.get("target", "").casefold() == "_blank"
+                else ""
+            )
+            targets_before_click = (
+                self._page_target_ids() if popup_url else frozenset()
+            )
             page = self._cdp_call("Page.getFrameTree")
             current_url = str(
                 page.get("frameTree", {}).get("frame", {}).get("url", "")
@@ -135,7 +152,7 @@ class BrowserHarnessClient:
             described = self._cdp_call(
                 "DOM.describeNode",
                 backendNodeId=backend_node_id,
-                depth=0,
+                depth=3,
                 pierce=True,
             )
             live_node = described.get("node")
@@ -146,7 +163,11 @@ class BrowserHarnessClient:
                 raise BrowserHarnessError("browser_target_changed")
             attributes = self._attributes(live_node.get("attributes"))
             if (
-                attributes.get("id") != target.dom_id
+                (target.dom_id and attributes.get("id") != target.dom_id)
+                or any(
+                    attributes.get(name) != value
+                    for name, value in target.expected_attributes
+                )
                 or (
                     target.owner_business_id
                     and attributes.get("data-owner-business-id")
@@ -158,9 +179,21 @@ class BrowserHarnessClient:
                 )
             ):
                 raise BrowserHarnessError("browser_target_changed")
+            if not target.dom_id and not target.expected_attributes:
+                self._validate_accessible_identity(target)
+            authorized_backend_ids = self._described_subtree_backend_ids(
+                live_node,
+                root_backend_node_id=backend_node_id,
+            )
+            if click_backend_node_id not in authorized_backend_ids:
+                raise BrowserHarnessError("browser_target_changed")
+            click_backend_ids = self._described_subtree_backend_ids(
+                live_node,
+                root_backend_node_id=click_backend_node_id,
+            )
             response = self._cdp_call(
                 "DOM.getBoxModel",
-                backendNodeId=backend_node_id,
+                backendNodeId=click_backend_node_id,
             )
             quad = response.get("model", {}).get("content")
             x, y = self._quad_center(quad)
@@ -175,9 +208,15 @@ class BrowserHarnessClient:
                 x=int(round(x)),
                 y=int(round(y)),
             )
-            if hit.get("backendNodeId") != backend_node_id:
+            if hit.get("backendNodeId") not in click_backend_ids:
                 raise BrowserHarnessError("browser_target_occluded")
             self._click_call(x, y)
+            if popup_url:
+                self._bind_popup_target(
+                    before_target_ids=targets_before_click,
+                    opener_target_id=self._bound_target_id,
+                    expected_url=popup_url,
+                )
         except BrowserHarnessError:
             raise
         except Exception as exc:
@@ -187,6 +226,136 @@ class BrowserHarnessClient:
             "x": x,
             "y": y,
         }
+
+    def _destination_url(
+        self,
+        page_url: str,
+        attributes: Mapping[str, str],
+    ) -> str:
+        """Validate a live link destination before dispatching its click."""
+
+        href = attributes.get("href", "").strip()
+        if not href or href.startswith("#"):
+            return ""
+        try:
+            return self.url_policy.validate(urljoin(page_url, href))
+        except ExecutionURLPolicyError as exc:
+            raise BrowserHarnessError(exc.error_code) from exc
+
+    def _page_target_ids(self) -> frozenset[str]:
+        result = self._cdp_call("Target.getTargets")
+        targets = result.get("targetInfos")
+        if not isinstance(targets, list):
+            return frozenset()
+        return frozenset(
+            str(item.get("targetId", "")).strip()
+            for item in targets
+            if isinstance(item, Mapping)
+            and item.get("type") == "page"
+            and str(item.get("targetId", "")).strip()
+        )
+
+    def _bind_popup_target(
+        self,
+        *,
+        before_target_ids: frozenset[str],
+        opener_target_id: str,
+        expected_url: str,
+    ) -> None:
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            result = self._cdp_call("Target.getTargets")
+            targets = result.get("targetInfos")
+            matches = []
+            if isinstance(targets, list):
+                for item in targets:
+                    if not isinstance(item, Mapping) or item.get("type") != "page":
+                        continue
+                    target_id = str(item.get("targetId", "")).strip()
+                    raw_url = str(item.get("url", "")).strip()
+                    if not target_id or target_id in before_target_ids:
+                        continue
+                    if (
+                        str(item.get("openerId", "")).strip() != opener_target_id
+                        and raw_url != expected_url
+                    ):
+                        continue
+                    try:
+                        page_url = self.url_policy.validate(raw_url)
+                    except ExecutionURLPolicyError:
+                        continue
+                    matches.append((target_id, page_url))
+            if len(matches) > 1:
+                raise BrowserHarnessError("browser_target_ambiguous")
+            if len(matches) == 1:
+                target_id, page_url = matches[0]
+                self._switch_tab(target_id)
+                self._confirm_active_target(target_id)
+                self._bound_target_id = target_id
+                self._bound_page_url = page_url
+                return
+            time.sleep(0.05)
+
+    def _validate_accessible_identity(self, target: BrowserTarget) -> None:
+        if not target.accessible_name or not target.role:
+            raise BrowserHarnessError("browser_target_changed")
+        result = self._cdp_call(
+            "Accessibility.queryAXTree",
+            backendNodeId=target.backend_node_id,
+        )
+        matches = []
+        nodes = result.get("nodes")
+        if isinstance(nodes, list):
+            matches = [
+                node
+                for node in nodes
+                if isinstance(node, Mapping)
+                and node.get("backendDOMNodeId") == target.backend_node_id
+                and self._ax_value(node.get("name")) == target.accessible_name
+                and self._ax_value(node.get("role")).casefold() == target.role
+            ]
+        if len(matches) != 1:
+            raise BrowserHarnessError("browser_target_changed")
+
+    @classmethod
+    def _described_subtree_backend_ids(
+        cls,
+        node: Mapping[str, Any],
+        *,
+        root_backend_node_id: int,
+    ) -> frozenset[int]:
+        pending = [node]
+        root: Mapping[str, Any] | None = None
+        inspected = 0
+        while pending and inspected < 64:
+            current = pending.pop(0)
+            inspected += 1
+            if current.get("backendNodeId") == root_backend_node_id:
+                root = current
+                break
+            nested = current.get("children")
+            if isinstance(nested, list):
+                pending.extend(item for item in nested if isinstance(item, Mapping))
+        if root is None:
+            return frozenset()
+
+        result: set[int] = set()
+        pending = [root]
+        while pending and len(result) < 64:
+            current = pending.pop(0)
+            backend_id = current.get("backendNodeId")
+            if isinstance(backend_id, int) and not isinstance(backend_id, bool):
+                result.add(backend_id)
+            nested = current.get("children")
+            if isinstance(nested, list):
+                pending.extend(item for item in nested if isinstance(item, Mapping))
+        return frozenset(result)
+
+    @staticmethod
+    def _ax_value(value: Any) -> str:
+        if isinstance(value, Mapping):
+            return str(value.get("value", "")).strip()
+        return str(value or "").strip()
 
     def click_visual_target(self, target: VisualTarget) -> dict[str, Any]:
         backend_node_id = target.canvas_backend_node_id
@@ -319,9 +488,18 @@ class BrowserHarnessClient:
                 raise BrowserHarnessError("browser_harness_workspace_mismatch")
             self._cdp_call = helpers.cdp
             self._click_call = helpers.click_at_xy
-            self._switch_tab_call = helpers.switch_tab
+            self._switch_tab_call = lambda target_id: helpers.switch_tab(
+                target_id,
+                activate=True,
+            )
             self._current_tab_call = helpers.current_tab
-            self._new_tab_call = helpers.new_tab
+
+            def open_visible_tab(url: str) -> Any:
+                target_id = helpers.new_tab(url)
+                helpers.activate_tab(target_id)
+                return target_id
+
+            self._new_tab_call = open_visible_tab
             self._ensure_daemon = admin.ensure_daemon
         if self._ensure_daemon is not None:
             try:

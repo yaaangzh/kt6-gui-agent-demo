@@ -12,7 +12,11 @@ class BrowserTarget:
     frame_id: str
     frame_url: str
     page_url: str
+    click_backend_node_id: int
     dom_id: str
+    accessible_name: str
+    role: str
+    expected_attributes: tuple[tuple[str, str], ...]
     owner_business_id: str
     action_id: str
 

@@ -94,14 +94,46 @@ def browser_target() -> BrowserTarget:
         frame_id="frame-main",
         frame_url="https://nce.example/devices",
         page_url="https://nce.example/devices",
+        click_backend_node_id=387,
         dom_id="shutdown-ap-1",
+        accessible_name="关闭",
+        role="button",
+        expected_attributes=(),
         owner_business_id="ap_001",
         action_id="ap.shutdown",
     )
 
 
+def link_target(
+    *,
+    click_backend_node_id: int = 351,
+    target: str = "",
+) -> BrowserTarget:
+    href = "https://top.baidu.com/board?platform=pc&sa=pcindex_entry"
+    attributes = (("href", href),)
+    if target:
+        attributes += (("target", target),)
+    return BrowserTarget(
+        node_id="cdp:hot-search",
+        backend_node_id=351,
+        frame_id="frame-main",
+        frame_url="https://www.baidu.com/",
+        page_url="https://www.baidu.com/",
+        click_backend_node_id=click_backend_node_id,
+        dom_id="",
+        accessible_name="百度热搜",
+        role="link",
+        expected_attributes=attributes,
+        owner_business_id="",
+        action_id="",
+    )
+
+
 def execution_url_policy() -> ExecutionURLPolicy:
-    return ExecutionURLPolicy(["127.0.0.1", "example.test", "nce.example"])
+    return ExecutionURLPolicy(
+        allow_private_networks=True,
+        resolver=lambda _host: ("93.184.216.34",),
+    )
 
 
 class GraphCaptureProvider:
@@ -274,6 +306,206 @@ class BrowserHarnessClientTest(unittest.TestCase):
 
         self.assertEqual(receipt, {"backend_node_id": 900, "x": 166.0, "y": 188.0})
         self.assertEqual(clicks, [(166.0, 188.0)])
+
+    def test_click_uses_a_live_verified_visible_child_for_a_boxless_link(self):
+        page_url = "https://www.baidu.com/"
+        clicks = []
+        harness = SingleTargetHarness(page_url)
+
+        def cdp(method, **params):
+            if method == "Target.getTargets":
+                return {
+                    "targetInfos": [
+                        {"targetId": "target-1", "type": "page", "url": page_url}
+                    ]
+                }
+            if method == "Page.getFrameTree":
+                return {
+                    "frameTree": {
+                        "frame": {"id": "frame-main", "url": page_url}
+                    }
+                }
+            if method == "DOM.describeNode":
+                return {
+                    "node": {
+                        "backendNodeId": 351,
+                        "attributes": [
+                            "href",
+                            "https://top.baidu.com/board?platform=pc&sa=pcindex_entry",
+                        ],
+                        "children": [
+                            {
+                                "backendNodeId": 352,
+                                "children": [{"backendNodeId": 353}],
+                            }
+                        ],
+                    }
+                }
+            if method == "DOM.getBoxModel":
+                self.assertEqual(params["backendNodeId"], 352)
+                return {
+                    "model": {
+                        "content": [245, 549, 314, 549, 314, 573, 245, 573]
+                    }
+                }
+            if method == "Page.getLayoutMetrics":
+                return {
+                    "cssVisualViewport": {
+                        "clientWidth": 1280,
+                        "clientHeight": 720,
+                    }
+                }
+            if method == "DOM.getNodeForLocation":
+                return {"backendNodeId": 353}
+            self.fail(f"unexpected CDP method: {method}")
+
+        client = BrowserHarnessClient(
+            cdp_url="http://127.0.0.1:9222",
+            workspace=Path("runtime_data/browser-harness-test"),
+            url_policy=ExecutionURLPolicy(
+                resolver=lambda _host: ("93.184.216.34",)
+            ),
+            cdp_call=cdp,
+            click_call=lambda x, y: clicks.append((x, y)),
+            switch_tab_call=harness.switch_tab,
+            current_tab_call=harness.current_tab,
+        )
+
+        client.bind_page_target(page_url)
+        receipt = client.click_backend_node(
+            link_target(click_backend_node_id=352)
+        )
+
+        self.assertEqual(
+            receipt,
+            {"backend_node_id": 351, "x": 279.5, "y": 561.0},
+        )
+        self.assertEqual(clicks, [(279.5, 561.0)])
+
+    def test_click_binds_a_new_allowed_popup_target_for_verification(self):
+        page_url = "https://www.baidu.com/"
+        popup_url = "https://top.baidu.com/board?platform=pc&sa=pcindex_entry"
+        harness = TabHarness(
+            [{"targetId": "target-1", "type": "page", "url": page_url}]
+        )
+
+        def cdp(method, **_params):
+            if method == "Target.getTargets":
+                return harness.targets_payload()
+            if method == "Page.getFrameTree":
+                return {
+                    "frameTree": {
+                        "frame": {"id": "frame-main", "url": page_url}
+                    }
+                }
+            if method == "DOM.describeNode":
+                return {
+                    "node": {
+                        "backendNodeId": 351,
+                        "attributes": [
+                            "href",
+                            popup_url,
+                            "target",
+                            "_blank",
+                        ],
+                    }
+                }
+            if method == "DOM.getBoxModel":
+                return {
+                    "model": {
+                        "content": [245, 549, 314, 549, 314, 573, 245, 573]
+                    }
+                }
+            if method == "Page.getLayoutMetrics":
+                return {
+                    "cssVisualViewport": {
+                        "clientWidth": 1280,
+                        "clientHeight": 720,
+                    }
+                }
+            if method == "DOM.getNodeForLocation":
+                return {"backendNodeId": 351}
+            self.fail(f"unexpected CDP method: {method}")
+
+        def click(_x, _y):
+            harness.targets["target-popup"] = {
+                "targetId": "target-popup",
+                "type": "page",
+                "url": popup_url,
+                "openerId": "target-1",
+            }
+
+        client = BrowserHarnessClient(
+            cdp_url="http://127.0.0.1:9222",
+            workspace=Path("runtime_data/browser-harness-test"),
+            url_policy=ExecutionURLPolicy(
+                resolver=lambda _host: ("93.184.216.34",)
+            ),
+            cdp_call=cdp,
+            click_call=click,
+            switch_tab_call=harness.switch_tab,
+            current_tab_call=harness.current_tab,
+        )
+
+        client.bind_page_target(page_url)
+        client.click_backend_node(link_target(target="_blank"))
+
+        self.assertEqual(harness.active_target_id, "target-popup")
+        self.assertEqual(harness.switch_calls, ["target-1", "target-popup"])
+
+    def test_click_rejects_private_link_destination_before_dispatch(self):
+        page_url = "https://www.baidu.com/"
+        clicks = []
+        harness = SingleTargetHarness(page_url)
+
+        def cdp(method, **_params):
+            if method == "Target.getTargets":
+                return {
+                    "targetInfos": [
+                        {"targetId": "target-1", "type": "page", "url": page_url}
+                    ]
+                }
+            if method == "Page.getFrameTree":
+                return {
+                    "frameTree": {
+                        "frame": {"id": "frame-main", "url": page_url}
+                    }
+                }
+            self.fail(f"unexpected CDP method: {method}")
+
+        target = BrowserTarget(
+            node_id="cdp:private-link",
+            backend_node_id=351,
+            frame_id="frame-main",
+            frame_url=page_url,
+            page_url=page_url,
+            click_backend_node_id=351,
+            dom_id="",
+            accessible_name="Private",
+            role="link",
+            expected_attributes=(("href", "http://127.0.0.1/admin"),),
+            owner_business_id="",
+            action_id="",
+        )
+        client = BrowserHarnessClient(
+            cdp_url="http://127.0.0.1:9222",
+            workspace=Path("runtime_data/browser-harness-test"),
+            url_policy=ExecutionURLPolicy(
+                resolver=lambda _host: ("93.184.216.34",)
+            ),
+            cdp_call=cdp,
+            click_call=lambda x, y: clicks.append((x, y)),
+            switch_tab_call=harness.switch_tab,
+            current_tab_call=harness.current_tab,
+        )
+
+        client.bind_page_target(page_url)
+        with self.assertRaisesRegex(
+            BrowserHarnessError,
+            "execution_url_network_blocked",
+        ):
+            client.click_backend_node(target)
+        self.assertEqual(clicks, [])
 
     def test_capture_builds_dom_and_cdp_payload_from_the_live_snapshot(self):
         page_url = "https://example.test/topology?capture=1"
@@ -491,7 +723,11 @@ class BrowserHarnessClientTest(unittest.TestCase):
         with self.assertRaises(BrowserHarnessError) as raised:
             invalid_target = browser_target()
             invalid_target = BrowserTarget(
-                **{**invalid_target.__dict__, "backend_node_id": 1}
+                **{
+                    **invalid_target.__dict__,
+                    "backend_node_id": 1,
+                    "click_backend_node_id": 1,
+                }
             )
             client.click_backend_node(invalid_target)
         self.assertEqual(raised.exception.error_code, "browser_target_not_visible")
@@ -969,6 +1205,74 @@ class BrowserExecutionBoundaryTest(unittest.TestCase):
         with self.assertRaisesRegex(GroundingError, "ambiguous"):
             DOMGrounder().resolve({"query": "关闭"}, graph)
 
+    def test_dom_grounder_accepts_a_boxless_link_with_one_visible_dom_child(self):
+        graph = cdp_graph()
+        link = graph["nodes"][0]
+        link.update(
+            {
+                "id": "cdp:hot-search",
+                "role": "link",
+                "name": "百度热搜",
+                "bbox": [314.0, 549.0, 0.0, 0.0],
+                "owner_business_id": "",
+                "action_id": "",
+            }
+        )
+        link["source"]["backend_node_id"] = 351
+        link["attributes"] = {
+            "href": "https://top.baidu.com/board?platform=pc&sa=pcindex_entry",
+            "target": "_blank",
+        }
+        graph["nodes"].append(
+            {
+                "id": "cdp:hot-search-label",
+                "kind": "element",
+                "role": "generic",
+                "name": "百度热搜",
+                "bbox": [245.0, 549.0, 69.0, 24.0],
+                "source": {
+                    "kind": "cdp",
+                    "frame_id": "frame-main",
+                    "frame_url": "https://nce.example/devices",
+                    "backend_node_id": 352,
+                },
+                "attributes": {},
+                "disabled": False,
+                "actionable": False,
+                "can_click_now": False,
+                "safe_for_execution": False,
+                "interaction": {
+                    "status": "analysis_only",
+                    "candidate": False,
+                    "authorized": False,
+                },
+            }
+        )
+        graph["edges"].append(
+            {
+                "source": "cdp:hot-search",
+                "target": "cdp:hot-search-label",
+                "type": "parent_of",
+                "relation_type": "dom_child",
+            }
+        )
+
+        decision = DOMGrounder().resolve(
+            {"query": "百度热搜", "role": "link"},
+            graph,
+        )
+
+        self.assertEqual(decision.backend_node_id, 351)
+        self.assertEqual(decision.click_backend_node_id, 352)
+        self.assertEqual(decision.dom_id, "")
+        self.assertIn(
+            (
+                "href",
+                "https://top.baidu.com/board?platform=pc&sa=pcindex_entry",
+            ),
+            decision.expected_attributes,
+        )
+
     def test_executor_only_accepts_click(self):
         client = BrowserHarnessClient(
             cdp_url="http://127.0.0.1:9222",
@@ -1131,7 +1435,6 @@ class BrowserExecutionBoundaryTest(unittest.TestCase):
         environment = {
             "KT6_BROWSER_EXECUTION_DRIVER": "browser_harness",
             "KT6_BROWSER_HARNESS_CDP_URL": "http://127.0.0.1:9222",
-            "KT6_EXECUTION_ALLOWED_HOSTS": "127.0.0.1",
         }
         with patch.dict(os.environ, environment, clear=True), tempfile.TemporaryDirectory() as temp_dir:
             services = app.create_services(Path(temp_dir))
@@ -1142,6 +1445,10 @@ class BrowserExecutionBoundaryTest(unittest.TestCase):
             "browser_harness",
         )
         self.assertTrue(services.execution_scenarios.health()["configured"])
+        self.assertEqual(
+            services.execution_scenarios.health()["url_policy"]["network_scope"],
+            "public_only",
+        )
 
         with patch.dict(
             os.environ,
@@ -1151,6 +1458,28 @@ class BrowserExecutionBoundaryTest(unittest.TestCase):
             ValueError, "KT6_BROWSER_EXECUTION_DRIVER"
         ):
             app.create_services(Path(temp_dir))
+
+    def test_execution_private_network_flag_is_one_global_test_mode(self):
+        with patch.dict(
+            os.environ,
+            {"KT6_EXECUTION_ALLOW_PRIVATE_NETWORKS": "1"},
+            clear=True,
+        ):
+            policy = app._create_execution_url_policy_from_env()
+
+        self.assertTrue(policy.allow_private_networks)
+        self.assertEqual(policy.health()["network_scope"], "public_and_private_test")
+        self.assertEqual(
+            policy.validate("http://127.0.0.1:8787/"),
+            "http://127.0.0.1:8787/",
+        )
+
+        with patch.dict(
+            os.environ,
+            {"KT6_EXECUTION_ALLOW_PRIVATE_NETWORKS": "sometimes"},
+            clear=True,
+        ), self.assertRaisesRegex(ValueError, "must be a boolean"):
+            app._create_execution_url_policy_from_env()
 
 
 if __name__ == "__main__":

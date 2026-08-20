@@ -656,12 +656,12 @@ kt6_backend/
   execution/semantic_target.py 语义目标与 UI Graph 节点的确定性匹配
   execution/grounding.py       DOM/CDP 优先、Vision 兜底的现场 Grounding
   execution/scenario_runner.py 每步 fresh capture 的通用 click/verify/wait 执行循环
-  execution/url_policy.py      导航目标的精确 host 白名单
+  execution/url_policy.py      公网默认开放、私网默认阻断的导航安全策略
   execution/error_categories.py 稳定失败归类（planner/target/perception/execution/verify/page_changed）
   execution/action_guard.py    一次性点击令牌与目标指纹复核
   execution/verifier_registry.py 按预期类型选择确定性 Verifier
   execution/live_page_capture.py 固定 CDP 方法的真实页面与 Canvas 像素采集
-  execution_e2e_cli.py         任意获批 URL + 自然语言任务的一键闭环入口
+  execution_e2e_cli.py         任意公网 URL + 自然语言任务的一键闭环入口
   local_cv_canvas_vision.py    本地 RapidOCR/OpenCV 单图片视觉 Adapter
   codeagent_canvas_vision.py   本机 CodeAgent read-tool 视觉 Adapter
   http_canvas_vision.py        生产 HTTP 视觉 Adapter 与严格输入输出协议
@@ -782,12 +782,12 @@ python -m unittest `
   tests.test_app
 ```
 
-`feature/browser-executor` 的真实页面闭环是“任意获批 URL + 自然语言任务 → 统一页面感知
+`feature/browser-executor` 的真实页面闭环是“任意公网 URL + 自然语言任务 → 统一页面感知
 → LLM 生成 `kt6.action-plan.v1` → Grounding → 受控 click → 重新感知 → Verify”。完成
 Python 3.12、Browser Harness 和 `.env` 配置后执行：
 
 ```powershell
-python -m kt6_backend.execution_e2e_cli --url <获批测试页> --task "打开 AP_001 的详情并进入拓扑"
+python -m kt6_backend.execution_e2e_cli --url https://example.com/ --task "点击 Learn more 进入说明页面"
 ```
 
 命令先通过 URL Safety Policy 校验目标 URL，再感知真实页面并调用规划模型生成语义计划，
@@ -796,8 +796,28 @@ DOM 目标走 DOM/CDP Grounding，缺失时回退 Vision Grounding，Vision 坐�
 像素识别和实时 Canvas box 共同计算。每个动作后由新 capture 的确定性 Verifier 检查
 结果。Action Plan、逐次 UI Graph 和 `result.json` 保存在
 `runtime_data/execution_scenarios/<run_id>/`。也可打开 `execution-runner.html` 填入 URL 与
-任务，先查看语义计划再确认执行。当前开发机没有 Python 3.12
-和已连接 Chromium，因此实机 E2E 仍需在准备好的浏览器环境运行，不能用单元测试代替。
+任务，先查看语义计划再确认执行。
+
+通用 CDP Grounding 不要求页面元素必须声明 DOM `id`：正整数 backend node id 仍需与
+fresh capture 的角色、名称和有界属性指纹绑定。若可点击链接本身因 `display: contents`
+等布局得到 0×0 box，只允许选择图中唯一、可见的直接 DOM 子节点，并在点击瞬间用固定
+`DOM.describeNode` 重新确认授权节点、点击节点和实际 hit-test 节点属于同一实时子树。
+链接会在点击前解析并校验 `href` 的网络地址；`target=_blank` 点击后只绑定本次新增且
+opener/URL 匹配的 page target，再由新 capture 验证 URL 或页面变化。公网 HTTP(S)
+目标无需逐域名配置，并兼容代理 synthetic DNS；本机、私网、链路本地和保留地址默认
+fail closed，直接输入 synthetic DNS 测试网段 IP 也不会被当成公网 URL。
+Browser Harness 会激活本次绑定的目标标签页，保证连续截图和点击都针对可见页面。
+
+2026-08-20 本机使用隔离的 Python 3.12、Chrome CDP 和 Browser Harness 对百度
+公开页面完成一次真实 `点击百度热搜`：无 `id` 链接经 DOM/CDP Grounding 点击，新增
+`top.baidu.com` 标签页完成 `url_changed` 验证，结果为 `status=success`。该次运行的
+配置模型接口返回 HTTP 402，因此使用的是经过同一 ActionPlanValidator 校验的语义计划；
+它只用于先验证真实感知、点击和结果核验链。随后移除执行目标的逐域名白名单，正式
+`/api/execution/plans` 接口接收 `https://example.com/` 与自然语言“点击 Learn more
+进入说明页面”，由配置的 `deepseek-v4-pro` 生成计划并原样确认执行，跨域进入
+`https://www.iana.org/help/example-domains`；3 次 capture 与 `url_changed` 验证均成功。
+这次完整验证了“任意公网 URL + 自然语言任务 → 真实 Planner → 真实浏览器执行”，并证明
+执行链并非对百度域名写死。Planner 失败时仍必须明确返回错误，不能静默换成规则或假计划。
 
 当前仓库没有 FEBS/NCE 前端源码，因此扩展尚未嵌入目标系统；它只是外部采集桥梁。
 Browser Harness click 只有显式配置后才可用，设备 API 下发仍未接入；现场验收前应先在

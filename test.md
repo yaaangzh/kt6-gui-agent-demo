@@ -80,7 +80,8 @@ KT6_UI_TARS_API_ALLOWED_HOSTS=<获批服务精确主机名>
 ```dotenv
 KT6_BROWSER_EXECUTION_DRIVER=browser_harness
 KT6_BROWSER_HARNESS_CDP_URL=http://127.0.0.1:9222
-KT6_EXECUTION_ALLOWED_HOSTS=127.0.0.1,<获批测试主机>
+# 公网 HTTP(S) 无需逐域名配置；仅测试本机/RFC1918 页面时设为 1
+KT6_EXECUTION_ALLOW_PRIVATE_NETWORKS=0
 KT6_MODEL_API_PROVIDER=<供应商或内网网关标识>
 KT6_MODEL_API_BASE_URL=https://<获批网关>/v1
 KT6_MODEL_API_KEY=<本机密钥>
@@ -89,9 +90,12 @@ KT6_MODEL_API_ALLOWED_HOSTS=<获批网关精确主机名>
 ```
 
 规划模型复用 `KT6_MODEL_API_*`；Canvas 感知复用 `KT6_VISION_DRIVER`（http、
-codeagent_cli、local_cv_ocr 或 hybrid），没有 `execution_fixture` 专用识别器。目标 URL
-必须精确命中 `KT6_EXECUTION_ALLOWED_HOSTS` 白名单，否则导航 fail closed。未设置
-Browser Harness 两个变量时，`dry_run=false` 继续 fail closed。CDP 地址只允许 loopback。
+codeagent_cli、local_cv_ocr 或 hybrid），没有 `execution_fixture` 专用识别器。公网
+HTTP(S) 目标无需逐域名配置；每次初始导航、当前页面、重定向和新标签绑定都会重新做
+DNS/网络范围校验，并兼容代理常用的 `198.18.0.0/15` synthetic DNS（仅域名解析结果，
+直接输入该网段 IP 仍拒绝）。本机和 RFC1918 页面默认拒绝，仅隔离测试时可设置
+`KT6_EXECUTION_ALLOW_PRIVATE_NETWORKS=1`；链路本地和保留地址始终拒绝。未设置 Browser
+Harness 两个变量时，`dry_run=false` 继续 fail closed。CDP 地址只允许 loopback。
 
 ## 4. 公共自动化回归
 
@@ -244,12 +248,12 @@ python -m unittest `
   tests.test_app
 ```
 
-实机闭环是“任意获批 URL + 自然语言任务 → 统一页面感知 → LLM 生成 `kt6.action-plan.v1`
+实机闭环是“任意公网 URL + 自然语言任务 → 统一页面感知 → LLM 生成 `kt6.action-plan.v1`
 → 实时 Grounding → 受控 click → 重新感知 → 确定性 Verify”。计划中没有 UI Graph、
 backend node id、selector 或坐标，也不再依赖固定测试页或规则解析器：
 
 ```powershell
-python -m kt6_backend.execution_e2e_cli --url http://127.0.0.1:8787/execution-test.html --task "打开 AP_001 的详情并进入拓扑"
+python -m kt6_backend.execution_e2e_cli --url https://example.com/ --task "点击 Learn more 进入说明页面"
 ```
 
 成功输出位于：
@@ -274,7 +278,7 @@ http://127.0.0.1:8787/execution-runner.html
 ```
 
 Runner 页面与受控 Chromium Target Tab 必须是两个独立页面；不要让 Browser Harness
-把控制台自身当作目标标签页。在输入框填入任意获批 URL 和自然语言任务，先点“生成计划”
+把控制台自身当作目标标签页。在输入框填入任意公网 URL 和自然语言任务，先点“生成计划”
 检查语义步骤（无坐标、selector、backend node id），再点“确认并开始执行”。
 
 实机步骤如下：
@@ -286,6 +290,10 @@ Runner 页面与受控 Chromium Target Tab 必须是两个独立页面；不要�
    `GET /api/execution/runs/{run_id}`，避免阻塞页面。
 4. 每个 click 执行“capture → Grounding（DOM/CDP 优先，缺失时回退 Vision）→
    fresh capture → live frame/identity/hit-test → click”；随后用 verify/wait 再次感知。
+   无 DOM `id` 的 CDP 候选必须有正整数 backend node id 和语义/属性指纹；0×0 可点击
+   容器只能落到唯一可见直接子节点，live hit-test 命中也必须仍在同一授权 DOM 子树。
+   链接还需在点击前校验解析后的目标 `href`；`target=_blank` 把本次新增且 URL/opener
+   匹配的 popup target 绑定为后续 capture 的页面。
 5. Vision 目标使用本次截图识别的 bbox 比例，点击前重新读取 live Canvas box 并
    做 hit-test，不复用第一步坐标。
 6. 最后新 capture 必须满足对应 Verifier（element_visible、element_disappeared、
@@ -293,6 +301,15 @@ Runner 页面与受控 Chromium Target Tab 必须是两个独立页面；不要�
    SUCCESS。失败会按 planner_failed / target_not_found / target_ambiguous /
    perception_failed / execution_failed / verify_failed / page_changed 归类，便于统计
    KT6 GUI Agent 具体卡在哪个环节。
+
+2026-08-20 本机实机复核：严格语义计划 `点击百度热搜 → verify url_changed` 运行成功；
+移除执行目标逐域名白名单后，`example.com → 点击 Learn more → IANA` 的跨域实机运行也
+成功。Action Plan、三次 capture 和 `result.json` 均写入忽略提交的
+`runtime_data/execution_scenarios/<run_id>/`。相关回归 61 项通过、1 项按真实浏览器环境
+开关跳过。百度首次复核时配置 Planner 曾返回 HTTP 402，所以该次只证明执行与验证链；
+后续 `example.com` 复核已由正式 `/api/execution/plans` 调用 `deepseek-v4-pro` 生成计划，
+再把返回计划原样提交 `/api/execution/runs` 并得到 `status=success`，完整 URL + 自然语言
+Planner E2E 已通过。
 
 目标 Tab 真绑定（`BrowserHarnessClient.open_or_bind_target`）：
 

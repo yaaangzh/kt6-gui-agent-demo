@@ -44,6 +44,11 @@ from kt6_backend.execution.verifier_registry import OutcomeVerifierRegistry
 
 URL = "https://nce.test/devices"
 TASK = "打开 AP_001 详情"
+PUBLIC_TEST_IP = "93.184.216.34"
+
+
+def public_url_policy() -> ExecutionURLPolicy:
+    return ExecutionURLPolicy(resolver=lambda _host: (PUBLIC_TEST_IP,))
 
 
 def semantic_plan(*, start_url=URL, user_request=TASK):
@@ -164,11 +169,76 @@ def graph(capture_id, *, include_result=False, vision=False):
 
 
 class URLAndPlanContractTest(unittest.TestCase):
-    def test_url_policy_allows_exact_approved_host(self):
-        policy = ExecutionURLPolicy(["nce.test"])
+    def test_url_policy_allows_arbitrary_public_hosts_without_a_host_list(self):
+        policy = public_url_policy()
         self.assertEqual(policy.validate(URL), URL)
-        with self.assertRaises(ExecutionURLPolicyError):
-            policy.validate("https://other.test/devices")
+        self.assertEqual(
+            policy.validate("https://other.test/devices"),
+            "https://other.test/devices",
+        )
+        self.assertEqual(policy.health()["network_scope"], "public_only")
+        self.assertNotIn("allowed_host_count", policy.health())
+
+    def test_url_policy_blocks_private_and_mixed_dns_answers_by_default(self):
+        answers = {
+            "private.test": ("10.0.0.8",),
+            "mixed.test": (PUBLIC_TEST_IP, "127.0.0.1"),
+        }
+        policy = ExecutionURLPolicy(resolver=lambda host: answers[host])
+
+        for value in (
+            "http://127.0.0.1/",
+            "http://169.254.169.254/latest/meta-data/",
+            "https://private.test/",
+            "https://mixed.test/",
+        ):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ExecutionURLPolicyError,
+                "execution_url_network_blocked",
+            ):
+                policy.validate(value)
+
+    def test_private_test_mode_allows_private_but_never_link_local(self):
+        policy = ExecutionURLPolicy(allow_private_networks=True)
+        self.assertEqual(policy.validate("http://127.0.0.1:8787/"), "http://127.0.0.1:8787/")
+        self.assertEqual(policy.validate("https://10.0.0.8/"), "https://10.0.0.8/")
+        with self.assertRaisesRegex(
+            ExecutionURLPolicyError,
+            "execution_url_network_blocked",
+        ):
+            policy.validate("http://169.254.169.254/latest/meta-data/")
+
+    def test_synthetic_dns_support_does_not_allow_direct_benchmark_ip(self):
+        policy = ExecutionURLPolicy(resolver=lambda _host: ("198.18.0.10",))
+        self.assertEqual(
+            policy.validate("https://public-through-proxy.test/"),
+            "https://public-through-proxy.test/",
+        )
+        with self.assertRaisesRegex(
+            ExecutionURLPolicyError,
+            "execution_url_network_blocked",
+        ):
+            policy.validate("https://198.18.0.10/")
+
+    def test_url_policy_rejects_unresolved_or_unsafe_url_shapes(self):
+        unresolved = ExecutionURLPolicy(resolver=lambda _host: ())
+        with self.assertRaisesRegex(
+            ExecutionURLPolicyError,
+            "execution_url_host_unresolved",
+        ):
+            unresolved.validate("https://missing.test/")
+
+        policy = public_url_policy()
+        for value in (
+            "file:///tmp/test.html",
+            "https://user:pass@example.test/",
+            "https://example.test/#fragment",
+        ):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ExecutionURLPolicyError,
+                "execution_url_invalid",
+            ):
+                policy.validate(value)
 
     def test_plan_is_semantic_and_click_is_paired_with_outcome(self):
         validated = ActionPlanValidator().validate(semantic_plan())
@@ -203,7 +273,7 @@ class PlannerAndServiceTest(unittest.TestCase):
         self.assertEqual(result["schema_version"], ACTION_PLAN_SCHEMA_VERSION)
         self.assertIn("untrusted page data", client.messages[0]["content"])
 
-    def test_service_inspects_allowed_url_before_model_planning(self):
+    def test_service_checks_public_network_policy_before_model_planning(self):
         class Runner:
             def inspect(self, start_url):
                 self.start_url = start_url
@@ -231,16 +301,21 @@ class PlannerAndServiceTest(unittest.TestCase):
             root=Path("."),
             runner=runner,
             planner=planner,
-            url_policy=ExecutionURLPolicy(["nce.test"]),
+            url_policy=public_url_policy(),
         )
         generated = service.generate_plan(start_url=URL, user_request=TASK)
 
         self.assertEqual(runner.start_url, URL)
         self.assertEqual(generated["planning_graph_id"], "uig:capture-plan")
         self.assertEqual(generated["planner"]["model"], "test-model")
+        another = service.generate_plan(
+            start_url="https://other.test/",
+            user_request=TASK,
+        )
+        self.assertEqual(another["plan"]["start_url"], "https://other.test/")
         with self.assertRaises(ExecutionScenarioServiceError):
             service.generate_plan(
-                start_url="https://other.test/",
+                start_url="http://127.0.0.1/",
                 user_request=TASK,
             )
 
@@ -356,7 +431,7 @@ class GenericScenarioRunnerTest(unittest.TestCase):
             verifiers=OutcomeVerifierRegistry(
                 [], ui_graph_verifier=UIGraphOutcomeVerifier()
             ),
-            url_policy=ExecutionURLPolicy(["nce.test"]),
+            url_policy=public_url_policy(),
             clock=lambda: 10.0,
             wait=lambda _seconds: None,
         )

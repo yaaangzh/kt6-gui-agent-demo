@@ -5,13 +5,28 @@ from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
-from ..asset_inventory import compact_text
+from ..asset_inventory import compact_text, identity_key
 from ..ui_graph import SCHEMA_VERSION as UI_GRAPH_SCHEMA_VERSION
 from .models import BrowserTarget, VisualTarget
 from .semantic_target import matching_nodes
 
 
 _SIMPLE_DOM_ID = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
+_FINGERPRINT_ATTRIBUTES = (
+    "id",
+    "aria-label",
+    "title",
+    "href",
+    "name",
+    "type",
+    "role",
+    "target",
+    "data-testid",
+    "data-business-id",
+    "data-asset-id",
+    "data-owner-business-id",
+    "data-action-id",
+)
 
 
 class GroundingError(ValueError):
@@ -34,6 +49,12 @@ class DOMGrounder:
             attributes = _mapping(node.get("attributes"))
             backend_id = source.get("backend_node_id")
             dom_id = compact_text(attributes.get("id"), 300)
+            click_backend_id = _click_backend_node_id(
+                target=target,
+                node=node,
+                graph=graph,
+                dom_id=dom_id,
+            )
             if (
                 interaction.get("candidate") is True
                 and interaction.get("status") == "candidate_only"
@@ -43,16 +64,25 @@ class DOMGrounder:
                 and isinstance(backend_id, int)
                 and not isinstance(backend_id, bool)
                 and backend_id > 0
-                and _SIMPLE_DOM_ID.fullmatch(dom_id)
+                and click_backend_id is not None
             ):
-                candidates.append((node, source, attributes, backend_id, dom_id))
+                candidates.append(
+                    (
+                        node,
+                        source,
+                        attributes,
+                        backend_id,
+                        click_backend_id,
+                        dom_id if _SIMPLE_DOM_ID.fullmatch(dom_id) else "",
+                    )
+                )
         if len(candidates) != 1:
             raise GroundingError(
                 "dom_grounding_target_missing"
                 if not candidates
                 else "dom_grounding_target_ambiguous"
             )
-        node, source, attributes, backend_id, dom_id = candidates[0]
+        node, source, attributes, backend_id, click_backend_id, dom_id = candidates[0]
         page_url = _page_url(graph)
         frame_id = compact_text(source.get("frame_id"), 200)
         frame_url = compact_text(source.get("frame_url"), 2048) or page_url
@@ -64,7 +94,11 @@ class DOMGrounder:
             frame_id=frame_id,
             frame_url=frame_url,
             page_url=page_url,
+            click_backend_node_id=click_backend_id,
             dom_id=dom_id,
+            accessible_name=compact_text(node.get("name"), 300),
+            role=compact_text(node.get("role"), 100).casefold(),
+            expected_attributes=_fingerprint_attributes(attributes),
             owner_business_id=compact_text(
                 node.get("owner_business_id")
                 or attributes.get("data-owner-business-id"),
@@ -75,6 +109,77 @@ class DOMGrounder:
                 200,
             ),
         )
+
+
+def _click_backend_node_id(
+    *,
+    target: Mapping[str, Any],
+    node: Mapping[str, Any],
+    graph: Mapping[str, Any],
+    dom_id: str,
+) -> int | None:
+    source = _mapping(node.get("source"))
+    backend_id = source.get("backend_node_id")
+    if not isinstance(backend_id, int) or isinstance(backend_id, bool) or backend_id < 1:
+        return None
+    if _SIMPLE_DOM_ID.fullmatch(dom_id) or _visible_bbox(node):
+        return backend_id
+
+    node_id = compact_text(node.get("id"), 300)
+    child_ids = {
+        compact_text(edge.get("target"), 300)
+        for edge in _edges(graph)
+        if compact_text(edge.get("source"), 300) == node_id
+        and edge.get("type") == "parent_of"
+        and edge.get("relation_type") == "dom_child"
+    }
+    children = [
+        child
+        for child in _nodes(graph)
+        if compact_text(child.get("id"), 300) in child_ids
+        and _mapping(child.get("source")).get("kind") == "cdp"
+        and _mapping(child.get("source")).get("frame_id") == source.get("frame_id")
+        and child.get("disabled") is not True
+        and child.get("safe_for_execution") is False
+        and _visible_bbox(child)
+    ]
+    query = identity_key(target.get("query"))
+    named = [
+        child
+        for child in children
+        if query
+        and query
+        in identity_key(
+            child.get("name")
+            or _mapping(child.get("attributes")).get("aria-label")
+        )
+    ]
+    selected = named if len(named) == 1 else children if len(children) == 1 else []
+    if len(selected) != 1:
+        return None
+    value = _mapping(selected[0].get("source")).get("backend_node_id")
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def _visible_bbox(node: Mapping[str, Any]) -> bool:
+    bbox = node.get("bbox")
+    if not isinstance(bbox, list) or len(bbox) != 4:
+        return False
+    try:
+        _x, _y, width, height = (float(item) for item in bbox)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return width > 0 and height > 0
+
+
+def _fingerprint_attributes(
+    attributes: Mapping[str, Any],
+) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (name, value)
+        for name in _FINGERPRINT_ATTRIBUTES
+        if (value := compact_text(attributes.get(name), 2048))
+    )
 
 
 class VisionGrounder:
@@ -203,6 +308,13 @@ def _nodes(graph: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     if not isinstance(raw, list):
         raise GroundingError("grounding_ui_graph_nodes_missing")
     return [node for node in raw if isinstance(node, Mapping)]
+
+
+def _edges(graph: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    raw = graph.get("edges")
+    if not isinstance(raw, list):
+        return []
+    return [edge for edge in raw if isinstance(edge, Mapping)]
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:

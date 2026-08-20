@@ -179,6 +179,15 @@ Browser Harness 仅承担 daemon、CDP transport 和坐标点击，不接收任�
 OutcomeVerifier，进入 `verified` 后才能判定成功。第一阶段保留现有 Playwright/CDP
 只读 Sidecar，不合并感知连接。
 
+通用 Scenario Runner 的 CDP Grounding 不依赖页面提供简单 `#id`。无 `id` 候选必须有
+正整数 backend node id，并把 fresh capture 中的角色、名称和有界属性作为指纹；若候选
+自身 box 为 0×0，只允许绑定 UI Graph 中唯一可见的直接 DOM 子节点。执行瞬间用固定深度
+`DOM.describeNode` 验证授权节点、取 box 节点和 `DOM.getNodeForLocation` 命中节点仍属于
+同一实时子树，外部 overlay 仍 fail closed。链接点击前先验证 `href` 解析后的网络地址；
+`target=_blank` 再只绑定本次新增且 opener/URL 匹配的 page target 供后续确定性验证。
+公网 HTTP(S) 无需逐域名配置，并兼容代理 synthetic DNS；本机、私网、链路本地和保留
+地址默认 fail closed，直接输入 synthetic DNS 测试网段 IP 仍拒绝。
+
 功能分支另定义 `kt6.action-plan.v1` 作为 Planner 与 ScenarioRunner 的稳定契约。
 测试阶段只有“自然语言 → Intent → Action Plan”是规则 Fixture；Plan 只包含语义动作，
 不允许 selector、backend node id 或坐标。ScenarioRunner 对每个 step 重新 capture：

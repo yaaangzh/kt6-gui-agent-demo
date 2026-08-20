@@ -139,7 +139,11 @@ class UIGraphTargetResolver:
             frame_id=frame_id,
             frame_url=frame_url,
             page_url=page_url,
+            click_backend_node_id=backend_node_id,
             dom_id=selector_match.group(1),
+            accessible_name=compact_text(node.get("name"), 300),
+            role=compact_text(node.get("role"), 100).casefold(),
+            expected_attributes=(),
             owner_business_id=owner,
             action_id=control_action,
         )
