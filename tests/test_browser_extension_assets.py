@@ -17,13 +17,93 @@ class BrowserExtensionAssetsTest(unittest.TestCase):
         )
 
         self.assertEqual(manifest["manifest_version"], 3)
-        self.assertEqual(manifest["version"], "0.5.2")
+        self.assertEqual(manifest["version"], "0.6.0")
         self.assertEqual(
-            set(manifest["permissions"]), {"activeTab", "scripting", "storage"}
+            set(manifest["permissions"]),
+            {"activeTab", "scripting", "storage", "sidePanel", "debugger"},
         )
         self.assertNotIn("<all_urls>", manifest.get("host_permissions", []))
         self.assertNotIn("tabCapture", manifest["permissions"])
-        self.assertEqual(manifest["action"]["default_popup"], "popup.html")
+        self.assertNotIn("default_popup", manifest["action"])
+        self.assertEqual(manifest["side_panel"]["default_path"], "sidepanel.html")
+        self.assertEqual(
+            manifest["background"]["service_worker"],
+            "background.js",
+        )
+
+    def test_side_panel_uses_exact_current_tab_binding_without_raw_debugger_control(self):
+        panel_html = (EXTENSION_DIR / "sidepanel.html").read_text(encoding="utf-8")
+        panel_script = (EXTENSION_DIR / "sidepanel.js").read_text(encoding="utf-8")
+        background = (EXTENSION_DIR / "background.js").read_text(encoding="utf-8")
+
+        self.assertIn('src="sidepanel.js"', panel_html)
+        self.assertIn("自然语言流程", panel_html)
+        self.assertIn("chrome.sidePanel.setPanelBehavior", background)
+        self.assertIn("debuggerApi.getTargets()", panel_script)
+        self.assertIn("target.tabId === tab.id", panel_script)
+        self.assertIn("browser_target_id: context.browserTargetId", panel_script)
+        self.assertIn("/api/execution/plans", panel_script)
+        self.assertIn("/api/execution/runs", panel_script)
+        self.assertNotIn("chrome.debugger.attach", panel_script)
+        self.assertNotIn("chrome.debugger.sendCommand", panel_script)
+        self.assertNotIn("chrome.storage", panel_script)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required")
+    def test_side_panel_maps_active_tab_to_one_exact_cdp_target(self):
+        panel_script = EXTENSION_DIR / "sidepanel.js"
+        node_program = textwrap.dedent(
+            """
+            const fs = require("fs");
+            const vm = require("vm");
+            const scriptPath = process.argv[1];
+            const stubElement = {
+              addEventListener() {}, replaceChildren() {}, append() {},
+              className: "", textContent: "", value: "", checked: false,
+              disabled: false, hidden: false,
+            };
+            const context = {
+              console, setTimeout, clearTimeout, encodeURIComponent,
+              document: {
+                querySelector() { return stubElement; },
+                createElement() { return { textContent: "" }; },
+              },
+              chrome: {
+                tabs: { async query() { return [{ id: 42, title: "Target", url: "https://example.com/" }]; } },
+                debugger: { async getTargets() { return [{ id: "TARGET12345678", tabId: 42, type: "page", url: "https://example.com/" }]; } },
+              },
+              fetch: async () => ({ ok: true, status: 200, async json() { return { ready: true }; } }),
+            };
+            context.globalThis = context;
+            vm.createContext(context);
+            vm.runInContext(fs.readFileSync(scriptPath, "utf8"), context);
+            (async () => {
+              const exact = await context.__KT6_AGENT_PANEL_INTERNALS__.resolveCurrentBrowserContext(
+                context.chrome.tabs, context.chrome.debugger,
+              );
+              let rejected = false;
+              try {
+                await context.__KT6_AGENT_PANEL_INTERNALS__.resolveCurrentBrowserContext(
+                  context.chrome.tabs,
+                  { async getTargets() { return [
+                    { id: "TARGET12345678", tabId: 42, type: "page", url: "https://example.com/" },
+                    { id: "TARGET87654321", tabId: 42, type: "page", url: "https://example.com/" },
+                  ]; } },
+                );
+              } catch (_error) { rejected = true; }
+              process.stdout.write(JSON.stringify({ exact, rejected }));
+            })();
+            """
+        )
+        completed = subprocess.run(
+            [shutil.which("node"), "-e", node_program, str(panel_script)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["exact"]["browserTargetId"], "TARGET12345678")
+        self.assertEqual(result["exact"]["tabId"], 42)
+        self.assertTrue(result["rejected"])
 
     def test_popup_and_injected_collector_are_wired_together(self):
         popup_html = (EXTENSION_DIR / "popup.html").read_text(encoding="utf-8")

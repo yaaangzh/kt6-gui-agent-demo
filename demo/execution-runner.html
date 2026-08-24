@@ -47,10 +47,11 @@
           </label>
           <div class="actions">
             <button id="generate">生成计划</button>
+            <button id="refresh-runtime" class="secondary">刷新执行链</button>
             <button id="show-json" class="secondary" disabled>查看 JSON</button>
             <button id="execute" disabled>确认并开始执行</button>
           </div>
-          <div id="message" class="muted">计划生成不会操作页面，只有确认后才开始执行。</div>
+          <div id="message" class="muted">正在检查浏览器执行链……</div>
         </div>
       </section>
 
@@ -77,12 +78,17 @@
     </main>
 
     <script>
-      const state = { generated: null, runId: "", timer: null };
+      const state = { generated: null, runId: "", timer: null, runtime: null };
       const byId = (id) => document.getElementById(id);
 
       async function api(path, options = {}) {
         const response = await fetch(path, options);
-        const body = await response.json();
+        let body;
+        try {
+          body = await response.json();
+        } catch (_error) {
+          throw new Error(`HTTP ${response.status} 返回了无效响应`);
+        }
         if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
         return body;
       }
@@ -90,6 +96,37 @@
       function message(text, error = false) {
         byId("message").textContent = text;
         byId("message").className = error ? "error" : "muted";
+      }
+
+      function runtimeErrorText(runtime) {
+        if (runtime?.configured === false) return "后端未配置浏览器执行器";
+        if (runtime?.planner_configured === false) return "规划模型未配置";
+        const code = runtime?.cdp?.error || runtime?.harness?.error || "execution_runtime_unavailable";
+        const labels = {
+          browser_cdp_unavailable: "Chrome CDP 未连接（默认端口 9222）",
+          browser_cdp_invalid_response: "Chrome CDP 返回无效状态",
+          browser_harness_not_installed: "当前 Python 未安装 Browser Harness",
+          browser_harness_daemon_unavailable: "Browser Harness daemon 未启动",
+          browser_harness_cdp_unavailable: "Browser Harness 未连接到目标 Chrome",
+          execution_runner_not_configured: "后端未配置浏览器执行器",
+        };
+        return labels[code] || code;
+      }
+
+      async function refreshRuntimeHealth({ quiet = false } = {}) {
+        if (!quiet) message("正在检查浏览器执行链……");
+        try {
+          state.runtime = await api("/api/execution/health");
+          if (state.runtime.ready) {
+            message("执行链已就绪。计划生成不会点击页面，确认后才开始执行。");
+            return true;
+          }
+          message(`执行链未就绪：${runtimeErrorText(state.runtime)}`, true);
+          return false;
+        } catch (error) {
+          message(`执行链检查失败：${error.message}`, true);
+          return false;
+        }
       }
 
       function renderPlan() {
@@ -112,6 +149,7 @@
       }
 
       async function generate() {
+        if (!(await refreshRuntimeHealth({ quiet: true }))) return;
         message("正在感知目标页面并调用规划模型……");
         try {
           state.generated = await api("/api/execution/plans", {
@@ -136,7 +174,11 @@
           const run = await api("/api/execution/runs", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ plan: state.generated.plan, confirmed: true }),
+            body: JSON.stringify({
+              plan: state.generated.plan,
+              confirmed: true,
+              browser_target_id: state.generated.browser_target_id,
+            }),
           });
           state.runId = run.run_id;
           await poll();
@@ -173,12 +215,14 @@
       }
 
       byId("generate").addEventListener("click", generate);
+      byId("refresh-runtime").addEventListener("click", () => refreshRuntimeHealth());
       byId("execute").addEventListener("click", execute);
       byId("show-json").addEventListener("click", () => {
         const view = byId("json-view");
         view.hidden = !view.hidden;
         view.textContent = JSON.stringify(state.generated.plan, null, 2);
       });
+      refreshRuntimeHealth();
     </script>
   </body>
 </html>

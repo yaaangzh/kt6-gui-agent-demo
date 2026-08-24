@@ -20,6 +20,7 @@ class ActionPlanValidator:
     """Fail-closed validator for the model-to-Runner semantic contract."""
 
     MAX_STEPS = 12
+    MAX_INPUT_TEXT = 1_000
     _PLAN_KEYS = frozenset(
         {"schema_version", "scenario_id", "start_url", "user_request", "steps"}
     )
@@ -33,6 +34,7 @@ class ActionPlanValidator:
             "text_present",
             "url_changed",
             "page_changed",
+            "input_value",
         }
     )
 
@@ -85,6 +87,23 @@ class ActionPlanValidator:
             if set(value) != {"id", "op", "target"}:
                 raise ActionPlanValidationError("action_plan_click_fields_invalid")
             return {"id": step_id, "op": op, "target": self._target(value["target"])}
+        if op == "type":
+            if set(value) != {"id", "op", "target", "text"}:
+                raise ActionPlanValidationError("action_plan_type_fields_invalid")
+            text = value.get("text")
+            if (
+                not isinstance(text, str)
+                or not text
+                or len(text) > self.MAX_INPUT_TEXT
+                or any(ord(character) < 32 or ord(character) == 127 for character in text)
+            ):
+                raise ActionPlanValidationError("action_plan_type_text_invalid")
+            return {
+                "id": step_id,
+                "op": op,
+                "target": self._target(value["target"]),
+                "text": text,
+            }
         if op not in {"verify", "wait"}:
             raise ActionPlanValidationError("action_plan_operation_unsupported")
         allowed = {"id", "op", "expected"}
@@ -129,6 +148,25 @@ class ActionPlanValidator:
             if set(value) != {"type"}:
                 raise ActionPlanValidationError("action_plan_expected_invalid")
             return {"type": expected_type}
+        if expected_type == "input_value":
+            if set(value) != {"type", "target", "value"}:
+                raise ActionPlanValidationError("action_plan_expected_invalid")
+            expected_value = value.get("value")
+            if (
+                not isinstance(expected_value, str)
+                or not expected_value
+                or len(expected_value) > self.MAX_INPUT_TEXT
+                or any(
+                    ord(character) < 32 or ord(character) == 127
+                    for character in expected_value
+                )
+            ):
+                raise ActionPlanValidationError("action_plan_expected_invalid")
+            return {
+                "type": expected_type,
+                "target": self._target(value["target"]),
+                "value": expected_value,
+            }
         if set(value) != {"type", "target"}:
             raise ActionPlanValidationError("action_plan_expected_invalid")
         return {"type": expected_type, "target": self._target(value["target"])}
@@ -138,11 +176,24 @@ class ActionPlanValidator:
         if len(steps) % 2:
             raise ActionPlanValidationError("action_plan_sequence_invalid")
         for index in range(0, len(steps), 2):
-            if steps[index]["op"] != "click" or steps[index + 1]["op"] not in {
+            action = steps[index]
+            outcome = steps[index + 1]
+            if action["op"] not in {"click", "type"} or outcome["op"] not in {
                 "verify",
                 "wait",
             }:
                 raise ActionPlanValidationError("action_plan_sequence_invalid")
+            expected = outcome["expected"]
+            if action["op"] == "type":
+                if (
+                    outcome["op"] != "verify"
+                    or expected["type"] != "input_value"
+                    or expected["target"] != action["target"]
+                    or expected["value"] != action["text"]
+                ):
+                    raise ActionPlanValidationError("action_plan_type_outcome_invalid")
+            elif expected["type"] == "input_value":
+                raise ActionPlanValidationError("action_plan_click_outcome_invalid")
 
 
 __all__ = [

@@ -158,8 +158,9 @@ E2E 只替换规划决策，不 Mock 页面世界；不得提交或使用 `mock_
 - 原始 `actionable=true`、business_id、element_id 不能绕过候选门禁。
 - 页面 API 只读取显式 `window.__KT6_PAGE_ADAPTER__`，不拦截任意 fetch/XHR。
 - CDP 只允许 `localhost`、`127.0.0.1` 或 `::1`。
-- Browser Harness 默认关闭，第一阶段只允许 click；禁止自修改 helper、domain skill、
-  任意 raw CDP 和 JavaScript 进入正式执行链。
+- Browser Harness 默认关闭，只允许固定 `type`/`click`；`type` 仅限普通文本控件并要求
+  输入值确定性验证。禁止自修改 helper、domain skill、任意 raw CDP、任意按键序列和
+  JavaScript 进入正式执行链。
 
 ### 5.1 性能与实现范围
 

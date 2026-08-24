@@ -55,26 +55,17 @@ class DOMActionAPITest(unittest.TestCase):
                 self.assertEqual(
                     health["page_api"]["mode"], "explicit_read_only_adapter"
                 )
-                generated = self.post(
+                unavailable_plan = self.post(
                     base_url,
                     "/api/execution/plans",
                     {
                         "start_url": "http://127.0.0.1:8787/execution-test.html",
                         "user_request": "打开 AP_001 详情，然后进入拓扑，再选中 AP_001",
                     },
-                    expected_status=200,
-                )
-                self.assertEqual(len(generated["plan"]["steps"]), 6)
-                self.assertTrue(generated["requires_confirmation"])
-                self.assertFalse(generated["runner_configured"])
-                unavailable = self.post(
-                    base_url,
-                    "/api/execution/runs",
-                    {"plan": generated["plan"], "confirmed": True},
-                    expected_status=409,
+                    expected_status=422,
                 )
                 self.assertEqual(
-                    unavailable["error"], "execution_runner_not_configured"
+                    unavailable_plan["error"], "execution_runner_not_configured"
                 )
 
                 initial = self.post(

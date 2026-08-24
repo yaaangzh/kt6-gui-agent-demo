@@ -14,7 +14,7 @@ class BrowserExecutor(Protocol):
 
 
 class HarnessBrowserExecutor:
-    """Click-only KT6 adapter around Browser Harness.
+    """Fixed click/type KT6 adapter around Browser Harness.
 
     The adapter accepts a resolved backend node. It never accepts arbitrary CDP
     methods, JavaScript, selectors, or model-generated Python.
@@ -26,12 +26,14 @@ class HarnessBrowserExecutor:
         self.client = client
 
     def execute(self, action: BrowserAction) -> BrowserExecutionResult:
-        if action.op != "click":
+        if action.op not in {"click", "type"}:
             return BrowserExecutionResult(False, "unsupported_browser_action")
         try:
-            if isinstance(action.target, BrowserTarget):
+            if action.op == "type" and isinstance(action.target, BrowserTarget):
+                receipt = self.client.type_backend_node(action.target, action.text)
+            elif action.op == "click" and isinstance(action.target, BrowserTarget):
                 receipt = self.client.click_backend_node(action.target)
-            elif isinstance(action.target, VisualTarget):
+            elif action.op == "click" and isinstance(action.target, VisualTarget):
                 receipt = self.client.click_visual_target(action.target)
             else:
                 return BrowserExecutionResult(False, "unsupported_browser_target")
@@ -41,8 +43,8 @@ class HarnessBrowserExecutor:
             True,
             "",
             backend_node_id=receipt["backend_node_id"],
-            x=receipt["x"],
-            y=receipt["y"],
+            x=receipt.get("x"),
+            y=receipt.get("y"),
         )
 
 

@@ -659,6 +659,9 @@ class KT6Handler(SimpleHTTPRequestHandler):
                 },
             )
             return
+        if path == "/api/execution/health":
+            self._json(200, services.execution_scenarios.runtime_health())
+            return
         if path == "/api/playbooks":
             self._json(200, runtime.playbooks.list_playbooks())
             return
@@ -826,11 +829,12 @@ class KT6Handler(SimpleHTTPRequestHandler):
                 generated = services.execution_scenarios.generate_plan(
                     start_url=str(payload.get("start_url", "")),
                     user_request=str(payload.get("user_request", "")),
+                    browser_target_id=str(payload.get("browser_target_id", "")),
                 )
             except ValueError as exc:
                 error_code = getattr(exc, "error_code", "plan_invalid")
                 self._json(
-                    422,
+                    503 if str(error_code).startswith("browser_harness_") else 422,
                     {
                         "error": error_code,
                         "error_category": classify_error(error_code),
@@ -848,6 +852,7 @@ class KT6Handler(SimpleHTTPRequestHandler):
                 run = services.execution_scenarios.start_run(
                     plan=plan,
                     confirmed=payload.get("confirmed") is True,
+                    browser_target_id=str(payload.get("browser_target_id", "")),
                 )
             except ValueError as exc:
                 error_code = getattr(exc, "error_code", "execution_run_invalid")

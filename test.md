@@ -12,7 +12,7 @@
 | `eval-browser-use` | Browser Use/CDP + 通用规划模型 API |
 | `eval-ui-tars` | 通用规划模型 API + UI-TARS 截图定位 API |
 | `ui-graph-textflow-cdp` | CDP、多源 UI Graph、操作 DAG 安全校验 |
-| `feature/browser-executor` | SafeDOMAction 授权后通过 Browser Harness 派发 click |
+| `feature/browser-executor` | 当前 Tab + 自然语言计划经 ScenarioRunner 派发固定 type/click 并验证结果 |
 | `br_omniParser` | 历史回归，不纳入当前三方案结论 |
 
 目标测试目录：`D:\04project\FreeStyle_Copilot_KT6_demo`。页面数据、截图、DOM/CDP、
@@ -112,7 +112,7 @@ python -m unittest discover -s tests
 | `eval-browser-use` | 456 tests OK，46 skipped |
 | `eval-ui-tars` | 457 tests OK，46 skipped |
 | `ui-graph-textflow-cdp` | 508 tests OK，46 skipped |
-| `feature/browser-executor` | 536 tests OK，47 skipped（2026-08-18） |
+| `feature/browser-executor` | 2026-08-21：浏览器执行链专项 121 passed / 1 skipped；全量 562 passed / 1 skipped / 1 既有 OpenCV failure |
 | `br_omniParser` | 461 tests OK，46 skipped |
 
 测试数量会随公共同步增加，以当前命令最终 `OK` 为准。公共配置和报告定向测试：
@@ -222,8 +222,9 @@ python -m unittest `
 
 ## 10. `feature/browser-executor` 测试
 
-第一阶段只测试 click，不测试输入、滚动、键盘、任意 CDP 或 JavaScript。使用独立
-Python 3.12 环境安装可选依赖：
+当前固定动作词表只测试 `type` 与 `click`，不支持滚动、快捷键、任意 CDP 或 JavaScript。
+`type` 只能操作普通 INPUT/TEXTAREA，拒绝 password/file/hidden、disabled 和 readonly，
+并必须紧跟同目标、同文本的 `input_value` 确定性验证。使用独立 Python 3.12 环境安装可选依赖：
 
 ```powershell
 py -3.12 -m venv .venv-browser-executor
@@ -236,6 +237,7 @@ browser-harness --doctor
 
 ```powershell
 python -m unittest `
+  tests.test_execution_runtime `
   tests.test_execution_scenario `
   tests.test_browser_executor `
   tests.test_outcome_verifier `
@@ -249,12 +251,26 @@ python -m unittest `
 ```
 
 实机闭环是“任意公网 URL + 自然语言任务 → 统一页面感知 → LLM 生成 `kt6.action-plan.v1`
-→ 实时 Grounding → 受控 click → 重新感知 → 确定性 Verify”。计划中没有 UI Graph、
+→ 实时 Grounding → 受控 type/click → 重新感知 → 确定性 Verify”。计划中没有 UI Graph、
 backend node id、selector 或坐标，也不再依赖固定测试页或规则解析器：
 
 ```powershell
+.\scripts\start-browser-executor.ps1
+
+# 必须返回 ready=true；configured=true 只代表配置存在，不代表执行链在线
+Invoke-RestMethod http://127.0.0.1:8787/api/execution/health
+
 python -m kt6_backend.execution_e2e_cli --url https://example.com/ --task "点击 Learn more 进入说明页面"
 ```
+
+`start-browser-executor.ps1` 是 Windows 当前环境的统一入口：复用已在线组件，否则按
+“专用 CDP Chrome/Edge → Browser Harness → KT6 后端”顺序拉起，并在 Harness 真实调用
+`Target.getTargets` 后才报告就绪。脚本优先使用 `.venv-browser-executor`，也兼容当前
+`runtime_data/tools/python312` 环境；可通过 `-PythonPath` 或 `-ChromePath` 显式指定。
+新启动的专用浏览器会通过 `--load-extension` 加载 `browser_extension/`。若 9222 已存在
+旧浏览器进程，脚本会复用它，Chrome 不会在运行中接受新的扩展启动参数；升级扩展后首次
+验证需先关闭该专用浏览器再运行脚本。Runner 与受控 Target 浏览器必须分离，因此脚本
+只打印 Runner URL，不自动在受控 Chrome 中打开控制台。
 
 成功输出位于：
 
@@ -265,11 +281,11 @@ runtime_data/execution_scenarios/<run_id>/
   result.json
 ```
 
-`result.json` 必须为 `status=success`，每个 step 均为 `completed`，每个 click 的后续
+`result.json` 必须为 `status=success`，每个 step 均为 `completed`，每个 type/click 的后续
 verify/wait 都必须由新 capture 通过确定性 Verifier。若希望把真实浏览器场景纳入
 unittest，可在根目录 `.env` 增加 `KT6_RUN_BROWSER_E2E=1`；未配置时只跳过这一项实机
-用例，其余契约测试照常运行。当前开发机只有 Python 3.14，尚未安装要求的 Python 3.12
-和 Browser Harness，因此本机只能完成自动化契约回归，实机闭环需在准备好的环境运行。
+用例，其余契约测试照常运行。当前开发目录已经存在可运行的 Browser Harness Python
+环境；换机时仍应先按本节创建独立环境，再使用统一启动脚本验收。
 
 也可以启动后端后，在普通浏览器打开：
 
@@ -281,12 +297,20 @@ Runner 页面与受控 Chromium Target Tab 必须是两个独立页面；不要�
 把控制台自身当作目标标签页。在输入框填入任意公网 URL 和自然语言任务，先点“生成计划”
 检查语义步骤（无坐标、selector、backend node id），再点“确认并开始执行”。
 
+推荐入口是专用 Chrome 的扩展 Side Panel：先在目标页面点击 “KT6 Browser Agent”，直接
+输入自然语言流程。扩展通过 `chrome.tabs.query` 取得 active Tab，再用
+`chrome.debugger.getTargets()` 按 `tabId` 唯一映射 CDP Target；它不调用
+`chrome.debugger.attach` 或 `sendCommand`。计划和执行 API 都携带同一个运行时
+`browser_target_id`，后端再次核对 Target ID 与 URL。Target ID 不进入 Action Plan。
+
 实机步骤如下：
 
 1. Chrome/Edge 以 loopback remote debugging 启动，目标标签页已登录且页面状态可恢复。
-2. `POST /api/execution/plans` 传入 `start_url` 与 `user_request`；先通过 URL Safety
+2. `POST /api/execution/plans` 传入 `start_url`、`user_request`，Side Panel 还会传
+   `browser_target_id`；先通过 URL Safety
    Policy 校验，再感知页面并调用 LLM 生成计划；确认没有坐标、selector 和 backend node id。
-3. `POST /api/execution/runs` 必须带 `confirmed=true`，立即返回 run_id；前端轮询
+3. `POST /api/execution/runs` 必须带 `confirmed=true`，Side Panel 再次确认当前 Tab 的
+   URL/Target ID 未变，立即返回 run_id；前端轮询
    `GET /api/execution/runs/{run_id}`，避免阻塞页面。
 4. 每个 click 执行“capture → Grounding（DOM/CDP 优先，缺失时回退 Vision）→
    fresh capture → live frame/identity/hit-test → click”；随后用 verify/wait 再次感知。
@@ -294,10 +318,13 @@ Runner 页面与受控 Chromium Target Tab 必须是两个独立页面；不要�
    容器只能落到唯一可见直接子节点，live hit-test 命中也必须仍在同一授权 DOM 子树。
    链接还需在点击前校验解析后的目标 `href`；`target=_blank` 把本次新增且 URL/opener
    匹配的 popup target 绑定为后续 capture 的页面。
-5. Vision 目标使用本次截图识别的 bbox 比例，点击前重新读取 live Canvas box 并
+5. 每个 type 执行两次 capture 与 DOM Grounding 指纹复核，随后固定调用 `DOM.focus`、
+   Ctrl+A、Backspace、`Input.insertText`；随后重新采集 AX/DOM，并用新 UI Graph 的
+   `attributes.value` 做 `input_value` 验证。模型不能生成按键序列。
+6. Vision 目标使用本次截图识别的 bbox 比例，点击前重新读取 live Canvas box 并
    做 hit-test，不复用第一步坐标。
-6. 最后新 capture 必须满足对应 Verifier（element_visible、element_disappeared、
-   element_selected、selected、text_present、url_changed 或 page_changed），才能返回
+7. 最后新 capture 必须满足对应 Verifier（element_visible、element_disappeared、
+   element_selected、selected、text_present、input_value、url_changed 或 page_changed），才能返回
    SUCCESS。失败会按 planner_failed / target_not_found / target_ambiguous /
    perception_failed / execution_failed / verify_failed / page_changed 归类，便于统计
    KT6 GUI Agent 具体卡在哪个环节。
@@ -311,13 +338,35 @@ Runner 页面与受控 Chromium Target Tab 必须是两个独立页面；不要�
 再把返回计划原样提交 `/api/execution/runs` 并得到 `status=success`，完整 URL + 自然语言
 Planner E2E 已通过。
 
-目标 Tab 真绑定（`BrowserHarnessClient.open_or_bind_target`）：
+2026-08-21 统一启动链复核：从 CDP、Harness、后端均未就绪的状态运行
+`start-browser-executor.ps1` 后，`/api/execution/health` 返回 `ready=true`；再次运行脚本
+幂等复用全部组件。正式 `deepseek-v4-pro` 生成 `example.com → Learn more → url_changed`
+计划，真实执行 `run_2bbfb40b1b6d46c4` 为 `success`。本次相关专项 110 项通过、1 项按
+真实浏览器开关跳过。全量 558 项中 557 项通过/跳过，唯一失败为未修改的
+`VisionFrameMatcherOpenCVTests.test_small_translation_with_blank_new_border_is_reusable`；
+该用例在本机 Python 3.12 与 3.14 环境均稳定返回 `insufficient_transform_inliers`，需作为
+独立视觉算法/依赖问题处理，不能计入本次启动链回归。
 
-- Runner Tab 与 Target Tab 同时存在时，Runner 不导航、不点击、不感知。ScenarioRunner
-  通过 `client.open_or_bind_target(start_url)` 由 Client 内部完成“按 URL 选择唯一 page
+2026-08-21 Browser Agent v0.6.0 实机复核：统一脚本启动的 Chrome 命令行已包含
+`--load-extension=<repo>/browser_extension`，`/api/execution/health` 为 `ready=true`。
+Side Panel 同路线传入百度 active Tab 的精确 Target ID，正式模型生成四步
+`type → input_value → click → page_changed` 计划，且 Target ID 未进入 Action Plan。
+真实运行 `run_48b7041ddf7844bf` 的 type 与 `input_value` 两步均 completed/verified；百度
+当前新版页面在输入后自行进入搜索结果页，结果页 UI Graph 超过 2000 节点并标记
+`truncated=true`，所以第三步 click 按安全规则拒绝为 `grounding_ui_graph_invalid`，没有
+伪报整条工作流成功。扩展/执行链专项回归为 121 passed、1 skipped；全量 564 项为
+562 passed、1 skipped，唯一 failure 仍是上述未修改的 OpenCV 用例。
+
+目标 Tab 真绑定（Side Panel + `BrowserHarnessClient.open_or_bind_target`）：
+
+- Side Panel 路线通过精确 Target ID 消除同 URL 多 Tab 歧义；后端要求该 ID 唯一存在且
+  URL 与计划输入完全一致，否则返回 `browser_target_binding_mismatch`。
+- CLI/Runner 未提供 Target ID 时仍按 URL 绑定。Runner Tab 与 Target Tab 同时存在时，
+  Runner 不导航、不点击、不感知。ScenarioRunner 通过 `client.open_or_bind_target(start_url)`
+  由 Client 内部完成“按 URL 选择唯一 page
   target → `switch_tab` 切换 daemon 当前 session → 确认 `current_tab()` 就是该 target →
   无匹配时 `new_tab(url)` → 确认最终 URL”，不再先对当前 session 导航再补绑定。
-- 同 URL 存在两个 page target 必须 fail closed 为 `browser_target_ambiguous`；目标消失或
+- URL 回退路线中，同 URL 存在两个 page target 必须 fail closed 为 `browser_target_ambiguous`；目标消失或
   daemon session 被切走时返回 `browser_session_target_changed`（execution_failed）。
 - 单元测试用两个 page target 的 fake harness 验证 `switch_tab` 真实发生，且后续
   `Page.getFrameTree`、`DOMSnapshot.captureSnapshot`、`Accessibility.getFullAXTree`、

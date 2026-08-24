@@ -11,6 +11,7 @@ import zlib
 
 from kt6_backend.execution.action_planner import OpenAIActionPlanner
 from kt6_backend.execution.browser_executor import HarnessBrowserExecutor
+from kt6_backend.execution.browser_harness_client import BrowserHarnessError
 from kt6_backend.execution.error_categories import (
     EXECUTION_FAILED,
     PAGE_CHANGED,
@@ -29,7 +30,7 @@ from kt6_backend.execution.plan_validator import (
     ActionPlanValidationError,
     ActionPlanValidator,
 )
-from kt6_backend.execution.scenario_runner import ScenarioRunner
+from kt6_backend.execution.scenario_runner import ScenarioExecutionError, ScenarioRunner
 from kt6_backend.execution.scenario_service import (
     ExecutionScenarioService,
     ExecutionScenarioServiceError,
@@ -69,6 +70,33 @@ def semantic_plan(*, start_url=URL, user_request=TASK):
                 "expected": {
                     "type": "element_visible",
                     "target": {"query": "AP_001 详情面板"},
+                },
+            },
+        ],
+    }
+
+
+def type_plan(*, start_url=URL, user_request="搜索前端开源项目"):
+    target = {"query": "搜索框", "role": "textbox"}
+    return {
+        "schema_version": ACTION_PLAN_SCHEMA_VERSION,
+        "scenario_id": "generic-type-1",
+        "start_url": start_url,
+        "user_request": user_request,
+        "steps": [
+            {
+                "id": "step-1",
+                "op": "type",
+                "target": target,
+                "text": "找一个前端开源项目",
+            },
+            {
+                "id": "step-2",
+                "op": "verify",
+                "expected": {
+                    "type": "input_value",
+                    "target": target,
+                    "value": "找一个前端开源项目",
                 },
             },
         ],
@@ -252,6 +280,22 @@ class URLAndPlanContractTest(unittest.TestCase):
         with self.assertRaises(ActionPlanValidationError):
             ActionPlanValidator().validate(invalid)
 
+    def test_type_requires_exact_input_value_verification(self):
+        validator = ActionPlanValidator()
+        validated = validator.validate(type_plan())
+        self.assertEqual(validated["steps"][0]["text"], "找一个前端开源项目")
+
+        for mutate in (
+            lambda plan: plan["steps"][1]["expected"].update(value="其他内容"),
+            lambda plan: plan["steps"][1].update(op="wait", timeout_ms=1000),
+            lambda plan: plan["steps"][0].update(text="line\nbreak"),
+        ):
+            with self.subTest(mutate=mutate):
+                invalid = type_plan()
+                mutate(invalid)
+                with self.assertRaises(ActionPlanValidationError):
+                    validator.validate(invalid)
+
 
 class PlannerAndServiceTest(unittest.TestCase):
     def test_openai_planner_validates_model_action_plan(self):
@@ -380,6 +424,34 @@ class UnifiedGroundingTest(unittest.TestCase):
 
 
 class GenericScenarioRunnerTest(unittest.TestCase):
+    def test_inspection_maps_harness_startup_failure_to_scenario_error(self):
+        class Client:
+            def open_or_bind_target(self, _page_url):
+                raise BrowserHarnessError("browser_harness_daemon_unavailable")
+
+        class Executor:
+            client = Client()
+
+        runner = ScenarioRunner(
+            page_perception=object(),
+            browser_executor=Executor(),
+            grounders=TargetGrounderRegistry(),
+            verifiers=OutcomeVerifierRegistry(
+                [], ui_graph_verifier=UIGraphOutcomeVerifier()
+            ),
+            url_policy=public_url_policy(),
+        )
+
+        with self.assertRaisesRegex(
+            ScenarioExecutionError,
+            "browser_harness_daemon_unavailable",
+        ) as raised:
+            runner.inspect(URL)
+        self.assertEqual(
+            raised.exception.error_code,
+            "browser_harness_daemon_unavailable",
+        )
+
     def test_runner_executes_real_grounded_click_and_verifies_new_graph(self):
         class Client:
             def __init__(self):
@@ -449,6 +521,94 @@ class GenericScenarioRunnerTest(unittest.TestCase):
         self.assertEqual(result["capture_count"], 3)
         self.assertEqual(len(result["steps"]), 2)
 
+    def test_runner_executes_grounded_type_and_verifies_exact_value(self):
+        class Client:
+            def __init__(self):
+                self.sequence = 0
+
+            def open_or_bind_target(self, page_url):
+                return {"target_id": "target-input", "page_url": page_url}
+
+            def capture_page_payload(self, *, include_canvas=True):
+                self.sequence += 1
+                return {"sequence": self.sequence, "page_url": URL}
+
+        class Perception:
+            def __init__(self):
+                self.snapshots = {}
+
+            def ingest(self, payload):
+                capture_id = f"capture-type-{payload['sequence']}"
+                self.snapshots[capture_id] = {"capture_id": capture_id}
+                return {"capture_id": capture_id}
+
+            def get_ui_graph(self, capture_id):
+                sequence = int(capture_id.rsplit("-", 1)[1])
+                value = graph(capture_id)
+                value["nodes"] = [
+                    {
+                        "id": "cdp:search",
+                        "kind": "control",
+                        "name": "当前动态热词",
+                        "role": "textbox",
+                        "disabled": False,
+                        "actionable": False,
+                        "can_click_now": False,
+                        "safe_for_execution": False,
+                        "bbox": [10, 10, 180, 30],
+                        "attributes": {
+                            "id": "search-input",
+                            "value": "找一个前端开源项目" if sequence >= 3 else "",
+                        },
+                        "source": {
+                            "kind": "cdp",
+                            "backend_node_id": 303,
+                            "frame_id": "main",
+                            "frame_url": URL,
+                        },
+                        "interaction": {"candidate": True, "status": "candidate_only"},
+                    }
+                ]
+                return value
+
+            def get_action_snapshot(self, capture_id):
+                return self.snapshots[capture_id]
+
+        class Executor:
+            def __init__(self, client):
+                self.client = client
+                self.actions = []
+
+            def execute(self, action):
+                self.actions.append(action)
+                return BrowserExecutionResult(True, "", backend_node_id=303)
+
+        client = Client()
+        executor = Executor(client)
+        runner = ScenarioRunner(
+            page_perception=Perception(),
+            browser_executor=executor,
+            grounders=TargetGrounderRegistry(),
+            verifiers=OutcomeVerifierRegistry(
+                [], ui_graph_verifier=UIGraphOutcomeVerifier()
+            ),
+            url_policy=public_url_policy(),
+            clock=lambda: 10.0,
+        )
+        scratch = Path("runtime_data") / "test-type-runner"
+        scratch.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=scratch) as temp_dir:
+            result = runner.run(
+                type_plan(),
+                run_id="run-type",
+                out_dir=Path(temp_dir) / "evidence",
+                confirmed=True,
+            )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(executor.actions[0].op, "type")
+        self.assertEqual(executor.actions[0].text, "找一个前端开源项目")
+
 
 class FailureCategoryAndGenericVerifierTest(unittest.TestCase):
     def test_classify_error_maps_loop_failures_to_stable_categories(self):
@@ -501,6 +661,29 @@ class FailureCategoryAndGenericVerifierTest(unittest.TestCase):
                 },
                 before=before,
                 after=after,
+            )
+        )
+
+        input_before = graph("input-before")
+        input_after = graph("input-after")
+        for value, typed in ((input_before, ""), (input_after, "前端开源项目")):
+            value["nodes"][0]["name"] = "搜索框"
+            value["nodes"][0]["role"] = "textbox"
+            value["nodes"][0]["attributes"]["value"] = typed
+            duplicate = copy.deepcopy(value["nodes"][0])
+            duplicate["id"] = duplicate["id"].replace("cdp:", "dom:")
+            duplicate["source"] = {"kind": "dom"}
+            duplicate["attributes"].pop("value", None)
+            value["nodes"].append(duplicate)
+        self.assertTrue(
+            verifier.verify(
+                expected={
+                    "type": "input_value",
+                    "target": {"query": "搜索框", "role": "textbox"},
+                    "value": "前端开源项目",
+                },
+                before=input_before,
+                after=input_after,
             )
         )
         self.assertTrue(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import math
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -24,6 +25,8 @@ class BrowserHarnessError(RuntimeError):
 
 class BrowserHarnessClient:
     """Small, fixed-capability client for the Browser Harness daemon."""
+
+    _TARGET_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 
     def __init__(
         self,
@@ -51,7 +54,12 @@ class BrowserHarnessClient:
         self._bound_target_id = ""
         self._bound_page_url = ""
 
-    def open_or_bind_target(self, start_url: str) -> dict[str, str]:
+    def open_or_bind_target(
+        self,
+        start_url: str,
+        *,
+        target_id: str = "",
+    ) -> dict[str, str]:
         """Select, switch to, navigate and bind one target for this Scenario."""
 
         try:
@@ -60,24 +68,39 @@ class BrowserHarnessClient:
             raise BrowserHarnessError(exc.error_code) from exc
         try:
             self._load_runtime()
-            matches = self._page_targets(target_url)
-            if len(matches) == 1:
-                target_id = str(matches[0].get("targetId", "")).strip()
-                self._switch_tab(target_id)
-            elif len(matches) > 1:
-                raise BrowserHarnessError("browser_target_ambiguous")
+            requested_target_id = str(target_id).strip()
+            if requested_target_id:
+                if not self._TARGET_ID_PATTERN.fullmatch(requested_target_id):
+                    raise BrowserHarnessError("browser_target_id_invalid")
+                matches = self._page_targets_by_id(requested_target_id)
+                if (
+                    len(matches) != 1
+                    or str(matches[0].get("url", "")).strip() != target_url
+                ):
+                    raise BrowserHarnessError("browser_target_binding_mismatch")
+                bound_target_id = requested_target_id
+                self._switch_tab(bound_target_id)
             else:
-                target_id = self._open_new_target(target_url)
-            self._confirm_active_target(target_id)
+                matches = self._page_targets(target_url)
+                if len(matches) == 1:
+                    bound_target_id = str(matches[0].get("targetId", "")).strip()
+                    self._switch_tab(bound_target_id)
+                elif len(matches) > 1:
+                    raise BrowserHarnessError("browser_target_ambiguous")
+                else:
+                    bound_target_id = self._open_new_target(target_url)
+            self._confirm_active_target(bound_target_id)
             final_url = self._settle_page_url()
+            if requested_target_id and final_url != target_url:
+                raise BrowserHarnessError("browser_target_binding_mismatch")
         except BrowserHarnessError:
             raise
         except Exception as exc:
             raise BrowserHarnessError("browser_target_binding_failed") from exc
 
-        self._bound_target_id = target_id
+        self._bound_target_id = bound_target_id
         self._bound_page_url = final_url
-        return {"target_id": target_id, "page_url": final_url}
+        return {"target_id": bound_target_id, "page_url": final_url}
 
     def bind_page_target(self, page_url: str) -> dict[str, str]:
         """Switch the Browser Harness session to one exact live page target."""
@@ -226,6 +249,136 @@ class BrowserHarnessClient:
             "x": x,
             "y": y,
         }
+
+    def type_backend_node(
+        self,
+        target: BrowserTarget,
+        text: str,
+    ) -> dict[str, Any]:
+        backend_node_id = target.backend_node_id
+        if (
+            isinstance(backend_node_id, bool)
+            or not isinstance(backend_node_id, int)
+            or backend_node_id < 1
+        ):
+            raise BrowserHarnessError("invalid_backend_node_id")
+        if (
+            not isinstance(text, str)
+            or not text
+            or len(text) > 1_000
+            or any(ord(character) < 32 or ord(character) == 127 for character in text)
+        ):
+            raise BrowserHarnessError("browser_input_text_invalid")
+        if target.role not in {"textbox", "searchbox", "combobox"}:
+            raise BrowserHarnessError("browser_input_target_invalid")
+        try:
+            self._load_runtime()
+            self._assert_bound_target(target.page_url)
+            page = self._cdp_call("Page.getFrameTree")
+            current_url = str(
+                page.get("frameTree", {}).get("frame", {}).get("url", "")
+            ).strip()
+            if current_url != target.page_url:
+                raise BrowserHarnessError("browser_page_changed")
+            live_frame = self._frame_by_id(page.get("frameTree"), target.frame_id)
+            if (
+                live_frame is None
+                or str(live_frame.get("url", "")).strip() != target.frame_url
+            ):
+                raise BrowserHarnessError("browser_target_frame_changed")
+            described = self._cdp_call(
+                "DOM.describeNode",
+                backendNodeId=backend_node_id,
+                depth=0,
+                pierce=True,
+            )
+            live_node = described.get("node")
+            if (
+                not isinstance(live_node, Mapping)
+                or live_node.get("backendNodeId") != backend_node_id
+            ):
+                raise BrowserHarnessError("browser_target_changed")
+            node_name = str(live_node.get("nodeName", "")).upper()
+            attributes = self._attributes(live_node.get("attributes"))
+            if (
+                node_name not in {"INPUT", "TEXTAREA"}
+                or attributes.get("type", "text").casefold()
+                in {"password", "file", "hidden"}
+                or "disabled" in attributes
+                or "readonly" in attributes
+                or (target.dom_id and attributes.get("id") != target.dom_id)
+                or any(
+                    attributes.get(name) != value
+                    for name, value in target.expected_attributes
+                )
+                or (
+                    target.owner_business_id
+                    and attributes.get("data-owner-business-id")
+                    != target.owner_business_id
+                )
+                or (
+                    target.action_id
+                    and attributes.get("data-action-id") != target.action_id
+                )
+            ):
+                raise BrowserHarnessError("browser_input_target_invalid")
+            if not target.dom_id and not target.expected_attributes:
+                self._validate_accessible_identity(target)
+            response = self._cdp_call(
+                "DOM.getBoxModel",
+                backendNodeId=backend_node_id,
+            )
+            x, y = self._quad_center(response.get("model", {}).get("content"))
+            metrics = self._cdp_call("Page.getLayoutMetrics")
+            viewport = metrics.get("cssVisualViewport") or metrics.get(
+                "cssLayoutViewport"
+            )
+            if not self._inside_viewport(x, y, viewport):
+                raise BrowserHarnessError("browser_target_not_visible")
+            hit = self._cdp_call(
+                "DOM.getNodeForLocation",
+                x=int(round(x)),
+                y=int(round(y)),
+            )
+            if hit.get("backendNodeId") != backend_node_id:
+                raise BrowserHarnessError("browser_target_occluded")
+            self._cdp_call("DOM.focus", backendNodeId=backend_node_id)
+            self._cdp_call(
+                "Input.dispatchKeyEvent",
+                type="keyDown",
+                modifiers=2,
+                key="a",
+                code="KeyA",
+                windowsVirtualKeyCode=65,
+            )
+            self._cdp_call(
+                "Input.dispatchKeyEvent",
+                type="keyUp",
+                modifiers=2,
+                key="a",
+                code="KeyA",
+                windowsVirtualKeyCode=65,
+            )
+            self._cdp_call(
+                "Input.dispatchKeyEvent",
+                type="rawKeyDown",
+                key="Backspace",
+                code="Backspace",
+                windowsVirtualKeyCode=8,
+            )
+            self._cdp_call(
+                "Input.dispatchKeyEvent",
+                type="keyUp",
+                key="Backspace",
+                code="Backspace",
+                windowsVirtualKeyCode=8,
+            )
+            self._cdp_call("Input.insertText", text=text)
+        except BrowserHarnessError:
+            raise
+        except Exception as exc:
+            raise BrowserHarnessError("browser_harness_type_failed") from exc
+        return {"backend_node_id": backend_node_id}
 
     def _destination_url(
         self,
@@ -594,6 +747,19 @@ class BrowserHarnessClient:
             and str(item.get("type", "")) == "page"
             and str(item.get("url", "")).strip() == page_url
             and str(item.get("targetId", "")).strip()
+        ]
+
+    def _page_targets_by_id(self, target_id: str) -> list[Mapping[str, Any]]:
+        result = self._cdp_call("Target.getTargets")
+        targets = result.get("targetInfos")
+        if not isinstance(targets, list):
+            return []
+        return [
+            item
+            for item in targets
+            if isinstance(item, Mapping)
+            and str(item.get("type", "")) == "page"
+            and str(item.get("targetId", "")).strip() == target_id
         ]
 
     def _switch_tab(self, target_id: str) -> None:

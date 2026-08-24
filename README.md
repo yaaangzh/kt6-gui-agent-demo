@@ -7,7 +7,8 @@
 当前阶段结论：**KT6 核心架构、端到端 PoC、三种 Canvas 像素识别驱动，以及 B 组
 多源 UI Graph dry-run 规划已完成；`feature/browser-executor` 已固定
 `kt6.action-plan.v1` 契约，支持受限自然语言生成可读计划，并由 ScenarioRunner 在每一步
-重新采集真实 DOM/CDP/Canvas 后执行 click、wait、verify；真实浏览器实机运行、真实业务系统验收、
+重新采集真实 DOM/CDP/Canvas 后执行 type、click、wait、verify；Chrome Side Panel 可把自然
+语言流程绑定到当前标签页的精确 CDP Target；真实业务系统验收、
 真实图片准确率评测和真实设备下发尚未完成。**
 
 供其他 Codex 或新开发环境接手时，请同时阅读
@@ -25,7 +26,7 @@ TextFlow 的中间文本图分层思想，当前不包含 OmniParser。
 UI Graph 新方案保留在 `ui-graph-textflow-cdp`；Browser Harness 执行试验继续隔离在
 `feature/browser-executor`。测试区环境准备、CDP 采集、内部 GLM 配置、接口检查和
 执行步骤见 [test.md](./test.md)。GLM 产出的 UI Operation DAG 始终是不可执行提案；
-真实 click 只能经过独立 SafeDOMAction 授权链。
+真实 type/click 只能经过固定能力执行器、新鲜感知和一次性动作令牌。
 
 ## 当前 A/B 状态
 
@@ -33,9 +34,9 @@ UI Graph 新方案保留在 `ui-graph-textflow-cdp`；Browser Harness 执行试�
 |---|---|---|
 | A 组 | `main` | 现有 DOM、Canvas、OpenCV/OCR 和安全动作链基线 |
 | B 组 | `ui-graph-textflow-cdp` | Playwright/CDP、多源 UI Graph、内部 GLM5.1 DAG 规划 |
-| 执行试验 | `feature/browser-executor` | 自然语言 → Action Plan → 真实 DOM/Canvas → 安全 click → 新 capture → Verifier Registry |
+| 执行试验 | `feature/browser-executor` | 当前 Chrome Tab + 自然语言 → Action Plan → 安全 type/click → 新 capture → Verifier Registry |
 
-B 组自动化回归已通过，执行试验分支已经完成 click-only 代码接线；下一阶段是在测试区
+B 组自动化回归已通过，执行试验分支已经完成受控 type/click 和 Chrome Side Panel 接线；下一阶段是在测试区
 使用真实 Chromium/CDP、真实 NCE/FEBS 页面和内部 GLM5.1 endpoint 验证完整链路。
 当前点击成功只表示输入事件已派发，必须重新采集并由 KT6 验证业务结果，不能把合成
 测试或 `executed_pending_verification` 等同于目标系统现场验收。
@@ -57,15 +58,15 @@ B 组自动化回归已通过，执行试验分支已经完成 click-only 代码
 | 页面感知 | DOM/ARIA、Canvas 截图、渲染器 Scene、拓扑文本重建及 Local CV/HTTP/CodeAgent CanvasVision Adapter |
 | 多源 UI Graph | 汇合 DOM/CDP/page_api/vision/text，保留节点来源、父子/owner/action/semantic 边及交互候选 |
 | 内部 GLM 结构规划 | 测试区 GLM5.1 只提出 `locate/click/wait/verify` DAG；严格验证后仍为不可执行 dry-run |
-| 在线页面采集 | Chrome/Edge 扩展 v0.5.2，并行采集 DOM/ARIA 与 Canvas/SVG 可见区域截图；耗时识别由后端异步任务执行，弹窗重开可恢复进度 |
-| DOM 安全动作 | 权威资产解析、设备与控件双重绑定、六步计划、新鲜页面复核和一次性令牌；功能分支在 click 前再次核对 live frame/identity/hit-test，并用新 capture 确定性验证结果 |
-| 多步骤页面执行 | 受限中文规则生成 `kt6.action-plan.v1`，用户确认后异步运行；DOM 和 Canvas 每步重新 Grounding，Verifier Registry 确定性判定结果 |
+| 浏览器扩展 | Chrome/Edge 扩展 v0.6.0 提供 Side Panel；读取当前 active Tab，并用只读 `chrome.debugger.getTargets()` 映射精确 Target ID；不 attach、不发送任意 CDP 命令 |
+| DOM 安全动作 | 权威资产解析、设备与控件双重绑定、新鲜页面复核和一次性令牌；type 只允许普通 textbox-like DOM，click 继续核对 live frame/identity/hit-test，并用新 capture 确定性验证结果 |
+| 多步骤页面执行 | 模型生成严格 `kt6.action-plan.v1`，用户确认后异步运行；DOM 和 Canvas 每步重新 Grounding，Verifier Registry 确定性判定结果 |
 | 感知缓存 | Scene Graph 缓存、`scene_revision`、`HIT/MISS/INCREMENTAL` |
 | 拓扑变化检测 | 节点、位置、链路增删及链路语义属性变化检测；关键变化触发重规划 |
 | 运行记忆 | SQLite 持久化任务、事件、检查点、场景和业务处理结果 |
 | KT5 接入基础 | 感知拓扑与生成拓扑共用统一 Scene Graph 契约 |
 | 三方案评测报告 | 统一归档现有方案、Browser Use、UI-TARS 的截图、感知结果和操作轨迹，使用 Manifest/SHA-256 校验证据完整性，再检查覆盖率、公平性并生成 JSON/CSV/Markdown/HTML 报告 |
-| 自动化测试 | 2026-08-18 `feature/browser-executor` 全量 536 项通过、47 项跳过；各分支结果见 `test.md` |
+| 自动化测试 | 2026-08-21 浏览器执行链专项 121 项通过、1 项跳过；全量 564 项中 562 项通过、1 项跳过、1 项为既有 OpenCV 环境失败；各分支结果见 `test.md` |
 
 ## 业务场景
 
@@ -157,7 +158,7 @@ UI Graph 规划不替代现有 DOM 安全动作链。只有 DOM/CDP 节点可以
 -> Runtime 定位目标并在执行前重新校验
 ```
 
-同步 `POST /api/perception/captures` 仍作为兼容和诊断接口保留；扩展 v0.5.2 默认走
+同步 `POST /api/perception/captures` 仍作为兼容和诊断接口保留；扩展内的 capture pipeline 默认走
 异步任务，避免弹窗生命周期和耗时视觉识别绑在同一个 HTTP 请求上。
 
 系统按页面开放程度使用不同路径：
@@ -165,7 +166,7 @@ UI Graph 规划不替代现有 DOM 安全动作链。只有 DOM/CDP 节点可以
 | 路径 | 适用页面 | 当前状态 |
 |---|---|---|
 | DOM 感知 | 按钮、表格、表单等可访问 DOM/ARIA 的页面 | 已完成第一期 |
-| 浏览器视觉区域截图 | 在线页面中的 Canvas、SVG、WebGL 或组合渲染地图 | 扩展 v0.5.2 已接入；未验证整页回退固定 analysis-only |
+| 浏览器视觉区域截图 | 在线页面中的 Canvas、SVG、WebGL 或组合渲染地图 | Browser Agent v0.6.0 已保留 capture pipeline；未验证整页回退固定 analysis-only |
 | 显式页面 API / Renderer Adapter | 页面主动暴露只读 `nodes/edges` 快照的 Canvas | 当前 Demo 已使用；不拦截页面网络请求 |
 | Topology Text Recognizer | 人工 ASCII 或外部 OCR 已转写出的结构化拓扑文本 | 已完成首个严格样例 |
 | Canvas Vision Adapter | 只能获得截图、图片、远程桌面或封闭 Canvas | 本地 RapidOCR/OpenCV、HTTP 服务与 CodeAgent read-tool 三种驱动、严格协议和 pixels-only CLI 已完成 |
@@ -178,7 +179,7 @@ UI Graph 规划不替代现有 DOM 安全动作链。只有 DOM/CDP 节点可以
 的 `edge://extensions` 打开开发者模式，加载本仓库的 `browser_extension` 目录。
 扩展更新后必须在扩展管理页点击刷新，再回到目标页面重新采集。
 
-扩展 v0.5.2 使用 DOM 与视觉分治。DOM 路径优先保留业务 ID、资产 ID、管理 IP、
+扩展内的 capture pipeline 使用 DOM 与视觉分治。DOM 路径优先保留业务 ID、资产 ID、管理 IP、
 序列号、站点、资产版本、动作 ID、控件归属、按钮、菜单、表格、树、标题和可点击
 卡片，并过滤可点击父元素内部继承 `cursor:pointer` 的重复图标与文本。没有交互控件
 时会回退采集标题和短正文；SVG `<text>` 与“数字 + 单位/比例”的统计卡片会作为
@@ -238,7 +239,7 @@ AP1 + 当前 page_capture_id
 -> POST /api/dom-actions/preflight
 -> 复核资产版本/状态、页面、frame、document、selector、控件归属和动作语义
 -> 签发 15 秒有效、只能消费一次的随机令牌
--> POST /api/dom-actions/execute（默认 dry-run；功能分支显式启用后可派发 click）
+-> POST /api/dom-actions/execute（默认 dry-run；功能分支的 Scenario Runner 另行派发固定 type/click）
 ```
 
 `operation_plan` 固定显示六步：`bind_target`、`confirm_and_authorize`、
@@ -535,6 +536,18 @@ python -m kt6_backend.app
 python main.py
 ```
 
+要运行“当前网页 + 自然语言流程”的浏览器 Agent，请使用执行分支的一体化入口：
+
+```powershell
+.\scripts\start-browser-executor.ps1
+```
+
+脚本会启动带 `browser_extension/` 的专用 CDP Chrome/Edge、Browser Harness 和后端。
+在该浏览器打开 URL Policy 允许的任意 HTTP(S) 页面，点击工具栏里的
+“KT6 Browser Agent”即可打开 Side Panel。Side Panel 自动绑定当前 Tab，不需要再填写
+URL；生成计划后仍需人工勾选确认。若 9222 端口上已经是旧浏览器进程，脚本会复用它而
+无法补装启动参数；首次升级到 v0.6.0 时应先关闭该专用浏览器再重新运行脚本。
+
 浏览器访问：
 
 ```text
@@ -560,6 +573,11 @@ GET  /api/perception/captures?limit={n}
 GET  /api/perception/captures/{capture_id}
 GET  /api/perception/cache
 GET  /api/ui-graphs/{capture_id}
+
+GET  /api/execution/health
+POST /api/execution/plans
+POST /api/execution/runs
+GET  /api/execution/runs/{run_id}
 
 POST /api/ui-operations/plan
 
@@ -620,10 +638,10 @@ runtime_data/
 
 - Runtime 状态流转、事件、锁、checkpoint、持久化是真实实现。
 - DOM、Canvas 像素采集、Scene 缓存、资产解析规则、双重绑定、执行前复核和一次性
-  令牌是真实实现；Browser Harness click 仅在功能分支显式启用。
+  令牌是真实实现；Browser Harness type/click 仅在功能分支显式启用。
 - Demo 拓扑业务语义、指标、根因输入和设备动作结果仍是 Mock。
 - 当前资产数据来自 `data/mock_assets.json`，请求中的权限列表不是企业鉴权；默认配置会
-  拒绝 `dry_run=false`。功能分支只接入受控浏览器 click，不等于真实设备 API 下发。
+  拒绝 `dry_run=false`。功能分支只接入受控浏览器 type/click，不等于真实设备 API 下发。
 - CanvasVision 本地 RapidOCR/OpenCV、HTTP 与 CodeAgent read-tool 接入已经具备，但真实图片准确率验证、企业鉴权、真实设备下发和生产级回滚尚未完成。
 
 接入真实系统时，应保留 Runtime 与 Playbook，替换 `kt6_backend/tools.py` 中的业务适配实现，并通过 `kt6_backend/tool_registry.py` 注册真实工具。
@@ -688,7 +706,7 @@ kt6_backend/
 
 playbooks/                     诊断和动作任务链
 data/                          Mock 业务数据
-browser_extension/             Chrome/Edge DOM + Canvas/SVG 分治采集扩展 v0.5.2
+browser_extension/             Chrome/Edge Browser Agent Side Panel 与页面感知采集扩展 v0.6.0
 browser_sidecar/               Playwright/CDP 只读采集 Sidecar
 demo/                          LUI-GUI Web 界面
 docs/                          架构与运维说明
@@ -768,6 +786,7 @@ Manifest、文件或这些语义绑定有缺失/改动时，该运行不能参�
 ```powershell
 python -m unittest `
   tests.test_browser_executor `
+  tests.test_execution_runtime `
   tests.test_execution_scenario `
   tests.test_outcome_verifier `
   tests.test_execution_e2e `
@@ -787,8 +806,18 @@ python -m unittest `
 Python 3.12、Browser Harness 和 `.env` 配置后执行：
 
 ```powershell
+.\scripts\start-browser-executor.ps1
+
+# 输出 ready 后，可在同一环境随时运行自然语言任务
 python -m kt6_backend.execution_e2e_cli --url https://example.com/ --task "点击 Learn more 进入说明页面"
 ```
+
+启动脚本幂等拉起专用 Chrome/Edge CDP（默认 `127.0.0.1:9222`）、预热 Browser Harness，
+再启动 KT6 后端（默认 `127.0.0.1:8787`）。只有 CDP、Harness 的真实
+`Target.getTargets` 调用和后端都通过探测后才输出 ready；可用
+`GET /api/execution/health` 查看实时状态。Runner 页面也会先检查该接口，执行链缺失时
+显示具体组件，不再把后端异常折叠成 `Failed to fetch`。启动脚本不会把 Runner 放进
+受控 Target Chrome；请继续在普通浏览器或 Codex 内置浏览器打开输出的 Runner 地址。
 
 命令先通过 URL Safety Policy 校验目标 URL，再感知真实页面并调用规划模型生成语义计划，
 不再固定测试页或规则解析器。计划中没有 UI Graph、backend node id、selector 或坐标；
@@ -820,5 +849,5 @@ Browser Harness 会激活本次绑定的目标标签页，保证连续截图和�
 执行链并非对百度域名写死。Planner 失败时仍必须明确返回错误，不能静默换成规则或假计划。
 
 当前仓库没有 FEBS/NCE 前端源码，因此扩展尚未嵌入目标系统；它只是外部采集桥梁。
-Browser Harness click 只有显式配置后才可用，设备 API 下发仍未接入；现场验收前应先在
+Browser Harness type/click 只有显式配置后才可用，设备 API 下发仍未接入；现场验收前应先在
 隔离、可恢复页面验证点击与新的 KT6 capture，不能把待验证状态记为任务成功。

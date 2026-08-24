@@ -8,6 +8,15 @@ from ..asset_inventory import compact_text, identity_key, strong_identity_key
 
 
 _SELECTED_VALUES = frozenset({"true", "1", "selected", "checked", "active"})
+_GENERIC_TEXTBOX_QUERIES = frozenset(
+    {
+        identity_key("搜索框"),
+        identity_key("搜索输入框"),
+        identity_key("search box"),
+        identity_key("search input"),
+    }
+)
+_TEXTBOX_ROLES = frozenset({"textbox", "searchbox"})
 
 
 def matching_nodes(
@@ -74,9 +83,18 @@ def _score(target: Mapping[str, Any], node: Mapping[str, Any]) -> int:
     }
     exact_query = query in terms
     contains_query = len(query) >= 3 and any(query in term for term in terms)
-    if not exact_query and not contains_query:
+    requested_role = compact_text(target.get("role"), 100).casefold()
+    observed_role = compact_text(
+        node.get("role") or attributes.get("role"), 100
+    ).casefold()
+    generic_textbox_query = (
+        query in _GENERIC_TEXTBOX_QUERIES
+        and requested_role in _TEXTBOX_ROLES
+        and observed_role in _TEXTBOX_ROLES
+    )
+    if not exact_query and not contains_query and not generic_textbox_query:
         return 0
-    score = 20 if exact_query else 5
+    score = 20 if exact_query else (5 if contains_query else 4)
 
     asset_id = compact_text(target.get("asset_id"), 200)
     if asset_id:
@@ -105,12 +123,8 @@ def _score(target: Mapping[str, Any], node: Mapping[str, Any]) -> int:
             return 0
         score += 8
 
-    role = compact_text(target.get("role"), 100).casefold()
-    if role:
-        observed_role = compact_text(
-            node.get("role") or attributes.get("role"), 100
-        ).casefold()
-        if observed_role != role:
+    if requested_role:
+        if observed_role != requested_role and not generic_textbox_query:
             return 0
         score += 4
     return score

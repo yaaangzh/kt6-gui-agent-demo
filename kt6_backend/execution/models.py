@@ -43,6 +43,7 @@ class BrowserAction:
 
     op: str
     target: BrowserTarget | VisualTarget
+    text: str = ""
 
 
 @dataclass(frozen=True)

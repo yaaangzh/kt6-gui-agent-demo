@@ -1188,6 +1188,131 @@ class BrowserHarnessClientTest(unittest.TestCase):
 
         self.assertEqual(raised.exception.error_code, "browser_target_ambiguous")
 
+    def test_explicit_target_id_disambiguates_the_exact_current_tab(self):
+        target_url = "https://nce.example/devices"
+        harness = TabHarness(
+            [
+                {"targetId": "target-a", "type": "page", "url": target_url},
+                {"targetId": "target-b", "type": "page", "url": target_url},
+            ],
+            active_target_id="target-a",
+        )
+
+        def cdp(method, **_params):
+            if method == "Target.getTargets":
+                return harness.targets_payload()
+            if method == "Page.getFrameTree":
+                return {
+                    "frameTree": {
+                        "frame": {"id": "frame-main", "url": target_url}
+                    }
+                }
+            self.fail(f"unexpected CDP method: {method}")
+
+        client = BrowserHarnessClient(
+            cdp_url="http://127.0.0.1:9222",
+            workspace=Path("runtime_data/browser-harness-test"),
+            url_policy=execution_url_policy(),
+            cdp_call=cdp,
+            click_call=lambda _x, _y: None,
+            switch_tab_call=harness.switch_tab,
+            current_tab_call=harness.current_tab,
+            new_tab_call=harness.new_tab,
+        )
+
+        session = client.open_or_bind_target(target_url, target_id="target-b")
+        self.assertEqual(session["target_id"], "target-b")
+        self.assertEqual(harness.active_target_id, "target-b")
+
+        with self.assertRaises(BrowserHarnessError) as raised:
+            client.open_or_bind_target(target_url, target_id="target-c")
+        self.assertEqual(
+            raised.exception.error_code,
+            "browser_target_binding_mismatch",
+        )
+
+    def test_type_uses_fixed_cdp_input_sequence(self):
+        target_url = "https://nce.example/devices"
+        harness = TabHarness(
+            [{"targetId": "target-input", "type": "page", "url": target_url}],
+            active_target_id="target-input",
+        )
+        calls = []
+
+        def cdp(method, **params):
+            calls.append((method, params))
+            if method == "Target.getTargets":
+                return harness.targets_payload()
+            if method == "Page.getFrameTree":
+                return {
+                    "frameTree": {
+                        "frame": {"id": "frame-main", "url": target_url}
+                    }
+                }
+            if method == "DOM.describeNode":
+                return {
+                    "node": {
+                        "backendNodeId": 501,
+                        "nodeName": "INPUT",
+                        "attributes": ["id", "search-input", "type", "search"],
+                    }
+                }
+            if method == "DOM.getBoxModel":
+                return {
+                    "model": {
+                        "content": [10, 20, 210, 20, 210, 50, 10, 50]
+                    }
+                }
+            if method == "Page.getLayoutMetrics":
+                return {
+                    "cssVisualViewport": {
+                        "clientWidth": 1280,
+                        "clientHeight": 720,
+                    }
+                }
+            if method == "DOM.getNodeForLocation":
+                return {"backendNodeId": 501}
+            if method in {"DOM.focus", "Input.dispatchKeyEvent", "Input.insertText"}:
+                return {}
+            self.fail(f"unexpected CDP method: {method}")
+
+        client = BrowserHarnessClient(
+            cdp_url="http://127.0.0.1:9222",
+            workspace=Path("runtime_data/browser-harness-test"),
+            url_policy=execution_url_policy(),
+            cdp_call=cdp,
+            click_call=lambda _x, _y: None,
+            switch_tab_call=harness.switch_tab,
+            current_tab_call=harness.current_tab,
+            new_tab_call=harness.new_tab,
+        )
+        client.open_or_bind_target(target_url, target_id="target-input")
+        target = BrowserTarget(
+            node_id="cdp:search",
+            backend_node_id=501,
+            frame_id="frame-main",
+            frame_url=target_url,
+            page_url=target_url,
+            click_backend_node_id=501,
+            dom_id="search-input",
+            accessible_name="搜索框",
+            role="searchbox",
+            expected_attributes=(("type", "search"),),
+            owner_business_id="",
+            action_id="",
+        )
+
+        receipt = client.type_backend_node(target, "前端开源项目")
+
+        self.assertEqual(receipt, {"backend_node_id": 501})
+        methods = [method for method, _params in calls]
+        self.assertIn("DOM.focus", methods)
+        self.assertIn("DOM.getNodeForLocation", methods)
+        self.assertEqual(methods.count("Input.dispatchKeyEvent"), 4)
+        inserted = [params for method, params in calls if method == "Input.insertText"]
+        self.assertEqual(inserted, [{"text": "前端开源项目"}])
+        self.assertEqual(methods[-1], "Input.insertText")
+
 
 class BrowserExecutionBoundaryTest(unittest.TestCase):
     def test_dom_grounder_selects_the_current_real_graph_target(self):

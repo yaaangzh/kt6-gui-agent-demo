@@ -49,10 +49,25 @@ class ScenarioRunner:
         self.wait = wait
         self.validator = ActionPlanValidator()
 
-    def inspect(self, start_url: str) -> dict[str, Any]:
-        target_url = self.url_policy.validate(start_url)
-        browser_session = self.client.open_or_bind_target(target_url)
-        snapshot, graph, preview = self._capture()
+    def inspect(
+        self,
+        start_url: str,
+        *,
+        browser_target_id: str = "",
+    ) -> dict[str, Any]:
+        try:
+            target_url = self.url_policy.validate(start_url)
+            browser_session = (
+                self.client.open_or_bind_target(
+                    target_url,
+                    target_id=browser_target_id,
+                )
+                if browser_target_id
+                else self.client.open_or_bind_target(target_url)
+            )
+            snapshot, graph, preview = self._capture()
+        except BrowserHarnessError as exc:
+            raise ScenarioExecutionError(exc.error_code) from exc
         return {
             "browser_session": browser_session,
             "capture_id": snapshot["capture_id"],
@@ -68,6 +83,7 @@ class ScenarioRunner:
         run_id: str,
         out_dir: Path,
         confirmed: bool,
+        browser_target_id: str = "",
         update: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         if not confirmed:
@@ -76,7 +92,14 @@ class ScenarioRunner:
         target_url = self.url_policy.validate(action_plan["start_url"])
         out_dir.mkdir(parents=True, exist_ok=False)
         _write_json(out_dir / "action-plan.json", action_plan)
-        browser_session = self.client.open_or_bind_target(target_url)
+        browser_session = (
+            self.client.open_or_bind_target(
+                target_url,
+                target_id=browser_target_id,
+            )
+            if browser_target_id
+            else self.client.open_or_bind_target(target_url)
+        )
         step_results: list[dict[str, Any]] = []
         pending: dict[str, Any] | None = None
         capture_sequence = 0
@@ -115,6 +138,12 @@ class ScenarioRunner:
                 )
                 if step["op"] == "click":
                     result, pending = self._click(
+                        step,
+                        pending=pending,
+                        capture=capture,
+                    )
+                elif step["op"] == "type":
+                    result, pending = self._type(
                         step,
                         pending=pending,
                         capture=capture,
@@ -196,16 +225,17 @@ class ScenarioRunner:
             fresh_grounded = self.grounders.resolve(step["target"], fresh_graph)
             if not isinstance(fresh_grounded, BrowserTarget):
                 raise ScenarioExecutionError("scenario_grounding_modality_changed")
-            if self.action_guard.fingerprint(grounded) != self.action_guard.fingerprint(
-                fresh_grounded
-            ):
+            if self.action_guard.target_fingerprint(
+                grounded
+            ) != self.action_guard.target_fingerprint(fresh_grounded):
                 raise ScenarioExecutionError("scenario_grounding_changed")
             grounded = fresh_grounded
             before = fresh
             graph = fresh_graph
-        token = self.action_guard.authorize(grounded)
-        self.action_guard.consume(token, grounded)
-        execution = self.browser_executor.execute(BrowserAction("click", grounded))
+        action = BrowserAction("click", grounded)
+        token = self.action_guard.authorize(action)
+        self.action_guard.consume(token, action)
+        execution = self.browser_executor.execute(action)
         if not execution.success:
             raise ScenarioExecutionError(execution.error_code)
         return (
@@ -221,6 +251,47 @@ class ScenarioRunner:
             {
                 "before": before,
                 "before_graph": graph,
+            },
+        )
+
+    def _type(
+        self,
+        step: Mapping[str, Any],
+        *,
+        pending: dict[str, Any] | None,
+        capture: Callable[[str], tuple[dict[str, Any], dict[str, Any], dict[str, Any]]],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        if pending is not None:
+            raise ScenarioExecutionError("scenario_previous_outcome_unverified")
+        _before, graph, _ = capture(f"{step['id']}-before")
+        grounded = self.grounders.resolve(step["target"], graph)
+        if not isinstance(grounded, BrowserTarget):
+            raise ScenarioExecutionError("scenario_type_requires_dom_target")
+        fresh, fresh_graph, _ = capture(f"{step['id']}-fresh")
+        fresh_grounded = self.grounders.resolve(step["target"], fresh_graph)
+        if not isinstance(fresh_grounded, BrowserTarget):
+            raise ScenarioExecutionError("scenario_grounding_modality_changed")
+        if self.action_guard.target_fingerprint(
+            grounded
+        ) != self.action_guard.target_fingerprint(fresh_grounded):
+            raise ScenarioExecutionError("scenario_grounding_changed")
+        action = BrowserAction("type", fresh_grounded, text=step["text"])
+        token = self.action_guard.authorize(action)
+        self.action_guard.consume(token, action)
+        execution = self.browser_executor.execute(action)
+        if not execution.success:
+            raise ScenarioExecutionError(execution.error_code)
+        return (
+            {
+                "grounder": "dom_ui_graph",
+                "capture_id": str(fresh_graph.get("capture_id", "")),
+                "graph_id": str(fresh_graph.get("graph_id", "")),
+                "target_node_id": fresh_grounded.node_id,
+                "execution_status": "executed_pending_verification",
+            },
+            {
+                "before": fresh,
+                "before_graph": fresh_graph,
             },
         )
 

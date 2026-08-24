@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>KT6 Browser Agent</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <p class="eyebrow">KT6 Browser Agent</p>
+        <h1>告诉我当前网页要做什么</h1>
+        <p class="subtle">计划绑定当前标签页；执行前会再次确认标签页没有被切换。</p>
+      </header>
+
+      <section class="card context-card" aria-labelledby="context-title">
+        <div class="row">
+          <h2 id="context-title">当前标签页</h2>
+          <button id="refresh-context" class="text-button" type="button">刷新</button>
+        </div>
+        <p id="page-title" class="page-title">正在读取…</p>
+        <p id="page-url" class="page-url"></p>
+        <p id="runtime-status" class="status neutral">正在检查本地执行链…</p>
+      </section>
+
+      <section class="card" aria-labelledby="workflow-title">
+        <label id="workflow-title" for="workflow">自然语言流程</label>
+        <textarea
+          id="workflow"
+          rows="6"
+          maxlength="2000"
+          placeholder="例如：在搜索框输入“找一个前端开源项目”，然后点击百度一下"
+        ></textarea>
+        <button id="generate" class="primary" type="button">生成执行计划</button>
+        <p id="message" class="status neutral" aria-live="polite"></p>
+      </section>
+
+      <section id="plan-card" class="card" hidden aria-labelledby="plan-title">
+        <h2 id="plan-title">待确认计划</h2>
+        <ol id="plan-steps"></ol>
+        <label class="confirm-row">
+          <input id="confirm" type="checkbox" />
+          <span>我已检查以上步骤，同意在当前标签页执行</span>
+        </label>
+        <button id="execute" class="danger" type="button" disabled>确认并开始执行</button>
+      </section>
+
+      <section id="run-card" class="card" hidden aria-labelledby="run-title">
+        <h2 id="run-title">执行状态</h2>
+        <p id="run-status" class="status neutral"></p>
+        <ol id="run-steps"></ol>
+      </section>
+    </main>
+    <script src="sidepanel.js"></script>
+  </body>
+</html>

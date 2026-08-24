@@ -37,7 +37,13 @@ class ExecutionScenarioService:
         self._runs: dict[str, dict[str, Any]] = {}
         self._lock = threading.RLock()
 
-    def generate_plan(self, *, start_url: str, user_request: str) -> dict[str, Any]:
+    def generate_plan(
+        self,
+        *,
+        start_url: str,
+        user_request: str,
+        browser_target_id: str = "",
+    ) -> dict[str, Any]:
         if self.runner is None:
             raise ExecutionScenarioServiceError("execution_runner_not_configured")
         if self.planner is None:
@@ -47,7 +53,14 @@ class ExecutionScenarioService:
             request = str(user_request).strip()
             if not request or len(request) > 2_000:
                 raise ExecutionScenarioServiceError("execution_request_invalid")
-            inspection = self.runner.inspect(target_url)
+            inspection = (
+                self.runner.inspect(
+                    target_url,
+                    browser_target_id=browser_target_id,
+                )
+                if browser_target_id
+                else self.runner.inspect(target_url)
+            )
             validated = self.planner.plan(
                 start_url=target_url,
                 user_request=request,
@@ -81,6 +94,9 @@ class ExecutionScenarioService:
             "planning_capture_id": inspection["capture_id"],
             "planning_graph_id": inspection["graph_id"],
             "planning_preview": inspection["preview_data_url"],
+            "browser_target_id": str(
+                inspection.get("browser_session", {}).get("target_id", "")
+            ),
         }
 
     def start_run(
@@ -88,6 +104,7 @@ class ExecutionScenarioService:
         *,
         plan: Mapping[str, Any],
         confirmed: bool,
+        browser_target_id: str = "",
     ) -> dict[str, Any]:
         if not confirmed:
             raise ExecutionScenarioServiceError("execution_confirmation_required")
@@ -106,13 +123,18 @@ class ExecutionScenarioService:
             self._runs[run_id] = record
         thread = threading.Thread(
             target=self._run,
-            args=(run_id, validated),
+            args=(run_id, validated, browser_target_id),
             daemon=True,
         )
         thread.start()
         return self.get_run(run_id)
 
-    def run_sync(self, plan: Mapping[str, Any]) -> dict[str, Any]:
+    def run_sync(
+        self,
+        plan: Mapping[str, Any],
+        *,
+        browser_target_id: str = "",
+    ) -> dict[str, Any]:
         if self.runner is None:
             raise ExecutionScenarioServiceError("execution_runner_not_configured")
         validated = self.validator.validate(plan)
@@ -123,7 +145,7 @@ class ExecutionScenarioService:
         run_id = f"run_{uuid.uuid4().hex[:16]}"
         with self._lock:
             self._runs[run_id] = self._new_record(run_id, validated)
-        self._run(run_id, validated)
+        self._run(run_id, validated, browser_target_id)
         result = self.get_run(run_id)
         if result["status"] != "success":
             raise ExecutionScenarioServiceError(result.get("error_code", "execution_failed"))
@@ -150,7 +172,37 @@ class ExecutionScenarioService:
             "url_policy": self.url_policy.health(),
         }
 
-    def _run(self, run_id: str, plan: dict[str, Any]) -> None:
+    def runtime_health(self) -> dict[str, Any]:
+        from .runtime_preflight import execution_runtime_health
+
+        configured = self.health()
+        if self.runner is None:
+            runtime = {
+                "ready": False,
+                "cdp": {"ready": False, "error": "execution_runner_not_configured"},
+                "harness": {
+                    "ready": False,
+                    "error": "execution_runner_not_configured",
+                },
+            }
+        else:
+            runtime = execution_runtime_health(self.runner.client.cdp_url)
+        return {
+            **configured,
+            **runtime,
+            "ready": (
+                configured["configured"]
+                and configured["planner_configured"]
+                and runtime["ready"]
+            ),
+        }
+
+    def _run(
+        self,
+        run_id: str,
+        plan: dict[str, Any],
+        browser_target_id: str,
+    ) -> None:
         out_dir = self.root / "runtime_data" / "execution_scenarios" / run_id
         with self._lock:
             self._runs[run_id]["status"] = "running"
@@ -168,6 +220,7 @@ class ExecutionScenarioService:
                 run_id=run_id,
                 out_dir=out_dir,
                 confirmed=True,
+                browser_target_id=browser_target_id,
                 update=update,
             )
         except (ScenarioExecutionError, OSError, ValueError) as exc:
@@ -208,6 +261,9 @@ class ExecutionScenarioService:
         if step["op"] == "click":
             target = step["target"]
             return f"点击：{target['query']}"
+        if step["op"] == "type":
+            target = step["target"]
+            return f"在“{target['query']}”中输入：{step['text']}"
         expected = step["expected"]
         if expected["type"] in {"page_changed", "url_changed"}:
             return "确认页面已经跳转"
@@ -217,6 +273,8 @@ class ExecutionScenarioService:
             state = "已选中"
         elif expected["type"] == "element_disappeared":
             state = "已消失"
+        elif expected["type"] == "input_value":
+            state = f"内容为“{expected['value']}”"
         else:
             state = "已出现"
         return f"{prefix}：{target['query']} {state}"

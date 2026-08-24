@@ -156,6 +156,7 @@ class UIGraphOutcomeVerifier:
             "text_present",
             "url_changed",
             "page_changed",
+            "input_value",
         }
     )
 
@@ -182,8 +183,24 @@ class UIGraphOutcomeVerifier:
         target = expected.get("target")
         if not isinstance(target, Mapping):
             return False
-        before_matches = matching_nodes(target, before)
-        after_matches = matching_nodes(target, after)
+        source_kinds = frozenset({"cdp"}) if expected_type == "input_value" else None
+        before_matches = matching_nodes(target, before, source_kinds=source_kinds)
+        after_matches = matching_nodes(target, after, source_kinds=source_kinds)
+        if expected_type == "input_value":
+            expected_value = expected.get("value")
+            if not isinstance(expected_value, str):
+                return False
+            before_value = (
+                _node_attribute(before_matches[0], "value")
+                if len(before_matches) == 1
+                else None
+            )
+            after_value = (
+                _node_attribute(after_matches[0], "value")
+                if len(after_matches) == 1
+                else None
+            )
+            return after_value == expected_value and before_value != expected_value
         if expected_type == "element_visible":
             return len(after_matches) == 1 and len(before_matches) == 0
         if expected_type == "element_disappeared":
@@ -200,6 +217,14 @@ class UIGraphOutcomeVerifier:
                 )
             )
         return False
+
+
+def _node_attribute(node: Mapping[str, Any], name: str) -> str | None:
+    attributes = node.get("attributes")
+    if not isinstance(attributes, Mapping) or name not in attributes:
+        return None
+    value = attributes.get(name)
+    return value if isinstance(value, str) else str(value)
 
 
 def _fresh_transition(

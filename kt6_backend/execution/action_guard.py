@@ -8,7 +8,7 @@ import time
 from dataclasses import asdict
 from typing import Callable
 
-from .models import BrowserTarget, VisualTarget
+from .models import BrowserAction, BrowserTarget, VisualTarget
 
 
 class ScenarioActionGuardError(ValueError):
@@ -18,7 +18,7 @@ class ScenarioActionGuardError(ValueError):
 
 
 class ScenarioActionGuard:
-    """Issue and consume one short-lived token for one grounded click."""
+    """Issue and consume one short-lived token for one fixed browser action."""
 
     def __init__(
         self,
@@ -31,16 +31,16 @@ class ScenarioActionGuard:
         self._tokens: dict[str, tuple[float, str]] = {}
         self._lock = threading.Lock()
 
-    def authorize(self, target: BrowserTarget | VisualTarget) -> str:
+    def authorize(self, action: BrowserAction) -> str:
         token = secrets.token_urlsafe(32)
         with self._lock:
             self._tokens[self._hash(token)] = (
                 self.clock() + self.ttl_seconds,
-                self.fingerprint(target),
+                self.fingerprint(action),
             )
         return token
 
-    def consume(self, token: str, target: BrowserTarget | VisualTarget) -> None:
+    def consume(self, token: str, action: BrowserAction) -> None:
         with self._lock:
             claims = self._tokens.pop(self._hash(token), None)
         if claims is None:
@@ -48,15 +48,30 @@ class ScenarioActionGuard:
         expires_at, fingerprint = claims
         if self.clock() >= expires_at:
             raise ScenarioActionGuardError("scenario_action_token_expired")
-        if fingerprint != self.fingerprint(target):
+        if fingerprint != self.fingerprint(action):
             raise ScenarioActionGuardError("scenario_action_target_changed")
 
     @staticmethod
-    def fingerprint(target: BrowserTarget | VisualTarget) -> str:
+    def fingerprint(action: BrowserAction) -> str:
         payload = {
-            "type": type(target).__name__,
-            "target": asdict(target),
+            "op": action.op,
+            "text": action.text,
+            "type": type(action.target).__name__,
+            "target": asdict(action.target),
         }
+        return hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def target_fingerprint(target: BrowserTarget | VisualTarget) -> str:
+        payload = {"type": type(target).__name__, "target": asdict(target)}
         return hashlib.sha256(
             json.dumps(
                 payload,

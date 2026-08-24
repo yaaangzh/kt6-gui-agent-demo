@@ -2,12 +2,10 @@ import os
 from pathlib import Path
 import unittest
 
-from kt6_backend.env_config import load_project_env
 from kt6_backend.execution_e2e_cli import run_scenario_e2e
 
 
 ROOT = Path(__file__).resolve().parents[1]
-load_project_env(ROOT)
 
 
 class ExecutionE2EAssetsTest(unittest.TestCase):
@@ -25,6 +23,16 @@ class ExecutionE2EAssetsTest(unittest.TestCase):
         self.assertIn('document.createElement("section")', page)
         self.assertIn("/api/execution/plans", runner)
         self.assertIn("/api/execution/runs", runner)
+        self.assertIn("/api/execution/health", runner)
+        launcher = (ROOT / "scripts" / "start-browser-executor.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("--remote-debugging-port=$CdpPort", launcher)
+        self.assertIn("--load-extension=$extensionPath", launcher)
+        self.assertIn("--disable-extensions-except=$extensionPath", launcher)
+        self.assertIn("runtime_preflight ensure", launcher)
+        self.assertIn("/api/execution/health", launcher)
+        self.assertIn("executionDeadline", launcher)
         self.assertFalse(
             (ROOT / "fixtures" / "execution" / "mock_ui_graph.json").exists()
         )
