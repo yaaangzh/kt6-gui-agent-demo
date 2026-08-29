@@ -43,7 +43,6 @@ class ExecutionURLPolicy:
             or not raw_host
             or parsed.username is not None
             or parsed.password is not None
-            or parsed.fragment
         ):
             raise ExecutionURLPolicyError("execution_url_invalid")
 
@@ -63,7 +62,7 @@ class ExecutionURLPolicy:
                 self._netloc(host, port),
                 parsed.path or "/",
                 parsed.query,
-                "",
+                parsed.fragment,
             )
         )
 

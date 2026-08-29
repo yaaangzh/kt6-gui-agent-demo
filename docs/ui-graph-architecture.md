@@ -37,7 +37,7 @@ flowchart LR
     DAG --> V["确定性验证器"]
     V --> DRY["dry-run DAG 提案"]
     DRY -. "资产/权限/fresh capture/一次性令牌" .-> S["SafeDOMAction"]
-    S -. "功能分支显式启用" .-> X["Browser Harness click Runtime"]
+    S -. "功能分支显式启用" .-> X["Chrome Extension Runtime"]
     X --> POST["新的 KT6 capture / OutcomeVerifier"]
 ```
 
@@ -167,12 +167,12 @@ analysis-only 状态都会优先拒绝。`page_api`、`vision`、`text` 只能�
 这表示“计划结构可供检查”，不表示“可以点击”。`feature/browser-executor` 另行实现
 click-only 执行试验：只有资产/控件绑定、权限/用户确认、fresh capture、目标指纹和
 一次性令牌全部通过后，`UIGraphTargetResolver` 才把同一图中的 CDP 候选解析成
-backend node id，交给 Browser Harness 取 box center 并点击。图和 DAG 的安全字段仍不
+backend node id，交给 Chrome 扩展运行时取 box center 并点击。图和 DAG 的安全字段仍不
 改变；执行授权来自 SafeDOMAction，不来自模型或 UI Graph。执行瞬间还会固定调用
 `Page.getFrameTree`、`DOM.describeNode` 和 `DOM.getNodeForLocation`，重新核对 frame、
 `id/owner/action` 与中心点命中目标，避免 stale node 或 overlay 截获点击。
 
-Browser Harness 仅承担 daemon、CDP transport 和坐标点击，不接收任意 CDP 方法、JS
+Chrome 扩展仅承担固定 CDP transport 和坐标点击，不接收任意 CDP 方法、JS
 或模型生成代码，也不启用自修改 helper/domain skill。专用 E2E harness 只额外使用一组
 写死的 CDP 采集/页面重置方法，不向 Planner 或执行 API 暴露。点击回执只说明事件已
 派发，计划进入 `executed_pending_verification`；必须用新的 KT6 capture 调用确定性
@@ -218,10 +218,9 @@ kt6_backend/ui_graph.py          多源 UI Graph 构建与文本序列化
 kt6_backend/ui_graph_reasoner.py 内部 GLM HTTP 契约
 kt6_backend/ui_operation_graph.py 操作 DAG 严格校验
 kt6_backend/ui_graph_planning.py 建图、推理与验证的 dry-run 服务
-kt6_backend/execution/          Action Plan、ScenarioRunner、Grounding Registry 与 Browser Harness
+kt6_backend/execution/          Action Plan、ScenarioRunner、Grounding Registry 与 Chrome 扩展运行时
 kt6_backend/execution/live_page_capture.py 固定 CDP 方法的真实测试页采集适配
-kt6_backend/execution_e2e_cli.py 自然语言 DOM + Canvas 闭环的一键运行入口
 kt6_backend/safe_dom_actions.py 资产/权限/fresh capture/令牌门禁、执行和验证状态
 demo/execution-test.html        DOM + Canvas 真实目标页面
-demo/execution-runner.html      计划确认、执行状态和最新页面预览控制台
+browser_extension/             当前 Chrome 标签页的计划确认、执行和固定命令中继
 ```

@@ -17,6 +17,22 @@ _GENERIC_TEXTBOX_QUERIES = frozenset(
     }
 )
 _TEXTBOX_ROLES = frozenset({"textbox", "searchbox"})
+_SEMANTIC_INTERACTIVE_ROLES = frozenset(
+    {
+        "button",
+        "checkbox",
+        "combobox",
+        "link",
+        "menuitem",
+        "menuitemcheckbox",
+        "menuitemradio",
+        "option",
+        "radio",
+        "tab",
+    }
+)
+_GENERIC_INTERACTIVE_ROLES = frozenset({"", "generic", "none"})
+_SEMANTIC_PARENT_DEPTH = 3
 
 
 def matching_nodes(
@@ -28,20 +44,77 @@ def matching_nodes(
     nodes = graph.get("nodes")
     if not isinstance(nodes, list):
         return []
-    scored: list[tuple[int, Mapping[str, Any]]] = []
-    for node in nodes:
+    scored: dict[int, int] = {}
+    indexed_nodes: dict[str, tuple[int, Mapping[str, Any]]] = {}
+    for index, node in enumerate(nodes):
         if not isinstance(node, Mapping):
             continue
+        node_id = compact_text(node.get("id"), 300)
+        if node_id:
+            indexed_nodes[node_id] = (index, node)
         source = _mapping(node.get("source"))
         if source_kinds is not None and source.get("kind") not in source_kinds:
             continue
         score = _score(target, node)
         if score > 0:
-            scored.append((score, node))
+            scored[index] = score
+
+    # Custom controls often expose their visible text on a StaticText descendant
+    # while the clickable ancestor has no accessible name and only role=generic.
+    # Keep the stable clickable ancestor as the execution target, but inherit the
+    # exact semantic label through the captured parent_of evidence.
+    parents_by_child: dict[str, set[str]] = {}
+    edges = graph.get("edges")
+    if isinstance(edges, list):
+        for edge in edges:
+            if not isinstance(edge, Mapping) or edge.get("type") != "parent_of":
+                continue
+            parent_id = compact_text(edge.get("source"), 300)
+            child_id = compact_text(edge.get("target"), 300)
+            if parent_id and child_id:
+                parents_by_child.setdefault(child_id, set()).add(parent_id)
+    for child_id, (_child_index, child) in indexed_nodes.items():
+        text_score = _score({"query": target.get("query")}, child)
+        if text_score <= 0:
+            continue
+        child_source = _mapping(child.get("source"))
+        frontier = {child_id}
+        visited = {child_id}
+        for _depth in range(_SEMANTIC_PARENT_DEPTH):
+            parent_ids = {
+                parent_id
+                for current_id in frontier
+                for parent_id in parents_by_child.get(current_id, ())
+                if parent_id not in visited
+            }
+            if not parent_ids:
+                break
+            visited.update(parent_ids)
+            frontier = parent_ids
+            for parent_id in parent_ids:
+                parent_entry = indexed_nodes.get(parent_id)
+                if parent_entry is None:
+                    continue
+                parent_index, parent = parent_entry
+                parent_source = _mapping(parent.get("source"))
+                if (
+                    source_kinds is not None
+                    and parent_source.get("kind") not in source_kinds
+                ):
+                    continue
+                if not _same_semantic_source(child_source, parent_source):
+                    continue
+                inherited_score = _inherited_label_score(target, parent, text_score)
+                if inherited_score > scored.get(parent_index, 0):
+                    scored[parent_index] = inherited_score
     if not scored:
         return []
-    highest = max(score for score, _node in scored)
-    return [node for score, node in scored if score == highest]
+    highest = max(scored.values())
+    return [
+        node
+        for index, node in enumerate(nodes)
+        if isinstance(node, Mapping) and scored.get(index) == highest
+    ]
 
 
 def node_selected(node: Mapping[str, Any]) -> bool:
@@ -128,6 +201,42 @@ def _score(target: Mapping[str, Any], node: Mapping[str, Any]) -> int:
             return 0
         score += 4
     return score
+
+
+def _inherited_label_score(
+    target: Mapping[str, Any],
+    node: Mapping[str, Any],
+    text_score: int,
+) -> int:
+    if compact_text(target.get("asset_id"), 200) or compact_text(
+        target.get("action"), 200
+    ):
+        return 0
+    interaction = _mapping(node.get("interaction"))
+    if interaction.get("candidate") is not True:
+        return 0
+    attributes = _mapping(node.get("attributes"))
+    requested_role = compact_text(target.get("role"), 100).casefold()
+    observed_role = compact_text(
+        node.get("role") or attributes.get("role"), 100
+    ).casefold()
+    if requested_role and requested_role != observed_role:
+        if not (
+            requested_role in _SEMANTIC_INTERACTIVE_ROLES
+            and observed_role in _GENERIC_INTERACTIVE_ROLES
+        ):
+            return 0
+    return (30 if text_score >= 20 else 10) + (4 if requested_role else 0)
+
+
+def _same_semantic_source(
+    first: Mapping[str, Any], second: Mapping[str, Any]
+) -> bool:
+    if first.get("kind") != second.get("kind"):
+        return False
+    first_frame = compact_text(first.get("frame_id"), 200)
+    second_frame = compact_text(second.get("frame_id"), 200)
+    return not first_frame or not second_frame or first_frame == second_frame
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:

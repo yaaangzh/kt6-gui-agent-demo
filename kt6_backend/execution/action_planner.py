@@ -4,9 +4,13 @@ import json
 from collections.abc import Mapping
 from typing import Any, Protocol
 
-from ..openai_compatible_api import ModelAPIError, OpenAICompatibleChatClient
+from ..openai_compatible_api import (
+    ModelAPIResponseError,
+    ModelAPITransportError,
+    OpenAICompatibleChatClient,
+)
 from ..ui_graph_planning import project_ui_graph_for_reasoning
-from .plan_validator import ActionPlanValidator
+from .plan_validator import ActionPlanValidationError, ActionPlanValidator
 
 
 class ActionPlannerError(RuntimeError):
@@ -93,6 +97,11 @@ Keep the plan at 12 steps or fewer."""
             "ui_graph": json.loads(graph_text),
         }
         try:
+            provider_options = (
+                {"extra_body": {"thinking": {"type": "disabled"}}}
+                if self.provider.casefold() == "deepseek"
+                else {}
+            )
             response = self.client.complete(
                 messages=[
                     {"role": "system", "content": self._SYSTEM_PROMPT},
@@ -108,9 +117,18 @@ Keep the plan at 12 steps or fewer."""
                 ],
                 json_mode=True,
                 temperature=0.0,
+                **provider_options,
             )
             plan = self.validator.validate(response.json_content())
-        except (ModelAPIError, TypeError, ValueError) as exc:
+        except ModelAPITransportError as exc:
+            raise ActionPlannerError("execution_planner_transport_error") from exc
+        except ModelAPIResponseError as exc:
+            raise ActionPlannerError(
+                "execution_planner_model_response_invalid"
+            ) from exc
+        except ActionPlanValidationError as exc:
+            raise ActionPlannerError("execution_planner_plan_invalid") from exc
+        except (TypeError, ValueError) as exc:
             raise ActionPlannerError("execution_planner_invalid_response") from exc
         if plan["start_url"] != start_url or plan["user_request"] != user_request:
             raise ActionPlannerError("execution_planner_context_mismatch")

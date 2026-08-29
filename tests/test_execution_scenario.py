@@ -196,6 +196,85 @@ def graph(capture_id, *, include_result=False, vision=False):
     }
 
 
+def custom_menu_graph(capture_id, *, menu_open=False, selected=False):
+    nodes = [
+        {
+            "id": "cdp:time-control",
+            "name": "时间维度 近 7 天" if selected else "时间维度 今天",
+            "role": "button",
+            "disabled": False,
+            "safe_for_execution": False,
+            "can_click_now": False,
+            "bbox": [100, 100, 160, 36],
+            "attributes": {"backend_node_id": 10},
+            "source": {
+                "kind": "cdp",
+                "backend_node_id": 10,
+                "frame_id": "main",
+                "frame_url": URL,
+            },
+            "interaction": {"candidate": True, "status": "candidate_only"},
+        }
+    ]
+    edges = []
+    if menu_open:
+        nodes.extend(
+            [
+                {
+                    "id": "cdp:seven-day-option",
+                    "name": "",
+                    "role": "generic",
+                    "disabled": False,
+                    "safe_for_execution": False,
+                    "can_click_now": False,
+                    "bbox": [100, 150, 120, 38],
+                    "attributes": {"backend_node_id": 20},
+                    "source": {
+                        "kind": "cdp",
+                        "backend_node_id": 20,
+                        "frame_id": "main",
+                        "frame_url": URL,
+                    },
+                    "interaction": {
+                        "candidate": True,
+                        "status": "candidate_only",
+                    },
+                },
+                {
+                    "id": "cdp:seven-day-label",
+                    "name": "近 7 天",
+                    "role": "StaticText",
+                    "safe_for_execution": False,
+                    "source": {"kind": "cdp", "frame_id": "main"},
+                    "interaction": {
+                        "candidate": False,
+                        "status": "analysis_only",
+                    },
+                },
+            ]
+        )
+        edges.append(
+            {
+                "type": "parent_of",
+                "source": "cdp:seven-day-option",
+                "target": "cdp:seven-day-label",
+            }
+        )
+    return {
+        "schema_version": "kt6.ui-graph.v1",
+        "graph_id": f"uig:{capture_id}",
+        "capture_id": capture_id,
+        "page": {"url": URL, "title": "NCE"},
+        "analysis_only": True,
+        "execution_authorized": False,
+        "safe_for_execution": False,
+        "nodes": nodes,
+        "edges": edges,
+        "issues": [],
+        "stats": {"truncated": False},
+    }
+
+
 class URLAndPlanContractTest(unittest.TestCase):
     def test_url_policy_allows_arbitrary_public_hosts_without_a_host_list(self):
         policy = public_url_policy()
@@ -260,13 +339,16 @@ class URLAndPlanContractTest(unittest.TestCase):
         for value in (
             "file:///tmp/test.html",
             "https://user:pass@example.test/",
-            "https://example.test/#fragment",
         ):
             with self.subTest(value=value), self.assertRaisesRegex(
                 ExecutionURLPolicyError,
                 "execution_url_invalid",
             ):
                 policy.validate(value)
+        self.assertEqual(
+            policy.validate("https://example.test/#fragment"),
+            "https://example.test/#fragment",
+        )
 
     def test_plan_is_semantic_and_click_is_paired_with_outcome(self):
         validated = ActionPlanValidator().validate(semantic_plan())
@@ -279,6 +361,12 @@ class URLAndPlanContractTest(unittest.TestCase):
         invalid["steps"] = invalid["steps"][:1]
         with self.assertRaises(ActionPlanValidationError):
             ActionPlanValidator().validate(invalid)
+
+        fragment_plan = semantic_plan(start_url="https://example.test/#assistant")
+        self.assertEqual(
+            ActionPlanValidator().validate(fragment_plan)["start_url"],
+            "https://example.test/#assistant",
+        )
 
     def test_type_requires_exact_input_value_verification(self):
         validator = ActionPlanValidator()
@@ -316,6 +404,28 @@ class PlannerAndServiceTest(unittest.TestCase):
 
         self.assertEqual(result["schema_version"], ACTION_PLAN_SCHEMA_VERSION)
         self.assertIn("untrusted page data", client.messages[0]["content"])
+
+    def test_deepseek_planner_disables_thinking_for_json_plan(self):
+        class Result:
+            @staticmethod
+            def json_content():
+                return semantic_plan()
+
+        class Client:
+            model = "deepseek-v4-pro"
+
+            def complete(self, **kwargs):
+                self.options = kwargs
+                return Result()
+
+        client = Client()
+        planner = OpenAIActionPlanner(client=client, provider="deepseek")
+        planner.plan(start_url=URL, user_request=TASK, ui_graph=graph("c1"))
+
+        self.assertEqual(
+            client.options["extra_body"],
+            {"thinking": {"type": "disabled"}},
+        )
 
     def test_service_checks_public_network_policy_before_model_planning(self):
         class Runner:
@@ -664,6 +774,17 @@ class FailureCategoryAndGenericVerifierTest(unittest.TestCase):
             )
         )
 
+        self.assertTrue(
+            verifier.verify(
+                expected={
+                    "type": "element_visible",
+                    "target": {"query": "AP_001 详情"},
+                },
+                before=before,
+                after=graph("c-still-visible"),
+            )
+        )
+
         input_before = graph("input-before")
         input_after = graph("input-after")
         for value, typed in ((input_before, ""), (input_after, "前端开源项目")):
@@ -686,6 +807,7 @@ class FailureCategoryAndGenericVerifierTest(unittest.TestCase):
                 after=input_after,
             )
         )
+
         self.assertTrue(
             verifier.verify(
                 expected={
@@ -719,6 +841,32 @@ class FailureCategoryAndGenericVerifierTest(unittest.TestCase):
                 expected={"type": "url_changed"},
                 before=before,
                 after=changed,
+            )
+        )
+
+    def test_custom_menu_label_grounds_and_verifies_without_aria_role(self):
+        before = custom_menu_graph("menu-before")
+        opened = custom_menu_graph("menu-opened", menu_open=True)
+        selected = custom_menu_graph("menu-selected", selected=True)
+        target = {"query": "近7天", "role": "menuitem"}
+
+        grounded = TargetGrounderRegistry().resolve(target, opened)
+        self.assertIsInstance(grounded, BrowserTarget)
+        self.assertEqual(grounded.backend_node_id, 20)
+
+        verifier = UIGraphOutcomeVerifier()
+        self.assertTrue(
+            verifier.verify(
+                expected={"type": "element_visible", "target": target},
+                before=before,
+                after=opened,
+            )
+        )
+        self.assertTrue(
+            verifier.verify(
+                expected={"type": "element_selected", "target": target},
+                before=opened,
+                after=selected,
             )
         )
 

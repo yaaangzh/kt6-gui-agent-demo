@@ -56,7 +56,6 @@ class ActionPlanValidator:
             or not parsed.netloc
             or parsed.username
             or parsed.password
-            or parsed.fragment
         ):
             raise ActionPlanValidationError("action_plan_start_url_invalid")
         raw_steps = value.get("steps")

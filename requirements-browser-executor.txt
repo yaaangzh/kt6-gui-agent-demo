@@ -1,3 +1,0 @@
-# Optional dependency for feature/browser-executor only.
-browser-harness==0.1.9
-Pillow==11.3.0

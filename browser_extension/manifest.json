@@ -1,12 +1,10 @@
 {
   "manifest_version": 3,
   "name": "KT6 Browser Agent",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Run confirmed natural-language workflows against the exact current tab through the local KT6 service.",
   "permissions": [
     "activeTab",
-    "scripting",
-    "storage",
     "sidePanel",
     "debugger"
   ],

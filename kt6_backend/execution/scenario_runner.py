@@ -54,17 +54,23 @@ class ScenarioRunner:
         start_url: str,
         *,
         browser_target_id: str = "",
+        browser_runtime_id: str = "",
     ) -> dict[str, Any]:
         try:
             target_url = self.url_policy.validate(start_url)
-            browser_session = (
-                self.client.open_or_bind_target(
+            if browser_runtime_id:
+                browser_session = self.client.open_or_bind_target(
+                    target_url,
+                    target_id=browser_target_id,
+                    runtime_id=browser_runtime_id,
+                )
+            elif browser_target_id:
+                browser_session = self.client.open_or_bind_target(
                     target_url,
                     target_id=browser_target_id,
                 )
-                if browser_target_id
-                else self.client.open_or_bind_target(target_url)
-            )
+            else:
+                browser_session = self.client.open_or_bind_target(target_url)
             snapshot, graph, preview = self._capture()
         except BrowserHarnessError as exc:
             raise ScenarioExecutionError(exc.error_code) from exc
@@ -84,6 +90,7 @@ class ScenarioRunner:
         out_dir: Path,
         confirmed: bool,
         browser_target_id: str = "",
+        browser_runtime_id: str = "",
         update: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         if not confirmed:
@@ -92,14 +99,19 @@ class ScenarioRunner:
         target_url = self.url_policy.validate(action_plan["start_url"])
         out_dir.mkdir(parents=True, exist_ok=False)
         _write_json(out_dir / "action-plan.json", action_plan)
-        browser_session = (
-            self.client.open_or_bind_target(
+        if browser_runtime_id:
+            browser_session = self.client.open_or_bind_target(
+                target_url,
+                target_id=browser_target_id,
+                runtime_id=browser_runtime_id,
+            )
+        elif browser_target_id:
+            browser_session = self.client.open_or_bind_target(
                 target_url,
                 target_id=browser_target_id,
             )
-            if browser_target_id
-            else self.client.open_or_bind_target(target_url)
-        )
+        else:
+            browser_session = self.client.open_or_bind_target(target_url)
         step_results: list[dict[str, Any]] = []
         pending: dict[str, Any] | None = None
         capture_sequence = 0
@@ -304,6 +316,10 @@ class ScenarioRunner:
     ) -> tuple[dict[str, Any], None]:
         if pending is None:
             raise ScenarioExecutionError("scenario_verification_without_action")
+        if step["expected"]["type"] in {"page_changed", "url_changed"}:
+            settle = getattr(self.client, "wait_for_page_settle", None)
+            if callable(settle):
+                settle()
         after, graph, _ = capture(f"{step['id']}-verify")
         verified, verifier_id = self.verifiers.verify_expected(
             expected=step["expected"],

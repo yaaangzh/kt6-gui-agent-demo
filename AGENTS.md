@@ -133,7 +133,7 @@ UI Graph 统一 `dom/cdp/page_api/vision/text` 来源，并生成 `locate/click/
 Runner”。Action Plan 只能保存语义目标，不能保存临时 backend node id、selector 或坐标；
 每个步骤必须基于 fresh capture 重新生成 UI Graph 并完成 Grounding。
 
-Browser Harness 只作为受控 Browser Runtime：DOM 点击必须经过稳定引用、权限、fresh
+Chrome 扩展只作为受控 Browser Runtime：DOM 点击必须经过稳定引用、权限、fresh
 capture、指纹、一次性令牌和点击前 live revalidation；Canvas 点击只能使用当前截图中由
 获批视觉适配器识别的几何结果，并在实时 canvas/frame/hit-test 校验后执行。执行器不接收
 模型生成的任意 CDP 方法、JavaScript 或 Python。
@@ -158,9 +158,10 @@ E2E 只替换规划决策，不 Mock 页面世界；不得提交或使用 `mock_
 - 原始 `actionable=true`、business_id、element_id 不能绕过候选门禁。
 - 页面 API 只读取显式 `window.__KT6_PAGE_ADAPTER__`，不拦截任意 fetch/XHR。
 - CDP 只允许 `localhost`、`127.0.0.1` 或 `::1`。
-- Browser Harness 默认关闭，只允许固定 `type`/`click`；`type` 仅限普通文本控件并要求
+- 浏览器执行默认关闭，只允许固定 `type`/`click`；`type` 仅限普通文本控件并要求
   输入值确定性验证。禁止自修改 helper、domain skill、任意 raw CDP、任意按键序列和
-  JavaScript 进入正式执行链。
+  JavaScript 进入正式执行链。现有 Chrome 路线只能由用户点击扩展后 attach 当前 Tab，
+  不能依赖专用 profile、远程调试端口或运行时注入启动参数。
 
 ### 5.1 性能与实现范围
 

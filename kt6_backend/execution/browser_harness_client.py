@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import importlib
 import math
-import os
 import re
 import time
 from pathlib import Path
@@ -36,7 +34,6 @@ class BrowserHarnessClient:
         url_policy: ExecutionURLPolicy,
         cdp_call: Callable[..., Mapping[str, Any]] | None = None,
         click_call: Callable[[float, float], Any] | None = None,
-        ensure_daemon: Callable[[], Any] | None = None,
         switch_tab_call: Callable[[str], Any] | None = None,
         current_tab_call: Callable[[], Any] | None = None,
         new_tab_call: Callable[[str], Any] | None = None,
@@ -46,7 +43,6 @@ class BrowserHarnessClient:
         self.url_policy = url_policy
         self._cdp_call = cdp_call
         self._click_call = click_call
-        self._ensure_daemon = ensure_daemon
         self._switch_tab_call = switch_tab_call
         self._current_tab_call = current_tab_call
         self._new_tab_call = new_tab_call
@@ -202,12 +198,15 @@ class BrowserHarnessClient:
                 )
             ):
                 raise BrowserHarnessError("browser_target_changed")
-            if not target.dom_id and not target.expected_attributes:
-                self._validate_accessible_identity(target)
             authorized_backend_ids = self._described_subtree_backend_ids(
                 live_node,
                 root_backend_node_id=backend_node_id,
             )
+            if not target.dom_id and not target.expected_attributes:
+                self._validate_accessible_identity(
+                    target,
+                    authorized_backend_ids=authorized_backend_ids,
+                )
             if click_backend_node_id not in authorized_backend_ids:
                 raise BrowserHarnessError("browser_target_changed")
             click_backend_ids = self._described_subtree_backend_ids(
@@ -449,24 +448,44 @@ class BrowserHarnessClient:
                 return
             time.sleep(0.05)
 
-    def _validate_accessible_identity(self, target: BrowserTarget) -> None:
+    def _validate_accessible_identity(
+        self,
+        target: BrowserTarget,
+        *,
+        authorized_backend_ids: frozenset[int] | None = None,
+    ) -> None:
         if not target.accessible_name or not target.role:
             raise BrowserHarnessError("browser_target_changed")
+        if target.accessible_name_from_descendant:
+            semantic_backend_id = target.accessible_name_backend_node_id
+            if (
+                authorized_backend_ids is None
+                or not isinstance(semantic_backend_id, int)
+                or isinstance(semantic_backend_id, bool)
+                or semantic_backend_id < 1
+                or semantic_backend_id not in authorized_backend_ids
+            ):
+                raise BrowserHarnessError("browser_target_semantic_identity_changed")
+            return
         result = self._cdp_call(
             "Accessibility.queryAXTree",
             backendNodeId=target.backend_node_id,
         )
-        matches = []
         nodes = result.get("nodes")
-        if isinstance(nodes, list):
-            matches = [
-                node
-                for node in nodes
-                if isinstance(node, Mapping)
-                and node.get("backendDOMNodeId") == target.backend_node_id
-                and self._ax_value(node.get("name")) == target.accessible_name
-                and self._ax_value(node.get("role")).casefold() == target.role
-            ]
+        if not isinstance(nodes, list):
+            raise BrowserHarnessError("browser_target_changed")
+        root_matches = [
+            node
+            for node in nodes
+            if isinstance(node, Mapping)
+            and node.get("backendDOMNodeId") == target.backend_node_id
+            and self._ax_value(node.get("role")).casefold() == target.role
+        ]
+        matches = [
+            node
+            for node in root_matches
+            if self._ax_value(node.get("name")) == target.accessible_name
+        ]
         if len(matches) != 1:
             raise BrowserHarnessError("browser_target_changed")
 
@@ -626,39 +645,7 @@ class BrowserHarnessClient:
         if self._ready:
             return
         if self._cdp_call is None or self._click_call is None:
-            self.workspace.mkdir(parents=True, exist_ok=True)
-            if (self.workspace / "agent_helpers.py").exists():
-                raise BrowserHarnessError("browser_harness_workspace_not_empty")
-            os.environ["BH_AGENT_WORKSPACE"] = str(self.workspace)
-            os.environ["BU_CDP_URL"] = self.cdp_url
-            try:
-                helpers = importlib.import_module("browser_harness.helpers")
-                admin = importlib.import_module("browser_harness.admin")
-            except (ImportError, OSError) as exc:
-                raise BrowserHarnessError("browser_harness_not_installed") from exc
-            loaded_workspace = Path(helpers.AGENT_WORKSPACE).resolve()
-            if loaded_workspace != self.workspace:
-                raise BrowserHarnessError("browser_harness_workspace_mismatch")
-            self._cdp_call = helpers.cdp
-            self._click_call = helpers.click_at_xy
-            self._switch_tab_call = lambda target_id: helpers.switch_tab(
-                target_id,
-                activate=True,
-            )
-            self._current_tab_call = helpers.current_tab
-
-            def open_visible_tab(url: str) -> Any:
-                target_id = helpers.new_tab(url)
-                helpers.activate_tab(target_id)
-                return target_id
-
-            self._new_tab_call = open_visible_tab
-            self._ensure_daemon = admin.ensure_daemon
-        if self._ensure_daemon is not None:
-            try:
-                self._ensure_daemon()
-            except Exception as exc:
-                raise BrowserHarnessError("browser_harness_daemon_unavailable") from exc
+            raise BrowserHarnessError("browser_extension_runtime_not_bound")
         self._ready = True
 
     @staticmethod
@@ -800,6 +787,45 @@ class BrowserHarnessClient:
                 except ExecutionURLPolicyError as exc:
                     raise BrowserHarnessError(exc.error_code) from exc
             time.sleep(0.05)
+        raise BrowserHarnessError("browser_navigation_timeout")
+
+    def wait_for_page_settle(self, timeout_seconds: float = 3.0) -> str:
+        """Wait for two consecutive valid main-frame URLs after navigation."""
+
+        try:
+            timeout = float(timeout_seconds)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise BrowserHarnessError("browser_navigation_timeout") from exc
+        if not math.isfinite(timeout) or not 0 < timeout <= 15.0:
+            raise BrowserHarnessError("browser_navigation_timeout")
+        self._load_runtime()
+        deadline = time.monotonic() + timeout
+        stable_url = ""
+        stable_reads = 0
+        last_error_code = ""
+        while time.monotonic() < deadline:
+            frame_tree = self._cdp_call("Page.getFrameTree")
+            raw_url = str(
+                frame_tree.get("frameTree", {}).get("frame", {}).get("url", "")
+            ).strip()
+            try:
+                current_url = self.url_policy.validate(raw_url)
+            except ExecutionURLPolicyError as exc:
+                last_error_code = exc.error_code
+                stable_url = ""
+                stable_reads = 0
+            else:
+                last_error_code = ""
+                if current_url == stable_url:
+                    stable_reads += 1
+                else:
+                    stable_url = current_url
+                    stable_reads = 1
+                if stable_reads >= 2:
+                    return current_url
+            time.sleep(0.05)
+        if last_error_code:
+            raise BrowserHarnessError(last_error_code)
         raise BrowserHarnessError("browser_navigation_timeout")
 
     @staticmethod

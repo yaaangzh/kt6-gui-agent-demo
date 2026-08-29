@@ -53,6 +53,7 @@ _CATEGORY_RULES: tuple[tuple[str, str], ...] = (
     ("browser_target_", EXECUTION_FAILED),
     ("browser_canvas_changed", EXECUTION_FAILED),
     ("browser_session", EXECUTION_FAILED),
+    ("browser_extension_", EXECUTION_FAILED),
     ("browser_harness_", EXECUTION_FAILED),
     ("invalid_backend_node_id", EXECUTION_FAILED),
     ("invalid_canvas_target", EXECUTION_FAILED),

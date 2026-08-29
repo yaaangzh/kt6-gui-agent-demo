@@ -202,19 +202,28 @@ class UIGraphOutcomeVerifier:
             )
             return after_value == expected_value and before_value != expected_value
         if expected_type == "element_visible":
-            return len(after_matches) == 1 and len(before_matches) == 0
+            return len(after_matches) == 1
         if expected_type == "element_disappeared":
             return len(after_matches) == 0 and len(before_matches) >= 1
         if expected_type == "text_present":
             return len(after_matches) >= 1
         if expected_type in {"element_selected", "selected"}:
-            return (
+            explicitly_selected = (
                 len(after_matches) == 1
                 and node_selected(after_matches[0])
                 and not (
                     len(before_matches) == 1
                     and node_selected(before_matches[0])
                 )
+            )
+            if explicitly_selected:
+                return True
+            return _selection_reflected_in_control(
+                target=target,
+                before=before,
+                after=after,
+                before_matches=before_matches,
+                after_matches=after_matches,
             )
         return False
 
@@ -225,6 +234,53 @@ def _node_attribute(node: Mapping[str, Any], name: str) -> str | None:
         return None
     value = attributes.get(name)
     return value if isinstance(value, str) else str(value)
+
+
+def _selection_reflected_in_control(
+    *,
+    target: Mapping[str, Any],
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+    before_matches: list[Mapping[str, Any]],
+    after_matches: list[Mapping[str, Any]],
+) -> bool:
+    """Accept a dropdown value reflected in its control after the menu closes."""
+
+    requested_role = compact_text(target.get("role"), 100).casefold()
+    if requested_role not in {
+        "menuitem",
+        "menuitemcheckbox",
+        "menuitemradio",
+        "option",
+    }:
+        return False
+    if not before_matches or after_matches:
+        return False
+    query = compact_text(target.get("query"), 300)
+    if not query:
+        return False
+    state_target = {"query": query}
+    before_state = matching_nodes(
+        state_target, before, source_kinds=frozenset({"cdp"})
+    )
+    after_state = matching_nodes(
+        state_target, after, source_kinds=frozenset({"cdp"})
+    )
+    after_controls = [
+        node
+        for node in after_state
+        if _mapping(node.get("interaction")).get("candidate") is True
+        and compact_text(node.get("role"), 100).casefold()
+        in {"button", "combobox", "generic"}
+    ]
+    if len(after_controls) != 1:
+        return False
+    before_ids = {compact_text(node.get("id"), 300) for node in before_state}
+    return compact_text(after_controls[0].get("id"), 300) not in before_ids
+
+
+def _mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
 
 
 def _fresh_transition(

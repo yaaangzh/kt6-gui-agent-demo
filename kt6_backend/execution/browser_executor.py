@@ -24,6 +24,9 @@ class HarnessBrowserExecutor:
 
     def __init__(self, client: BrowserHarnessClient):
         self.client = client
+        self.executor_id = str(
+            getattr(client, "executor_id", self.executor_id)
+        )
 
     def execute(self, action: BrowserAction) -> BrowserExecutionResult:
         if action.op not in {"click", "type"}:

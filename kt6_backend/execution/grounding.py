@@ -12,6 +12,7 @@ from .semantic_target import matching_nodes
 
 
 _SIMPLE_DOM_ID = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
+_SEMANTIC_LABEL_DEPTH = 3
 _FINGERPRINT_ATTRIBUTES = (
     "id",
     "aria-label",
@@ -88,6 +89,13 @@ class DOMGrounder:
         frame_url = compact_text(source.get("frame_url"), 2048) or page_url
         if not frame_id or not frame_url:
             raise GroundingError("dom_grounding_frame_missing")
+        (
+            accessible_name,
+            accessible_name_from_descendant,
+            accessible_name_backend_node_id,
+        ) = (
+            _accessible_identity(target=target, node=node, graph=graph)
+        )
         return BrowserTarget(
             node_id=compact_text(node.get("id"), 300),
             backend_node_id=backend_id,
@@ -96,7 +104,7 @@ class DOMGrounder:
             page_url=page_url,
             click_backend_node_id=click_backend_id,
             dom_id=dom_id,
-            accessible_name=compact_text(node.get("name"), 300),
+            accessible_name=accessible_name,
             role=compact_text(node.get("role"), 100).casefold(),
             expected_attributes=_fingerprint_attributes(attributes),
             owner_business_id=compact_text(
@@ -108,7 +116,86 @@ class DOMGrounder:
                 node.get("action_id") or attributes.get("data-action-id"),
                 200,
             ),
+            accessible_name_from_descendant=accessible_name_from_descendant,
+            accessible_name_backend_node_id=accessible_name_backend_node_id,
         )
+
+
+def _accessible_identity(
+    *,
+    target: Mapping[str, Any],
+    node: Mapping[str, Any],
+    graph: Mapping[str, Any],
+) -> tuple[str, bool, int | None]:
+    direct_name = compact_text(node.get("name"), 300)
+    if direct_name:
+        return direct_name, False, None
+
+    query = compact_text(target.get("query"), 300)
+    query_key = identity_key(query)
+    root_id = compact_text(node.get("id"), 300)
+    root_source = _mapping(node.get("source"))
+    if not query_key or not root_id:
+        return "", False, None
+
+    nodes_by_id = {
+        compact_text(candidate.get("id"), 300): candidate
+        for candidate in graph.get("nodes", ())
+        if isinstance(candidate, Mapping)
+        and compact_text(candidate.get("id"), 300)
+    }
+    children_by_parent: dict[str, set[str]] = {}
+    for edge in graph.get("edges", ()):
+        if not isinstance(edge, Mapping) or edge.get("type") != "parent_of":
+            continue
+        parent_id = compact_text(edge.get("source"), 300)
+        child_id = compact_text(edge.get("target"), 300)
+        if parent_id and child_id:
+            children_by_parent.setdefault(parent_id, set()).add(child_id)
+
+    exact_names: dict[int, str] = {}
+    contained_names: dict[int, str] = {}
+    frontier = {root_id}
+    visited = {root_id}
+    for _depth in range(_SEMANTIC_LABEL_DEPTH):
+        frontier = {
+            child_id
+            for parent_id in frontier
+            for child_id in children_by_parent.get(parent_id, ())
+            if child_id not in visited
+        }
+        if not frontier:
+            break
+        visited.update(frontier)
+        for child_id in frontier:
+            child = nodes_by_id.get(child_id)
+            if child is None:
+                continue
+            source = _mapping(child.get("source"))
+            backend_id = source.get("backend_node_id")
+            if (
+                source.get("kind") != root_source.get("kind")
+                or compact_text(source.get("frame_id"), 200)
+                != compact_text(root_source.get("frame_id"), 200)
+                or not isinstance(backend_id, int)
+                or isinstance(backend_id, bool)
+                or backend_id < 1
+            ):
+                continue
+            name = compact_text(child.get("name"), 300)
+            name_key = identity_key(name)
+            if not name_key:
+                continue
+            if name_key == query_key:
+                exact_names.setdefault(backend_id, name)
+            elif len(query_key) >= 3 and query_key in name_key:
+                contained_names.setdefault(backend_id, name)
+
+    for names in (exact_names, contained_names):
+        if len(names) == 1:
+            backend_id, name = next(iter(names.items()))
+            return name, True, backend_id
+    return "", False, None
 
 
 def _click_backend_node_id(

@@ -19,6 +19,8 @@ class BrowserTarget:
     expected_attributes: tuple[tuple[str, str], ...]
     owner_business_id: str
     action_id: str
+    accessible_name_from_descendant: bool = False
+    accessible_name_backend_node_id: int | None = None
 
 
 @dataclass(frozen=True)

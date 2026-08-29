@@ -221,6 +221,125 @@ class TabHarness:
 
 
 class BrowserHarnessClientTest(unittest.TestCase):
+    def test_click_revalidates_an_inherited_descendant_accessible_name(self):
+        target_url = "https://nce.example/devices"
+        harness = SingleTargetHarness(target_url)
+        clicks: list[tuple[float, float]] = []
+
+        def cdp(method, **_params):
+            if method == "Target.getTargets":
+                return {
+                    "targetInfos": [
+                        {
+                            "targetId": "target-1",
+                            "type": "page",
+                            "url": target_url,
+                        }
+                    ]
+                }
+            if method == "Page.getFrameTree":
+                return {
+                    "frameTree": {
+                        "frame": {"id": "frame-main", "url": target_url}
+                    }
+                }
+            if method == "DOM.describeNode":
+                return {
+                    "node": {
+                        "backendNodeId": 501,
+                        "attributes": ["class", "custom-option"],
+                        "children": [
+                            {
+                                "backendNodeId": 502,
+                                "nodeName": "#text",
+                                "nodeType": 3,
+                                "nodeValue": "近 7 天",
+                                "attributes": [],
+                            }
+                        ],
+                    }
+                }
+            if method == "DOM.getBoxModel":
+                return {
+                    "model": {
+                        "content": [10, 20, 110, 20, 110, 50, 10, 50]
+                    }
+                }
+            if method == "Page.getLayoutMetrics":
+                return {
+                    "cssVisualViewport": {
+                        "clientWidth": 1280,
+                        "clientHeight": 720,
+                    }
+                }
+            if method == "DOM.getNodeForLocation":
+                return {"backendNodeId": 501}
+            self.fail(f"unexpected CDP method: {method}")
+
+        client = BrowserHarnessClient(
+            cdp_url="http://127.0.0.1:9222",
+            workspace=Path("runtime_data/browser-harness-test"),
+            url_policy=execution_url_policy(),
+            cdp_call=cdp,
+            click_call=lambda x, y: clicks.append((x, y)),
+            switch_tab_call=harness.switch_tab,
+            current_tab_call=harness.current_tab,
+        )
+        client.bind_page_target(target_url)
+        target = BrowserTarget(
+            node_id="cdp:custom-option",
+            backend_node_id=501,
+            frame_id="frame-main",
+            frame_url=target_url,
+            page_url=target_url,
+            click_backend_node_id=501,
+            dom_id="",
+            accessible_name="近 7 天",
+            role="generic",
+            expected_attributes=(),
+            owner_business_id="",
+            action_id="",
+            accessible_name_from_descendant=True,
+            accessible_name_backend_node_id=502,
+        )
+
+        receipt = client.click_backend_node(target)
+
+        self.assertEqual(receipt["backend_node_id"], 501)
+        self.assertEqual(clicks, [(60.0, 35.0)])
+
+    def test_navigation_settle_tolerates_transition_and_preserves_fragment(self):
+        urls = iter(
+            [
+                "about:blank",
+                "https://example.test/#assistant",
+                "https://example.test/#assistant",
+            ]
+        )
+
+        def cdp(method, **_params):
+            self.assertEqual(method, "Page.getFrameTree")
+            return {
+                "frameTree": {
+                    "frame": {
+                        "id": "frame-main",
+                        "url": next(urls),
+                    }
+                }
+            }
+
+        client = BrowserHarnessClient(
+            cdp_url="http://127.0.0.1:9222",
+            workspace=Path("runtime_data/browser-harness-test"),
+            url_policy=execution_url_policy(),
+            cdp_call=cdp,
+            click_call=lambda _x, _y: None,
+        )
+
+        settled = client.wait_for_page_settle(timeout_seconds=1.0)
+
+        self.assertEqual(settled, "https://example.test/#assistant")
+
     def test_runner_binds_one_exact_browser_target(self):
         page_url = "http://127.0.0.1:8787/execution-test.html"
         harness = SingleTargetHarness(page_url)
@@ -643,7 +762,6 @@ class BrowserHarnessClientTest(unittest.TestCase):
             url_policy=execution_url_policy(),
             cdp_call=cdp,
             click_call=lambda x, y: calls.append(("click", x, y)),
-            ensure_daemon=lambda: calls.append(("daemon",)),
             switch_tab_call=harness.switch_tab,
             current_tab_call=harness.current_tab,
         )
@@ -654,7 +772,6 @@ class BrowserHarnessClientTest(unittest.TestCase):
 
         self.assertEqual(first, {"backend_node_id": 387, "x": 20.0, "y": 30.0})
         self.assertEqual(second, first)
-        self.assertEqual(calls.count(("daemon",)), 1)
         self.assertEqual(calls.count(("click", 20.0, 30.0)), 2)
         box_calls = [
             call
@@ -890,7 +1007,7 @@ class BrowserHarnessClientTest(unittest.TestCase):
         )
 
     def test_open_or_bind_switches_to_the_existing_target_tab(self):
-        runner_url = "http://127.0.0.1:8765/execution-runner.html"
+        runner_url = "http://127.0.0.1:8765/current-page.html"
         target_url = "http://127.0.0.1:8787/target.html"
         harness = TabHarness(
             [
@@ -931,7 +1048,7 @@ class BrowserHarnessClientTest(unittest.TestCase):
         self.assertEqual(harness.targets["target-runner"]["url"], runner_url)
 
     def test_open_target_creates_a_new_tab_and_leaves_runner_tab_unchanged(self):
-        runner_url = "http://127.0.0.1:8765/execution-runner.html"
+        runner_url = "http://127.0.0.1:8765/current-page.html"
         target_url = "http://127.0.0.1:8787/target.html"
         harness = TabHarness(
             [{"targetId": "target-runner", "type": "page", "url": runner_url}],
@@ -972,7 +1089,7 @@ class BrowserHarnessClientTest(unittest.TestCase):
         self.assertEqual(harness.targets["target-runner"]["url"], runner_url)
 
     def test_capture_routes_every_cdp_method_to_the_bound_target_session(self):
-        runner_url = "http://127.0.0.1:8765/execution-runner.html"
+        runner_url = "http://127.0.0.1:8765/current-page.html"
         target_url = "https://example.test/topology?capture=1"
         harness = TabHarness(
             [
@@ -1038,7 +1155,7 @@ class BrowserHarnessClientTest(unittest.TestCase):
         self.assertTrue(all(tid == "target-b" for tid, _ in routed))
 
     def test_click_routes_dom_and_click_to_the_bound_target_session(self):
-        runner_url = "http://127.0.0.1:8765/execution-runner.html"
+        runner_url = "http://127.0.0.1:8765/current-page.html"
         target_url = "https://nce.example/devices"
         harness = TabHarness(
             [
@@ -1149,7 +1266,7 @@ class BrowserHarnessClientTest(unittest.TestCase):
         harness.targets["target-runner"] = {
             "targetId": "target-runner",
             "type": "page",
-            "url": "http://127.0.0.1:8765/execution-runner.html",
+            "url": "http://127.0.0.1:8765/current-page.html",
         }
         harness.active_target_id = "target-runner"
         with self.assertRaises(BrowserHarnessError) as raised:
@@ -1329,6 +1446,64 @@ class BrowserExecutionBoundaryTest(unittest.TestCase):
         graph["nodes"][1]["id"] = "cdp:duplicate"
         with self.assertRaisesRegex(GroundingError, "ambiguous"):
             DOMGrounder().resolve({"query": "关闭"}, graph)
+
+    def test_dom_grounder_records_an_inherited_descendant_accessible_name(self):
+        graph = cdp_graph()
+        option = graph["nodes"][0]
+        option.update(
+            {
+                "id": "cdp:custom-option",
+                "role": "generic",
+                "name": "",
+                "bbox": [10.0, 20.0, 100.0, 30.0],
+                "owner_business_id": "",
+                "action_id": "",
+            }
+        )
+        option["source"]["backend_node_id"] = 501
+        option["attributes"] = {"class": "custom-option"}
+        graph["nodes"].append(
+            {
+                "id": "cdp:custom-option-label",
+                "kind": "element",
+                "role": "StaticText",
+                "name": "近 7 天",
+                "source": {
+                    "kind": "cdp",
+                    "frame_id": "frame-main",
+                    "frame_url": "https://nce.example/devices",
+                    "backend_node_id": 502,
+                },
+                "attributes": {},
+                "disabled": False,
+                "actionable": False,
+                "can_click_now": False,
+                "safe_for_execution": False,
+                "interaction": {
+                    "status": "analysis_only",
+                    "candidate": False,
+                    "authorized": False,
+                },
+            }
+        )
+        graph["edges"].append(
+            {
+                "source": "cdp:custom-option",
+                "target": "cdp:custom-option-label",
+                "type": "parent_of",
+                "relation_type": "dom_child",
+            }
+        )
+
+        decision = DOMGrounder().resolve(
+            {"query": "近 7 天", "role": "option"},
+            graph,
+        )
+
+        self.assertEqual(decision.backend_node_id, 501)
+        self.assertEqual(decision.accessible_name, "近 7 天")
+        self.assertTrue(decision.accessible_name_from_descendant)
+        self.assertEqual(decision.accessible_name_backend_node_id, 502)
 
     def test_dom_grounder_accepts_a_boxless_link_with_one_visible_dom_child(self):
         graph = cdp_graph()
@@ -1556,31 +1731,35 @@ class BrowserExecutionBoundaryTest(unittest.TestCase):
         self.assertEqual(result["reason"], "outcome_verifier_unavailable")
         self.assertEqual(executor.actions, [])
 
-    def test_app_factory_enables_only_explicit_browser_harness_driver(self):
-        environment = {
-            "KT6_BROWSER_EXECUTION_DRIVER": "browser_harness",
-            "KT6_BROWSER_HARNESS_CDP_URL": "http://127.0.0.1:9222",
-        }
-        with patch.dict(os.environ, environment, clear=True), tempfile.TemporaryDirectory() as temp_dir:
+    def test_app_factory_builds_existing_chrome_extension_transport(self):
+        with patch.dict(
+            os.environ,
+            {"KT6_BROWSER_EXECUTION_DRIVER": "browser_extension"},
+            clear=True,
+        ), tempfile.TemporaryDirectory() as temp_dir:
             services = app.create_services(Path(temp_dir))
 
         self.assertFalse(services.safe_dom_actions.dry_run_only)
         self.assertEqual(
             services.safe_dom_actions.executor.executor_id,
-            "browser_harness",
+            "chrome_extension",
         )
+        self.assertIsNotNone(services.browser_extension_runtime)
         self.assertTrue(services.execution_scenarios.health()["configured"])
+        runtime = services.execution_scenarios.runtime_health()
+        self.assertEqual(runtime["transport"], "chrome_extension")
+        self.assertFalse(runtime["ready"])
         self.assertEqual(
-            services.execution_scenarios.health()["url_policy"]["network_scope"],
-            "public_only",
+            runtime["extension"]["error"],
+            "browser_extension_not_connected",
         )
 
         with patch.dict(
             os.environ,
-            {"KT6_BROWSER_HARNESS_CDP_URL": "http://127.0.0.1:9222"},
+            {"KT6_BROWSER_EXECUTION_DRIVER": "browser_harness"},
             clear=True,
         ), tempfile.TemporaryDirectory() as temp_dir, self.assertRaisesRegex(
-            ValueError, "KT6_BROWSER_EXECUTION_DRIVER"
+            ValueError, "must be browser_extension"
         ):
             app.create_services(Path(temp_dir))
 

@@ -73,13 +73,12 @@ KT6_UI_TARS_API_ALLOWED_HOSTS=<获批服务精确主机名>
 
 正式测试区数据未经批准不得发送到公网 endpoint。
 
-### 3.4 Browser Harness 执行层
+### 3.4 现有 Chrome 扩展执行层
 
 只在 `feature/browser-executor` 的隔离、可恢复页面测试：
 
 ```dotenv
-KT6_BROWSER_EXECUTION_DRIVER=browser_harness
-KT6_BROWSER_HARNESS_CDP_URL=http://127.0.0.1:9222
+KT6_BROWSER_EXECUTION_DRIVER=browser_extension
 # 公网 HTTP(S) 无需逐域名配置；仅测试本机/RFC1918 页面时设为 1
 KT6_EXECUTION_ALLOW_PRIVATE_NETWORKS=0
 KT6_MODEL_API_PROVIDER=<供应商或内网网关标识>
@@ -94,8 +93,9 @@ codeagent_cli、local_cv_ocr 或 hybrid），没有 `execution_fixture` 专用�
 HTTP(S) 目标无需逐域名配置；每次初始导航、当前页面、重定向和新标签绑定都会重新做
 DNS/网络范围校验，并兼容代理常用的 `198.18.0.0/15` synthetic DNS（仅域名解析结果，
 直接输入该网段 IP 仍拒绝）。本机和 RFC1918 页面默认拒绝，仅隔离测试时可设置
-`KT6_EXECUTION_ALLOW_PRIVATE_NETWORKS=1`；链路本地和保留地址始终拒绝。未设置 Browser
-Harness 两个变量时，`dry_run=false` 继续 fail closed。CDP 地址只允许 loopback。
+`KT6_EXECUTION_ALLOW_PRIVATE_NETWORKS=1`；链路本地和保留地址始终拒绝。未显式启用
+`browser_extension` 时，`dry_run=false` 继续 fail closed。扩展只连接 loopback 后端；
+不需要 CDP 端口，也不再保留 Browser Harness daemon 兼容路线。
 
 ## 4. 公共自动化回归
 
@@ -112,7 +112,7 @@ python -m unittest discover -s tests
 | `eval-browser-use` | 456 tests OK，46 skipped |
 | `eval-ui-tars` | 457 tests OK，46 skipped |
 | `ui-graph-textflow-cdp` | 508 tests OK，46 skipped |
-| `feature/browser-executor` | 2026-08-21：浏览器执行链专项 121 passed / 1 skipped；全量 562 passed / 1 skipped / 1 既有 OpenCV failure |
+| `feature/browser-executor` | 2026-08-29：当前 Chrome 扩展与执行主链定向 123 tests OK；最近全量结果见下文 |
 | `br_omniParser` | 461 tests OK，46 skipped |
 
 测试数量会随公共同步增加，以当前命令最终 `OK` 为准。公共配置和报告定向测试：
@@ -224,13 +224,11 @@ python -m unittest `
 
 当前固定动作词表只测试 `type` 与 `click`，不支持滚动、快捷键、任意 CDP 或 JavaScript。
 `type` 只能操作普通 INPUT/TEXTAREA，拒绝 password/file/hidden、disabled 和 readonly，
-并必须紧跟同目标、同文本的 `input_value` 确定性验证。使用独立 Python 3.12 环境安装可选依赖：
+并必须紧跟同目标、同文本的 `input_value` 确定性验证。可使用独立 Python 3.12 环境：
 
 ```powershell
 py -3.12 -m venv .venv-browser-executor
 .\.venv-browser-executor\Scripts\Activate.ps1
-python -m pip install -r .\requirements-browser-executor.txt
-browser-harness --doctor
 ```
 
 先跑不需要真实浏览器的自动化回归：
@@ -257,20 +255,26 @@ backend node id、selector 或坐标，也不再依赖固定测试页或规则�
 ```powershell
 .\scripts\start-browser-executor.ps1
 
-# 必须返回 ready=true；configured=true 只代表配置存在，不代表执行链在线
-Invoke-RestMethod http://127.0.0.1:8787/api/execution/health
+# 可选：启动后端后顺便在现有 Chrome 打开目标标签页
+.\scripts\start-browser-executor.ps1 -InitialTargetUrl "https://www.baidu.com/"
 
-python -m kt6_backend.execution_e2e_cli --url https://example.com/ --task "点击 Learn more 进入说明页面"
+# 点击扩展前 extension.ready=false；点击扩展并生成计划后应为 true
+Invoke-RestMethod http://127.0.0.1:8787/api/execution/health
 ```
 
-`start-browser-executor.ps1` 是 Windows 当前环境的统一入口：复用已在线组件，否则按
-“专用 CDP Chrome/Edge → Browser Harness → KT6 后端”顺序拉起，并在 Harness 真实调用
-`Target.getTargets` 后才报告就绪。脚本优先使用 `.venv-browser-executor`，也兼容当前
-`runtime_data/tools/python312` 环境；可通过 `-PythonPath` 或 `-ChromePath` 显式指定。
-新启动的专用浏览器会通过 `--load-extension` 加载 `browser_extension/`。若 9222 已存在
-旧浏览器进程，脚本会复用它，Chrome 不会在运行中接受新的扩展启动参数；升级扩展后首次
-验证需先关闭该专用浏览器再运行脚本。Runner 与受控 Target 浏览器必须分离，因此脚本
-只打印 Runner URL，不自动在受控 Chrome 中打开控制台。
+`start-browser-executor.ps1` 是 Windows 当前环境的统一入口：启动或复用 8787 后端，再用
+`chrome.exe --new-tab` 在已经运行的日常 Chrome 打开目标 URL。脚本不创建专用 profile，
+不传 `--remote-debugging-port`、`--user-data-dir` 或 `--load-extension`。脚本优先使用
+`.venv-browser-executor`，也兼容 `runtime_data/tools/python312` 和系统 Python；可通过
+`-PythonPath` 或 `-ChromePath` 显式指定。
+
+扩展首次安装步骤：
+
+1. 在现有 Chrome 打开 `chrome://extensions`，开启开发者模式。
+2. 点击“加载已解压的扩展程序”，选择仓库的 `browser_extension/`。
+3. 代码更新后在扩展管理页点击“重新加载”，无需替换或重启 Chrome。
+4. 回到脚本打开的新标签页，点击工具栏中的 “KT6 Browser Agent”。
+5. 输入自然语言流程，点“生成执行计划”；检查语义步骤后勾选确认并执行。
 
 成功输出位于：
 
@@ -282,32 +286,21 @@ runtime_data/execution_scenarios/<run_id>/
 ```
 
 `result.json` 必须为 `status=success`，每个 step 均为 `completed`，每个 type/click 的后续
-verify/wait 都必须由新 capture 通过确定性 Verifier。若希望把真实浏览器场景纳入
-unittest，可在根目录 `.env` 增加 `KT6_RUN_BROWSER_E2E=1`；未配置时只跳过这一项实机
-用例，其余契约测试照常运行。当前开发目录已经存在可运行的 Browser Harness Python
-环境；换机时仍应先按本节创建独立环境，再使用统一启动脚本验收。
+verify/wait 都必须由新 capture 通过确定性 Verifier。真实浏览器验收只从 Side Panel
+发起；自动化测试覆盖扩展中继、计划契约、Grounding、安全执行和 Verifier，不再维护
+独立 Runner 页面或 Browser Harness CLI 路线。
 
-也可以启动后端后，在普通浏览器打开：
-
-```text
-http://127.0.0.1:8787/execution-runner.html
-```
-
-Runner 页面与受控 Chromium Target Tab 必须是两个独立页面；不要让 Browser Harness
-把控制台自身当作目标标签页。在输入框填入任意公网 URL 和自然语言任务，先点“生成计划”
-检查语义步骤（无坐标、selector、backend node id），再点“确认并开始执行”。
-
-推荐入口是专用 Chrome 的扩展 Side Panel：先在目标页面点击 “KT6 Browser Agent”，直接
-输入自然语言流程。扩展通过 `chrome.tabs.query` 取得 active Tab，再用
-`chrome.debugger.getTargets()` 按 `tabId` 唯一映射 CDP Target；它不调用
-`chrome.debugger.attach` 或 `sendCommand`。计划和执行 API 都携带同一个运行时
-`browser_target_id`，后端再次核对 Target ID 与 URL。Target ID 不进入 Action Plan。
+Side Panel 通过 `chrome.tabs.query` 取得 active Tab，再用 `chrome.debugger.getTargets()`
+按 `tabId` 唯一映射 Target。用户点扩展并生成计划时，后台 service worker 才调用
+`chrome.debugger.attach`，随后只接受后端和扩展双重校验过的固定 CDP 方法/参数。计划和
+执行 API 同时携带 `browser_runtime_id` 与 `browser_target_id`；后端再次核对运行时、
+Target ID 与 URL。两者都不进入 Action Plan。
 
 实机步骤如下：
 
-1. Chrome/Edge 以 loopback remote debugging 启动，目标标签页已登录且页面状态可恢复。
+1. 日常 Chrome 已打开，扩展 v0.7.0 已加载，目标标签页已登录且页面状态可恢复。
 2. `POST /api/execution/plans` 传入 `start_url`、`user_request`，Side Panel 还会传
-   `browser_target_id`；先通过 URL Safety
+   `browser_runtime_id` 和 `browser_target_id`；先通过 URL Safety
    Policy 校验，再感知页面并调用 LLM 生成计划；确认没有坐标、selector 和 backend node id。
 3. `POST /api/execution/runs` 必须带 `confirmed=true`，Side Panel 再次确认当前 Tab 的
    URL/Target ID 未变，立即返回 run_id；前端轮询
@@ -357,34 +350,47 @@ Side Panel 同路线传入百度 active Tab 的精确 Target ID，正式模型�
 伪报整条工作流成功。扩展/执行链专项回归为 121 passed、1 skipped；全量 564 项为
 562 passed、1 skipped，唯一 failure 仍是上述未修改的 OpenCV 用例。
 
-目标 Tab 真绑定（Side Panel + `BrowserHarnessClient.open_or_bind_target`）：
+以上 2026-08-20/21 记录是旧的专用 CDP Chrome + Browser Harness 实机证据，不代表当前
+v0.7.0 现有 Chrome 扩展传输已经实机验收。v0.7.0 改为扩展 service worker attach 当前
+Tab，并用本机长轮询把固定 CDP 命令交给后端现有安全执行逻辑；完成本轮单元/接口回归后，
+仍需按本节重新做一次真实 Chrome 页面验收并记录新 run_id。
 
-- Side Panel 路线通过精确 Target ID 消除同 URL 多 Tab 歧义；后端要求该 ID 唯一存在且
-  URL 与计划输入完全一致，否则返回 `browser_target_binding_mismatch`。
-- CLI/Runner 未提供 Target ID 时仍按 URL 绑定。Runner Tab 与 Target Tab 同时存在时，
-  Runner 不导航、不点击、不感知。ScenarioRunner 通过 `client.open_or_bind_target(start_url)`
-  由 Client 内部完成“按 URL 选择唯一 page
-  target → `switch_tab` 切换 daemon 当前 session → 确认 `current_tab()` 就是该 target →
-  无匹配时 `new_tab(url)` → 确认最终 URL”，不再先对当前 session 导航再补绑定。
-- URL 回退路线中，同 URL 存在两个 page target 必须 fail closed 为 `browser_target_ambiguous`；目标消失或
-  daemon session 被切走时返回 `browser_session_target_changed`（execution_failed）。
-- 单元测试用两个 page target 的 fake harness 验证 `switch_tab` 真实发生，且后续
+2026-08-24 v0.7.0 自动化复核：扩展 runtime 中继、HTTP 注册/鉴权、精确
+runtime/Target/URL 绑定、固定 CDP 参数、Side Panel 载荷和启动脚本共 65 项通过，1 项
+真实浏览器用例按开关跳过；全量 570 项为 568 passed、1 skipped、1 failed。唯一失败仍是
+`VisionFrameMatcherOpenCVTests.test_small_translation_with_blank_new_border_is_reusable`
+返回 `insufficient_transform_inliers`，与本次执行链文件无关。Windows PowerShell 5.1 与
+Node/Python 静态语法检查、`git diff --check` 均通过。真实 Chrome E2E 尚待重新验收。
+
+2026-08-29 删除旧 popup/content collector、独立 Runner 页面和 Browser Harness daemon/
+CLI 后，现有 Chrome 扩展 runtime、计划、grounding、ScenarioRunner、Verifier、HTTP API
+与公共 App 工厂定向回归共 123 项通过；`background.js`、`sidepanel.js` 语法检查、Python
+编译和 `git diff --check` 均通过。此结果只覆盖自动化回归，真实 Chrome 页面仍按本节手工
+流程验收。
+
+目标 Tab 真绑定（Side Panel + 扩展运行时）：
+
+- Side Panel 通过精确 Target ID 消除同 URL 多 Tab 歧义；注册时后端要求 Target ID、URL
+  与该 `browser_runtime_id` 完全一致，否则返回 `browser_target_binding_mismatch`。
+- 计划生成后若用户切换 Tab、导航页面、重新 attach 成另一个 runtime，执行前检查会要求
+  重新生成计划；Action Plan 本身不保存 runtime ID、Target ID、selector 或坐标。
+- 后续
   `Page.getFrameTree`、`DOMSnapshot.captureSnapshot`、`Accessibility.getFullAXTree`、
   `Page.captureScreenshot` 与 `DOM.describeNode`、`DOM.getBoxModel`、
-  `DOM.getNodeForLocation`、click 都路由到 target-tab session，而不是只记住 targetId。
+  `DOM.getNodeForLocation`、type/click 都通过已 attach 的同一 Tab；扩展拒绝
+  `Runtime.evaluate`、任意按键序列和未列入固定表的方法。
 
 双 Tab 实机验收至少检查：
 
-1. Tab A（Runner）始终没有被导航或操作；
-2. Tab B（Target）才是实际导航、感知和点击的页面；
-3. Capture/UI Graph 中的 URL、DOM、截图都来自 Tab B；
-4. BrowserExecutor 的 click 真正发生在 Tab B；
+1. Side Panel 所在 Tab 与扩展注册的 Target/runtime 唯一对应；
+2. 只有用户点击扩展的 Target Tab 被感知和操作；
+3. Capture/UI Graph 中的 URL、DOM、截图都来自该 Target Tab；
+4. BrowserExecutor 的 type/click 真正发生在该 Target Tab；
 5. click 后重新感知，Verifier 能判断成功或明确失败；
 6. 结果落到 SUCCESS 或明确失败类别，而不是线程卡死 / 状态一直 running。
 
 DOM 执行回执写入内存审计接口 `GET /api/dom-actions/audit`，计划进度通过
-`GET /api/dom-actions/plans/{plan_id}` 查看；Browser Harness 隔离工作区位于
-`runtime_data/browser_harness_workspace/`。当前代码不自动生成执行录像，也不把点击回执
+`GET /api/dom-actions/plans/{plan_id}` 查看。当前代码不自动生成执行录像，也不把点击回执
 当作评测成功证据。
 
 ## 11. `br_omniParser` 历史分支
