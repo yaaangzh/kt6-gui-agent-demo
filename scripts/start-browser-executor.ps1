@@ -101,7 +101,11 @@ if ($targetUrlText) {
 }
 
 $python = Resolve-PythonExecutable
-$env:KT6_BROWSER_EXECUTION_DRIVER = "browser_extension"
+& $python -c "import browser_harness" 2>$null
+if ($LASTEXITCODE -ne 0) {
+    throw "Browser Harness is not installed for $python. Run: $python -m pip install -r requirements-browser-executor.txt"
+}
+$env:KT6_BROWSER_EXECUTION_DRIVER = "browser_harness"
 
 $backend = Test-JsonEndpoint -Url "$backendUrl/api/health"
 if ($null -eq $backend) {
@@ -126,7 +130,7 @@ if ($null -eq $execution) {
 }
 if (
     $null -eq $execution.PSObject.Properties["transport"] -or
-    $execution.transport -ne "chrome_extension"
+    $execution.transport -ne "browser_harness"
 ) {
     throw "Port 8787 is serving an old browser runtime. Stop that backend and rerun this script."
 }
@@ -137,19 +141,21 @@ if (-not $execution.configured -or -not $execution.planner_configured) {
 
 Write-Host "[ready] KT6 backend: $backendUrl"
 Write-Host ""
-Write-Host "KT6 existing-Chrome execution runtime is ready."
+Write-Host "KT6 Browser Harness runtime is ready for your daily Chrome."
 Write-Host "Extension directory: $extensionPath"
 Write-Host "1. Open chrome://extensions in your regular Chrome."
 Write-Host "2. Enable Developer mode, choose Load unpacked, and select the extension directory above."
 if ($null -ne $targetUri) {
     $browser = Resolve-ChromeExecutable
     Start-Process -FilePath $browser -ArgumentList @("--new-tab", $targetUri.AbsoluteUri) | Out-Null
-    Write-Host "3. Opened in the existing Chrome: $($targetUri.AbsoluteUri)"
+    Write-Host "3. Opened a new tab in the existing Chrome: $($targetUri.AbsoluteUri)"
 }
 else {
     Write-Host "3. Open any HTTP/HTTPS target page in your existing Chrome."
 }
-Write-Host "4. Click KT6 Browser Agent in the target tab."
-Write-Host "5. Enter the natural-language workflow. The extension binds this tab when planning starts."
+Write-Host "4. Open chrome://inspect/#remote-debugging and enable Allow remote debugging for this browser instance."
+Write-Host "5. Click KT6 Browser Agent in the target tab and enter the natural-language workflow."
+Write-Host "6. On the first run, click Allow in Chrome when Browser Harness asks to attach."
 Write-Host ""
-Write-Host "No remote debugging port or dedicated Chrome profile is used."
+Write-Host "The extension only selects the current tab; Browser Harness performs capture and actions."
+Write-Host "No fixed remote-debugging port, dedicated Chrome profile, or new browser instance is used."

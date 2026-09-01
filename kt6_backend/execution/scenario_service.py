@@ -43,7 +43,6 @@ class ExecutionScenarioService:
         start_url: str,
         user_request: str,
         browser_target_id: str = "",
-        browser_runtime_id: str = "",
     ) -> dict[str, Any]:
         if self.runner is None:
             raise ExecutionScenarioServiceError("execution_runner_not_configured")
@@ -54,13 +53,7 @@ class ExecutionScenarioService:
             request = str(user_request).strip()
             if not request or len(request) > 2_000:
                 raise ExecutionScenarioServiceError("execution_request_invalid")
-            if browser_runtime_id:
-                inspection = self.runner.inspect(
-                    target_url,
-                    browser_target_id=browser_target_id,
-                    browser_runtime_id=browser_runtime_id,
-                )
-            elif browser_target_id:
+            if browser_target_id:
                 inspection = self.runner.inspect(
                     target_url,
                     browser_target_id=browser_target_id,
@@ -103,9 +96,6 @@ class ExecutionScenarioService:
             "browser_target_id": str(
                 inspection.get("browser_session", {}).get("target_id", "")
             ),
-            "browser_runtime_id": str(
-                inspection.get("browser_session", {}).get("runtime_id", "")
-            ),
         }
 
     def start_run(
@@ -114,7 +104,6 @@ class ExecutionScenarioService:
         plan: Mapping[str, Any],
         confirmed: bool,
         browser_target_id: str = "",
-        browser_runtime_id: str = "",
     ) -> dict[str, Any]:
         if not confirmed:
             raise ExecutionScenarioServiceError("execution_confirmation_required")
@@ -133,7 +122,7 @@ class ExecutionScenarioService:
             self._runs[run_id] = record
         thread = threading.Thread(
             target=self._run,
-            args=(run_id, validated, browser_target_id, browser_runtime_id),
+            args=(run_id, validated, browser_target_id),
             daemon=True,
         )
         thread.start()
@@ -144,7 +133,6 @@ class ExecutionScenarioService:
         plan: Mapping[str, Any],
         *,
         browser_target_id: str = "",
-        browser_runtime_id: str = "",
     ) -> dict[str, Any]:
         if self.runner is None:
             raise ExecutionScenarioServiceError("execution_runner_not_configured")
@@ -160,7 +148,6 @@ class ExecutionScenarioService:
             run_id,
             validated,
             browser_target_id,
-            browser_runtime_id,
         )
         result = self.get_run(run_id)
         if result["status"] != "success":
@@ -193,11 +180,11 @@ class ExecutionScenarioService:
         if self.runner is None:
             runtime = {
                 "ready": False,
-                "transport": "chrome_extension",
-                "extension": {
+                "transport": "browser_harness",
+                "browser_harness": {
                     "ready": False,
                     "error": "execution_runner_not_configured",
-                    "connected_runtimes": 0,
+                    "mode": "existing_chrome",
                 },
             }
         else:
@@ -217,7 +204,6 @@ class ExecutionScenarioService:
         run_id: str,
         plan: dict[str, Any],
         browser_target_id: str,
-        browser_runtime_id: str,
     ) -> None:
         out_dir = self.root / "runtime_data" / "execution_scenarios" / run_id
         with self._lock:
@@ -237,7 +223,6 @@ class ExecutionScenarioService:
                 out_dir=out_dir,
                 confirmed=True,
                 browser_target_id=browser_target_id,
-                browser_runtime_id=browser_runtime_id,
                 update=update,
             )
         except (ScenarioExecutionError, OSError, ValueError) as exc:

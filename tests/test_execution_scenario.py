@@ -427,6 +427,44 @@ class PlannerAndServiceTest(unittest.TestCase):
             {"thinking": {"type": "disabled"}},
         )
 
+    def test_openai_planner_retries_one_invalid_plan_response(self):
+        invalid_plan = semantic_plan()
+        invalid_plan["steps"] = []
+
+        class Result:
+            def __init__(self, content):
+                self.content = content
+
+            def json_content(self):
+                return self.content
+
+        class Client:
+            model = "approved-model"
+
+            def __init__(self):
+                self.calls = []
+
+            def complete(self, **kwargs):
+                self.calls.append(kwargs)
+                content = invalid_plan if len(self.calls) == 1 else semantic_plan()
+                return Result(content)
+
+        client = Client()
+        planner = OpenAIActionPlanner(client=client, provider="internal")
+
+        result = planner.plan(
+            start_url=URL,
+            user_request=TASK,
+            ui_graph=graph("c1"),
+        )
+
+        self.assertEqual(result["schema_version"], ACTION_PLAN_SCHEMA_VERSION)
+        self.assertEqual(len(client.calls), 2)
+        self.assertIn(
+            "previous response violated",
+            client.calls[1]["messages"][-1]["content"],
+        )
+
     def test_service_checks_public_network_policy_before_model_planning(self):
         class Runner:
             def inspect(self, start_url):

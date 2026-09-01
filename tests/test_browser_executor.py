@@ -1505,6 +1505,90 @@ class BrowserExecutionBoundaryTest(unittest.TestCase):
         self.assertTrue(decision.accessible_name_from_descendant)
         self.assertEqual(decision.accessible_name_backend_node_id, 502)
 
+    def test_dom_grounder_does_not_inherit_button_label_to_page_root(self):
+        graph = cdp_graph()
+        button = graph["nodes"][0]
+        button.update(
+            {
+                "id": "cdp:search-button",
+                "name": "百度一下",
+                "owner_business_id": "",
+                "action_id": "",
+            }
+        )
+        button["source"]["backend_node_id"] = 296
+        button["attributes"] = {"id": "chat-submit-button"}
+        graph["nodes"].extend(
+            [
+                {
+                    "id": "cdp:page-root",
+                    "kind": "element",
+                    "role": "RootWebArea",
+                    "name": "百度一下，你就知道",
+                    "bbox": [0.0, 0.0, 1200.0, 800.0],
+                    "source": {
+                        "kind": "cdp",
+                        "frame_id": "frame-main",
+                        "frame_url": "https://nce.example/devices",
+                        "backend_node_id": 16,
+                    },
+                    "attributes": {},
+                    "disabled": False,
+                    "actionable": False,
+                    "can_click_now": False,
+                    "safe_for_execution": False,
+                    "interaction": {
+                        "status": "candidate_only",
+                        "candidate": True,
+                        "authorized": False,
+                    },
+                },
+                {
+                    "id": "cdp:search-button-label",
+                    "kind": "element",
+                    "role": "StaticText",
+                    "name": "百度一下",
+                    "source": {
+                        "kind": "cdp",
+                        "frame_id": "frame-main",
+                        "frame_url": "https://nce.example/devices",
+                        "backend_node_id": 1197,
+                    },
+                    "attributes": {},
+                    "disabled": False,
+                    "actionable": False,
+                    "can_click_now": False,
+                    "safe_for_execution": False,
+                    "interaction": {
+                        "status": "analysis_only",
+                        "candidate": False,
+                        "authorized": False,
+                    },
+                },
+            ]
+        )
+        graph["edges"].extend(
+            [
+                {
+                    "source": "cdp:page-root",
+                    "target": "cdp:search-button",
+                    "type": "parent_of",
+                    "relation_type": "dom_child",
+                },
+                {
+                    "source": "cdp:search-button",
+                    "target": "cdp:search-button-label",
+                    "type": "parent_of",
+                    "relation_type": "dom_child",
+                },
+            ]
+        )
+
+        decision = DOMGrounder().resolve({"query": "百度一下"}, graph)
+
+        self.assertEqual(decision.node_id, "cdp:search-button")
+        self.assertEqual(decision.backend_node_id, 296)
+
     def test_dom_grounder_accepts_a_boxless_link_with_one_visible_dom_child(self):
         graph = cdp_graph()
         link = graph["nodes"][0]
@@ -1731,10 +1815,10 @@ class BrowserExecutionBoundaryTest(unittest.TestCase):
         self.assertEqual(result["reason"], "outcome_verifier_unavailable")
         self.assertEqual(executor.actions, [])
 
-    def test_app_factory_builds_existing_chrome_extension_transport(self):
+    def test_app_factory_builds_existing_chrome_browser_harness_transport(self):
         with patch.dict(
             os.environ,
-            {"KT6_BROWSER_EXECUTION_DRIVER": "browser_extension"},
+            {"KT6_BROWSER_EXECUTION_DRIVER": "browser_harness"},
             clear=True,
         ), tempfile.TemporaryDirectory() as temp_dir:
             services = app.create_services(Path(temp_dir))
@@ -1742,24 +1826,23 @@ class BrowserExecutionBoundaryTest(unittest.TestCase):
         self.assertFalse(services.safe_dom_actions.dry_run_only)
         self.assertEqual(
             services.safe_dom_actions.executor.executor_id,
-            "chrome_extension",
+            "browser_harness",
         )
-        self.assertIsNotNone(services.browser_extension_runtime)
         self.assertTrue(services.execution_scenarios.health()["configured"])
         runtime = services.execution_scenarios.runtime_health()
-        self.assertEqual(runtime["transport"], "chrome_extension")
+        self.assertEqual(runtime["transport"], "browser_harness")
         self.assertFalse(runtime["ready"])
         self.assertEqual(
-            runtime["extension"]["error"],
-            "browser_extension_not_connected",
+            runtime["browser_harness"]["error"],
+            "browser_harness_not_connected",
         )
 
         with patch.dict(
             os.environ,
-            {"KT6_BROWSER_EXECUTION_DRIVER": "browser_harness"},
+            {"KT6_BROWSER_EXECUTION_DRIVER": "browser_extension"},
             clear=True,
         ), tempfile.TemporaryDirectory() as temp_dir, self.assertRaisesRegex(
-            ValueError, "must be browser_extension"
+            ValueError, "must be browser_harness"
         ):
             app.create_services(Path(temp_dir))
 

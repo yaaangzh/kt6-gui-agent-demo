@@ -5,10 +5,11 @@
 这不是纯前端动画演示：前端负责采集页面和呈现事件，后端负责意图路由、任务状态、业务步骤、方案授权、资源锁、场景校验、执行结果与运行记忆。
 
 当前阶段结论：**KT6 核心架构、端到端 PoC、三种 Canvas 像素识别驱动，以及 B 组
-多源 UI Graph dry-run 规划已完成；`feature/browser-executor` 已固定
+多源 UI Graph dry-run 规划已完成；`feature/eval-browser-harness` 在
+`feature/browser-executor` 的安全计划与验证链上接入 Browser Harness，已固定
 `kt6.action-plan.v1` 契约，支持受限自然语言生成可读计划，并由 ScenarioRunner 在每一步
-重新采集真实 DOM/CDP/Canvas 后执行 type、click、wait、verify；Chrome Side Panel 会在
-用户点击扩展后 attach 当前标签页，并通过本机后端的固定命令中继完成识别与操作；真实业务系统验收、
+重新采集真实 DOM/CDP/Canvas 后执行 type、click、wait、verify；Chrome Side Panel 只选择
+当前标签页和承载人工确认，Browser Harness 复用用户已打开的日常 Chrome 完成识别与操作；真实业务系统验收、
 真实图片准确率评测和真实设备下发尚未完成。**
 
 供其他 Codex 或新开发环境接手时，请同时阅读
@@ -23,8 +24,8 @@ CodeAgentCLI 的 Windows 启动方式、真实图片验证结论、已知限制�
 使用方式见 [docs/ui-graph-architecture.md](./docs/ui-graph-architecture.md)。该路径参考
 TextFlow 的中间文本图分层思想，当前不包含 OmniParser。
 
-UI Graph 新方案保留在 `ui-graph-textflow-cdp`；现有 Chrome 扩展执行试验继续隔离在
-`feature/browser-executor`。测试区环境准备、CDP 采集、内部 GLM 配置、接口检查和
+UI Graph 新方案保留在 `ui-graph-textflow-cdp`；Browser Harness 日常 Chrome 试验隔离在
+`feature/eval-browser-harness`。测试区环境准备、CDP 采集、内部 GLM 配置、接口检查和
 执行步骤见 [test.md](./test.md)。GLM 产出的 UI Operation DAG 始终是不可执行提案；
 真实 type/click 只能经过固定能力执行器、新鲜感知和一次性动作令牌。
 
@@ -34,7 +35,7 @@ UI Graph 新方案保留在 `ui-graph-textflow-cdp`；现有 Chrome 扩展执行
 |---|---|---|
 | A 组 | `main` | 现有 DOM、Canvas、OpenCV/OCR 和安全动作链基线 |
 | B 组 | `ui-graph-textflow-cdp` | Playwright/CDP、多源 UI Graph、内部 GLM5.1 DAG 规划 |
-| 执行试验 | `feature/browser-executor` | 当前 Chrome Tab + 自然语言 → Action Plan → 安全 type/click → 新 capture → Verifier Registry |
+| 执行试验 | `feature/eval-browser-harness` | 日常 Chrome 当前 Tab + Browser Harness → Action Plan → 安全 type/click → 新 capture → Verifier Registry |
 
 B 组自动化回归已通过，执行试验分支已经完成受控 type/click 和 Chrome Side Panel 接线；下一阶段是在测试区
 使用真实 Chromium/CDP、真实 NCE/FEBS 页面和内部 GLM5.1 endpoint 验证完整链路。
@@ -58,7 +59,7 @@ B 组自动化回归已通过，执行试验分支已经完成受控 type/click 
 | 页面感知 | DOM/ARIA、Canvas 截图、渲染器 Scene、拓扑文本重建及 Local CV/HTTP/CodeAgent CanvasVision Adapter |
 | 多源 UI Graph | 汇合 DOM/CDP/page_api/vision/text，保留节点来源、父子/owner/action/semantic 边及交互候选 |
 | 内部 GLM 结构规划 | 测试区 GLM5.1 只提出 `locate/click/wait/verify` DAG；严格验证后仍为不可执行 dry-run |
-| 浏览器扩展 | Chrome 扩展 v0.7.0 提供 Side Panel；用户点击扩展后用 `chrome.debugger` attach 当前 active Tab，仅执行后端与扩展共同定义的固定感知/type/click 命令集合，不接受模型生成的任意 CDP、JavaScript 或按键序列 |
+| 浏览器扩展 | Chrome 扩展 v0.8.0 提供 Side Panel，只用 `chrome.debugger.getTargets()` 将 active Tab 映射为精确 Target；扩展不 attach、不代发 CDP，感知与动作由本机 Browser Harness 完成 |
 | DOM 安全动作 | 权威资产解析、设备与控件双重绑定、新鲜页面复核和一次性令牌；type 只允许普通 textbox-like DOM，click 继续核对 live frame/identity/hit-test，并用新 capture 确定性验证结果 |
 | 多步骤页面执行 | 模型生成严格 `kt6.action-plan.v1`，用户确认后异步运行；DOM 和 Canvas 每步重新 Grounding，Verifier Registry 确定性判定结果 |
 | 感知缓存 | Scene Graph 缓存、`scene_revision`、`HIT/MISS/INCREMENTAL` |
@@ -144,7 +145,8 @@ UI Graph 规划不替代现有 DOM 安全动作链。只有 DOM/CDP 节点可以
 
 ```text
 当前 Chrome 标签页
--> 用户从 Side Panel 显式 attach 当前 Tab
+-> Side Panel 读取并提交当前 Tab 的精确 Target ID
+-> 用户在 Chrome UI 显式授权 Browser Harness 连接日常 Chrome
 -> 固定 DOMSnapshot + Accessibility Tree + 页面截图命令
 -> PagePerceptionService 规范化并持久化
 -> UI Graph + page_capture_id
@@ -161,20 +163,20 @@ Popup 或 capture-job UI。
 | 路径 | 适用页面 | 当前状态 |
 |---|---|---|
 | DOM 感知 | 按钮、表格、表单等可访问 DOM/ARIA 的页面 | 已完成第一期 |
-| 浏览器视觉截图 | 在线页面中的 Canvas、SVG、WebGL 或组合渲染地图 | Browser Agent v0.7.0 通过固定 CDP 截图命令采集，视觉结果保持 analysis-only |
+| 浏览器视觉截图 | 在线页面中的 Canvas、SVG、WebGL 或组合渲染地图 | Browser Harness 通过 KT6 固定截图适配器采集，视觉结果保持 analysis-only |
 | 显式页面 API / Renderer Adapter | 页面主动暴露只读 `nodes/edges` 快照的 Canvas | 当前 Demo 已使用；不拦截页面网络请求 |
 | Topology Text Recognizer | 人工 ASCII 或外部 OCR 已转写出的结构化拓扑文本 | 已完成首个严格样例 |
 | Canvas Vision Adapter | 只能获得截图、图片、远程桌面或封闭 Canvas | 本地 RapidOCR/OpenCV、HTTP 服务与 CodeAgent read-tool 三种驱动、严格协议和 pixels-only CLI 已完成 |
 
 ### 在线页面 CDP + 视觉采集
 
-仓库中的 `browser_extension/` 是无法修改目标页面源码时的采集桥梁。扩展在用户
-点击 action 后读取当前 HTTP(S) 页面，再把结果提交给 KT6。默认执行入口使用
+仓库中的 `browser_extension/` 是无法修改目标页面源码时的当前 Tab 选择与确认界面。
+扩展不读取目标页内容，也不代发 CDP。默认执行入口使用
 `start-browser-executor.ps1` 与 Chrome Side Panel；首次到 Chrome 的
 `chrome://extensions` 加载本仓库的 `browser_extension` 目录。扩展更新后必须在扩展
-管理页点击“重新加载”，再回到目标页面点击扩展。Service Worker 只接受后端与扩展
-共同定义的固定 CDP 方法和参数，不暴露任意 JavaScript、raw CDP 或按键序列。DOMSnapshot、
-Accessibility Tree 与截图在后端融合成 UI Graph；页面 API、vision 和 text 证据只能辅助
+管理页点击“重新加载”，再回到目标页面点击扩展。Browser Harness 连接用户在 Chrome UI
+显式授权的日常 Chrome，KT6 只调用固定感知/type/click 适配器。DOMSnapshot、Accessibility
+Tree 与截图在后端融合成 UI Graph；页面 API、vision 和 text 证据只能辅助
 理解，不能授权点击。其他采集客户端若使用只读 `window.__KT6_PAGE_ADAPTER__`，仍必须走
 后端既有的有界、analysis-only 契约。
 
@@ -491,8 +493,8 @@ python -m kt6_backend.topology_fusion_cli `
 ### 环境要求
 
 - Python 3.10 或更高版本。
-- KT6 浏览器执行主链使用 Python 标准库；本地单图识别才需要执行 `python -m pip install -r requirements-local-vision.txt`。
-- Chrome（现有 Chrome 扩展执行链）。
+- Browser Harness 执行环境：`python -m pip install -r requirements-browser-executor.txt`。
+- Chrome（日常使用的现有实例，需在 `chrome://inspect/#remote-debugging` 显式允许本次远程调试）。
 
 ### 启动
 
@@ -518,8 +520,10 @@ python main.py
 顺便打开目标标签页，再传 `-InitialTargetUrl "https://www.baidu.com/"`。
 
 脚本会启动 KT6 后端，然后通过 `chrome.exe --new-tab` 把目标 URL 打开到已经运行的日常
-Chrome；没有运行 Chrome 时则正常打开 Chrome。它不会创建专用 profile，也不使用 9222、
-`--remote-debugging-port` 或 `--load-extension`。扩展只需首次在 `chrome://extensions`
+Chrome；没有运行 Chrome 时则正常打开 Chrome。它不会创建专用 profile，也不固定使用
+9222，不传 `--remote-debugging-port` 或 `--load-extension`。先在
+`chrome://inspect/#remote-debugging` 开启当前浏览器实例的远程调试，并在 Browser Harness
+首次连接时点击 Chrome 的 Allow。扩展只需首次在 `chrome://extensions`
 通过“加载已解压的扩展程序”加载 `browser_extension/`，代码更新后点一次“重新加载”。
 随后在脚本打开的新标签页点击 “KT6 Browser Agent”，输入自然语言流程、检查计划并确认执行。
 
@@ -680,7 +684,7 @@ kt6_backend/
 
 playbooks/                     诊断和动作任务链
 data/                          Mock 业务数据
-browser_extension/             Chrome Browser Agent Side Panel、页面感知与固定命令中继扩展 v0.7.0
+browser_extension/             Chrome Browser Agent Side Panel 与当前 Tab 选择扩展 v0.8.0
 browser_sidecar/               Playwright/CDP 只读采集 Sidecar
 demo/                          LUI-GUI Web 界面
 docs/                          架构与运维说明
@@ -760,7 +764,6 @@ Manifest、文件或这些语义绑定有缺失/改动时，该运行不能参�
 ```powershell
 python -m unittest `
   tests.test_browser_executor `
-  tests.test_execution_runtime `
   tests.test_execution_scenario `
   tests.test_outcome_verifier `
   tests.test_execution_e2e `
@@ -775,7 +778,7 @@ python -m unittest `
   tests.test_app
 ```
 
-`feature/browser-executor` 的真实页面闭环是“任意公网 URL + 自然语言任务 → 统一页面感知
+`feature/eval-browser-harness` 的真实页面闭环是“任意公网 URL + 自然语言任务 → Browser Harness 统一页面感知
 → LLM 生成 `kt6.action-plan.v1` → Grounding → 受控 type/click → 重新感知 → Verify”。
 先正常打开日常 Chrome，完成 `.env` 的规划模型配置后执行：
 
@@ -785,10 +788,11 @@ python -m unittest `
 
 启动脚本只拉起 KT6 后端（默认 `127.0.0.1:8787`），然后在现有 Chrome 新建目标标签页。
 第一次使用时到 `chrome://extensions` 加载仓库的 `browser_extension/`；代码更新后点击
-“重新加载”。在新标签页点击扩展图标打开 Side Panel。用户点击后扩展才 attach 当前
-Tab，注册一次本机运行时；生成计划和确认执行都绑定同一 `browser_runtime_id`、Target ID
-与 URL。`GET /api/execution/health` 中 `configured=true` 表示后端配置存在，扩展连接后
-`extension.ready=true`；规划模型也就绪时总状态才为 `ready=true`。
+“重新加载”。在 `chrome://inspect/#remote-debugging` 开启本次远程调试，并在首次连接时
+点击 Allow；不需要新浏览器、专用 profile 或固定调试端口。在新标签页点击扩展图标打开
+Side Panel。扩展只提交当前 Tab 的 Target ID 与 URL；生成计划和确认执行都重新核对它们。
+`GET /api/execution/health` 中 `browser_harness.mode=existing_chrome` 表示当前路线，首次成功
+连接后 `browser_harness.ready=true`。
 
 命令先通过 URL Safety Policy 校验目标 URL，再感知真实页面并调用规划模型生成语义计划，
 不再固定测试页或规则解析器。计划中没有 UI Graph、backend node id、selector 或坐标；
@@ -806,7 +810,7 @@ fresh capture 的角色、名称和有界属性指纹绑定。若可点击链接
 opener/URL 匹配的 page target，再由新 capture 验证 URL 或页面变化。公网 HTTP(S)
 目标无需逐域名配置，并兼容代理 synthetic DNS；本机、私网、链路本地和保留地址默认
 fail closed，直接输入 synthetic DNS 测试网段 IP 也不会被当成公网 URL。
-扩展运行时会持续核对本次绑定的目标标签页，保证截图、Grounding 和点击都针对同一页面。
+Browser Harness 会持续核对本次绑定的目标标签页，保证截图、Grounding 和点击都针对同一页面。
 
 2026-08-20 本机使用隔离的 Python 3.12、Chrome CDP 和 Browser Harness 对百度
 公开页面完成一次真实 `点击百度热搜`：无 `id` 链接经 DOM/CDP Grounding 点击，新增
@@ -819,6 +823,7 @@ fail closed，直接输入 synthetic DNS 测试网段 IP 也不会被当成公�
 这次完整验证了“任意公网 URL + 自然语言任务 → 真实 Planner → 真实浏览器执行”，并证明
 执行链并非对百度域名写死。Planner 失败时仍必须明确返回错误，不能静默换成规则或假计划。
 
-当前仓库没有 FEBS/NCE 前端源码，因此扩展尚未嵌入目标系统；它只是受控浏览器桥梁。
-Chrome 扩展 type/click 只有扩展显式 attach 当前 Tab 后才可用，设备 API 下发仍未接入；现场验收前应先在
+当前仓库没有 FEBS/NCE 前端源码，因此扩展尚未嵌入目标系统；它只是当前 Tab 选择与人工确认入口。
+Browser Harness type/click 只有用户在 Chrome UI 授权日常 Chrome、且 Side Panel 精确绑定当前
+Tab 后才可用，设备 API 下发仍未接入；现场验收前应先在
 隔离、可恢复页面验证点击与新的 KT6 capture，不能把待验证状态记为任务成功。

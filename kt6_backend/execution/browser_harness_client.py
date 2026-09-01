@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import importlib
 import math
+import os
 import re
 import time
 from pathlib import Path
@@ -24,12 +26,13 @@ class BrowserHarnessError(RuntimeError):
 class BrowserHarnessClient:
     """Small, fixed-capability client for the Browser Harness daemon."""
 
+    executor_id = "browser_harness"
     _TARGET_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 
     def __init__(
         self,
         *,
-        cdp_url: str,
+        cdp_url: str | None = None,
         workspace: Path,
         url_policy: ExecutionURLPolicy,
         cdp_call: Callable[..., Mapping[str, Any]] | None = None,
@@ -37,8 +40,9 @@ class BrowserHarnessClient:
         switch_tab_call: Callable[[str], Any] | None = None,
         current_tab_call: Callable[[], Any] | None = None,
         new_tab_call: Callable[[str], Any] | None = None,
+        ensure_daemon_call: Callable[[], Any] | None = None,
     ):
-        self.cdp_url = self._loopback_cdp_url(cdp_url)
+        self.cdp_url = self._loopback_cdp_url(cdp_url) if cdp_url else None
         self.workspace = Path(workspace).resolve()
         self.url_policy = url_policy
         self._cdp_call = cdp_call
@@ -46,6 +50,7 @@ class BrowserHarnessClient:
         self._switch_tab_call = switch_tab_call
         self._current_tab_call = current_tab_call
         self._new_tab_call = new_tab_call
+        self._ensure_daemon_call = ensure_daemon_call
         self._ready = False
         self._bound_target_id = ""
         self._bound_page_url = ""
@@ -645,8 +650,76 @@ class BrowserHarnessClient:
         if self._ready:
             return
         if self._cdp_call is None or self._click_call is None:
-            raise BrowserHarnessError("browser_extension_runtime_not_bound")
+            self.workspace.mkdir(parents=True, exist_ok=True)
+            if (self.workspace / "agent_helpers.py").exists():
+                raise BrowserHarnessError("browser_harness_workspace_not_clean")
+            os.environ["BH_AGENT_WORKSPACE"] = str(self.workspace)
+            os.environ["BU_NAME"] = "kt6"
+            if self.cdp_url:
+                os.environ["BU_CDP_URL"] = self.cdp_url
+                os.environ.pop("BU_CDP_WS", None)
+            else:
+                os.environ.pop("BU_CDP_URL", None)
+                os.environ.pop("BU_CDP_WS", None)
+            try:
+                helpers = importlib.import_module("browser_harness.helpers")
+                admin = importlib.import_module("browser_harness.admin")
+            except ImportError as exc:
+                raise BrowserHarnessError("browser_harness_not_installed") from exc
+            helper_workspace = Path(helpers.AGENT_WORKSPACE).resolve()
+            if helper_workspace != self.workspace:
+                raise BrowserHarnessError("browser_harness_workspace_mismatch")
+            self._cdp_call = helpers.cdp
+            self._click_call = helpers.click_at_xy
+            self._switch_tab_call = lambda target_id: helpers.switch_tab(
+                target_id,
+                activate=True,
+            )
+            self._current_tab_call = helpers.current_tab
+
+            def open_visible_tab(url: str) -> Any:
+                target_id = helpers.new_tab(url)
+                helpers.activate_tab(target_id)
+                return target_id
+
+            self._new_tab_call = open_visible_tab
+            self._ensure_daemon_call = admin.ensure_daemon
+        try:
+            if self._ensure_daemon_call is not None:
+                self._ensure_daemon_call()
+        except Exception as exc:
+            message = str(exc).casefold()
+            if "remote-debugging-setup" in message or "chrome://inspect" in message:
+                error_code = "browser_harness_remote_debugging_required"
+            elif "permission-blocked" in message or "allow remote debugging" in message:
+                error_code = "browser_harness_permission_required"
+            elif "chrome-not-running" in message:
+                error_code = "browser_harness_chrome_not_running"
+            else:
+                error_code = "browser_harness_daemon_unavailable"
+            raise BrowserHarnessError(error_code) from exc
         self._ready = True
+
+    def runtime_health(self) -> dict[str, Any]:
+        error_code = ""
+        ready = False
+        if self._ready and self._cdp_call is not None:
+            try:
+                version = self._cdp_call("Browser.getVersion")
+                ready = isinstance(version, Mapping) and bool(version.get("product"))
+            except Exception:
+                error_code = "browser_harness_daemon_unavailable"
+        elif self._cdp_call is None:
+            error_code = "browser_harness_not_connected"
+        return {
+            "ready": ready,
+            "transport": "browser_harness",
+            "browser_harness": {
+                "ready": ready,
+                "mode": "existing_chrome",
+                "error": error_code,
+            },
+        }
 
     @staticmethod
     def _quad_center(value: Any) -> tuple[float, float]:

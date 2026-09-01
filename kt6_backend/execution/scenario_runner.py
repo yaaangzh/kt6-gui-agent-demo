@@ -54,17 +54,10 @@ class ScenarioRunner:
         start_url: str,
         *,
         browser_target_id: str = "",
-        browser_runtime_id: str = "",
     ) -> dict[str, Any]:
         try:
             target_url = self.url_policy.validate(start_url)
-            if browser_runtime_id:
-                browser_session = self.client.open_or_bind_target(
-                    target_url,
-                    target_id=browser_target_id,
-                    runtime_id=browser_runtime_id,
-                )
-            elif browser_target_id:
+            if browser_target_id:
                 browser_session = self.client.open_or_bind_target(
                     target_url,
                     target_id=browser_target_id,
@@ -90,7 +83,6 @@ class ScenarioRunner:
         out_dir: Path,
         confirmed: bool,
         browser_target_id: str = "",
-        browser_runtime_id: str = "",
         update: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         if not confirmed:
@@ -99,13 +91,7 @@ class ScenarioRunner:
         target_url = self.url_policy.validate(action_plan["start_url"])
         out_dir.mkdir(parents=True, exist_ok=False)
         _write_json(out_dir / "action-plan.json", action_plan)
-        if browser_runtime_id:
-            browser_session = self.client.open_or_bind_target(
-                target_url,
-                target_id=browser_target_id,
-                runtime_id=browser_runtime_id,
-            )
-        elif browser_target_id:
+        if browser_target_id:
             browser_session = self.client.open_or_bind_target(
                 target_url,
                 target_id=browser_target_id,

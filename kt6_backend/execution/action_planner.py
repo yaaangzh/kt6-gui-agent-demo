@@ -96,43 +96,72 @@ Keep the plan at 12 steps or fewer."""
             "user_request": user_request,
             "ui_graph": json.loads(graph_text),
         }
-        try:
-            provider_options = (
-                {"extra_body": {"thinking": {"type": "disabled"}}}
-                if self.provider.casefold() == "deepseek"
-                else {}
-            )
-            response = self.client.complete(
-                messages=[
-                    {"role": "system", "content": self._SYSTEM_PROMPT},
+        messages = [
+            {"role": "system", "content": self._SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    request,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            },
+        ]
+        provider_options = (
+            {"extra_body": {"thinking": {"type": "disabled"}}}
+            if self.provider.casefold() == "deepseek"
+            else {}
+        )
+        last_error_code = "execution_planner_invalid_response"
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                response = self.client.complete(
+                    messages=messages,
+                    json_mode=True,
+                    temperature=0.0,
+                    **provider_options,
+                )
+                plan = self.validator.validate(response.json_content())
+                if (
+                    plan["start_url"] != start_url
+                    or plan["user_request"] != user_request
+                ):
+                    raise ActionPlannerError(
+                        "execution_planner_context_mismatch"
+                    )
+                return plan
+            except ModelAPITransportError as exc:
+                raise ActionPlannerError(
+                    "execution_planner_transport_error"
+                ) from exc
+            except ModelAPIResponseError as exc:
+                last_error_code = "execution_planner_model_response_invalid"
+                last_error = exc
+            except ActionPlanValidationError as exc:
+                last_error_code = "execution_planner_plan_invalid"
+                last_error = exc
+            except ActionPlannerError as exc:
+                last_error_code = exc.error_code
+                last_error = exc
+            except (TypeError, ValueError) as exc:
+                last_error_code = "execution_planner_invalid_response"
+                last_error = exc
+            if attempt == 0:
+                messages = [
+                    *messages,
                     {
                         "role": "user",
-                        "content": json.dumps(
-                            request,
-                            ensure_ascii=False,
-                            sort_keys=True,
-                            separators=(",", ":"),
+                        "content": (
+                            "The previous response violated the required schema. "
+                            "Return one corrected JSON object only. Copy start_url "
+                            "and user_request exactly and obey every action/verify "
+                            "pairing rule."
                         ),
                     },
-                ],
-                json_mode=True,
-                temperature=0.0,
-                **provider_options,
-            )
-            plan = self.validator.validate(response.json_content())
-        except ModelAPITransportError as exc:
-            raise ActionPlannerError("execution_planner_transport_error") from exc
-        except ModelAPIResponseError as exc:
-            raise ActionPlannerError(
-                "execution_planner_model_response_invalid"
-            ) from exc
-        except ActionPlanValidationError as exc:
-            raise ActionPlannerError("execution_planner_plan_invalid") from exc
-        except (TypeError, ValueError) as exc:
-            raise ActionPlannerError("execution_planner_invalid_response") from exc
-        if plan["start_url"] != start_url or plan["user_request"] != user_request:
-            raise ActionPlannerError("execution_planner_context_mismatch")
-        return plan
+                ]
+        raise ActionPlannerError(last_error_code) from last_error
 
     def health(self) -> dict[str, Any]:
         return {

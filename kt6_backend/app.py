@@ -17,11 +17,7 @@ from .codeagent_canvas_vision import CodeAgentCanvasVisionAdapter
 from .dom_action_binding import DOMActionBindingService
 from .env_config import load_project_env
 from .execution.browser_executor import HarnessBrowserExecutor
-from .execution.extension_runtime import (
-    BrowserExtensionClient,
-    BrowserExtensionRuntimeManager,
-    ExtensionRuntimeError,
-)
+from .execution.browser_harness_client import BrowserHarnessClient
 from .execution.error_categories import classify_error
 from .execution.action_planner import ActionPlanner, OpenAIActionPlanner
 from .execution.grounding import TargetGrounderRegistry
@@ -424,23 +420,26 @@ def _create_action_planner_from_env() -> ActionPlanner | None:
 
 def _create_browser_executor_from_env(
     url_policy: ExecutionURLPolicy,
+    *,
+    root: Path = ROOT,
 ) -> tuple[
     HarnessBrowserExecutor | None,
     UIGraphTargetResolver | None,
-    BrowserExtensionRuntimeManager | None,
 ]:
-    """Build the opt-in existing-Chrome extension runtime."""
+    """Build the opt-in Browser Harness runtime for the user's daily Chrome."""
 
     driver = _optional_env(BROWSER_EXECUTION_DRIVER_ENV)
     if driver is None:
-        return None, None, None
-    if driver.casefold() != "browser_extension":
+        return None, None
+    if driver.casefold() != "browser_harness":
         raise ValueError(
-            f"{BROWSER_EXECUTION_DRIVER_ENV} must be browser_extension"
+            f"{BROWSER_EXECUTION_DRIVER_ENV} must be browser_harness"
         )
-    manager = BrowserExtensionRuntimeManager(url_policy=url_policy)
-    client = BrowserExtensionClient(manager=manager, url_policy=url_policy)
-    return HarnessBrowserExecutor(client), UIGraphTargetResolver(), manager
+    client = BrowserHarnessClient(
+        workspace=Path(root).resolve() / "runtime_data" / "browser_harness_workspace",
+        url_policy=url_policy,
+    )
+    return HarnessBrowserExecutor(client), UIGraphTargetResolver()
 
 
 @dataclass(frozen=True)
@@ -457,7 +456,6 @@ class AppServices:
     safe_dom_actions: SafeDOMActionService
     outcome_verifiers: OutcomeVerifierRegistry
     execution_scenarios: ExecutionScenarioService
-    browser_extension_runtime: BrowserExtensionRuntimeManager | None
     ui_graph_planning: UIGraphPlanningService
     tools: MockBusinessTools
     runtime: KT6Runtime
@@ -475,8 +473,8 @@ def create_services(
     url_policy = _create_execution_url_policy_from_env()
     action_planner = action_planner_override or _create_action_planner_from_env()
     ui_graph_reasoner = _create_ui_graph_reasoner_from_env()
-    browser_executor, browser_target_resolver, browser_extension_runtime = (
-        _create_browser_executor_from_env(url_policy)
+    browser_executor, browser_target_resolver = (
+        _create_browser_executor_from_env(url_policy, root=root)
     )
     runtime_dir = root / "runtime_data"
     memory = SQLiteMemoryStore(runtime_dir / "kt6_memory.sqlite3")
@@ -557,7 +555,6 @@ def create_services(
         safe_dom_actions=safe_dom_actions,
         outcome_verifiers=outcome_verifiers,
         execution_scenarios=execution_scenarios,
-        browser_extension_runtime=browser_extension_runtime,
         ui_graph_planning=ui_graph_planning,
         tools=tools,
         runtime=runtime,
@@ -802,10 +799,6 @@ class KT6Handler(SimpleHTTPRequestHandler):
                 "/api/dom-actions/verify",
                 "/api/execution/plans",
                 "/api/execution/runs",
-                "/api/execution/extension-runtimes/register",
-                "/api/execution/extension-runtimes/poll",
-                "/api/execution/extension-runtimes/complete",
-                "/api/execution/extension-runtimes/unregister",
                 "/api/ui-operations/plan",
             }
             or (path.startswith("/api/tasks/") and path.endswith("/actions"))
@@ -821,70 +814,17 @@ class KT6Handler(SimpleHTTPRequestHandler):
         except ValueError as exc:
             self._json(400, {"error": str(exc)})
             return
-        extension_runtime_paths = {
-            "/api/execution/extension-runtimes/register",
-            "/api/execution/extension-runtimes/poll",
-            "/api/execution/extension-runtimes/complete",
-            "/api/execution/extension-runtimes/unregister",
-        }
-        if path in extension_runtime_paths:
-            manager = services.browser_extension_runtime
-            if manager is None:
-                self._json(409, {"error": "browser_extension_runtime_not_configured"})
-                return
-            try:
-                common = {
-                    "runtime_id": str(payload.get("runtime_id", "")),
-                    "token": str(payload.get("token", "")),
-                }
-                if path.endswith("/register"):
-                    result = manager.register(
-                        **common,
-                        target_id=str(payload.get("target_id", "")),
-                        page_url=str(payload.get("page_url", "")),
-                        title=str(payload.get("title", "")),
-                    )
-                    self._json(201, result)
-                    return
-                if path.endswith("/poll"):
-                    result = manager.poll(
-                        **common,
-                        wait_milliseconds=payload.get("wait_milliseconds", 20_000),
-                    )
-                    self._json(200, result)
-                    return
-                if path.endswith("/complete"):
-                    raw_result = payload.get("result")
-                    if raw_result is not None and not isinstance(raw_result, dict):
-                        raise ExtensionRuntimeError(
-                            "browser_extension_command_result_invalid"
-                        )
-                    accepted = manager.complete(
-                        **common,
-                        command_id=str(payload.get("command_id", "")),
-                        result=raw_result,
-                        error_code=str(payload.get("error_code", "")),
-                    )
-                    self._json(200, {"accepted": accepted})
-                    return
-                removed = manager.unregister(**common)
-                self._json(200, {"removed": removed})
-                return
-            except ExtensionRuntimeError as exc:
-                self._json(409, {"error": exc.error_code})
-                return
         if path == "/api/execution/plans":
             try:
                 generated = services.execution_scenarios.generate_plan(
                     start_url=str(payload.get("start_url", "")),
                     user_request=str(payload.get("user_request", "")),
                     browser_target_id=str(payload.get("browser_target_id", "")),
-                    browser_runtime_id=str(payload.get("browser_runtime_id", "")),
                 )
             except ValueError as exc:
                 error_code = getattr(exc, "error_code", "plan_invalid")
                 runtime_unavailable = str(error_code).startswith(
-                    "browser_extension_"
+                    "browser_harness_"
                 )
                 self._json(
                     503 if runtime_unavailable else 422,
@@ -906,7 +846,6 @@ class KT6Handler(SimpleHTTPRequestHandler):
                     plan=plan,
                     confirmed=payload.get("confirmed") is True,
                     browser_target_id=str(payload.get("browser_target_id", "")),
-                    browser_runtime_id=str(payload.get("browser_runtime_id", "")),
                 )
             except ValueError as exc:
                 error_code = getattr(exc, "error_code", "execution_run_invalid")

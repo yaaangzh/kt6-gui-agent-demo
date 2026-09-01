@@ -77,17 +77,6 @@ async function api(path, options = {}) {
   return payload;
 }
 
-async function prepareBrowserRuntime(context, runtimeApi = chrome.runtime) {
-  const response = await runtimeApi.sendMessage({
-    type: "kt6.prepareRuntime",
-    context,
-  });
-  if (!response?.ok || typeof response.runtimeId !== "string") {
-    throw new Error(String(response?.error || "无法连接当前 Chrome 标签页"));
-  }
-  return response;
-}
-
 function setStatus(element, text, kind = "neutral") {
   element.textContent = text;
   element.className = `status ${kind}`;
@@ -121,12 +110,12 @@ async function checkRuntime() {
     const health = await api("/api/execution/health", { method: "GET" });
     if (!health.ready) {
       if (health.configured && health.planner_configured) {
-        setStatus(elements.runtimeStatus, "本地后端已就绪，生成计划时连接当前标签页", "neutral");
+        setStatus(elements.runtimeStatus, "后端已就绪；首次运行请在 Chrome 允许远程调试", "neutral");
         return true;
       }
       throw new Error("本地执行链尚未就绪");
     }
-    setStatus(elements.runtimeStatus, "本地后端与当前 Chrome 标签页已连接", "success");
+    setStatus(elements.runtimeStatus, "Browser Harness 已连接日常 Chrome", "success");
     return true;
   } catch (error) {
     setStatus(elements.runtimeStatus, `执行链不可用：${error.message}`, "error");
@@ -149,7 +138,6 @@ async function generatePlan() {
   setStatus(elements.message, "正在感知当前页面并生成计划…");
   try {
     const context = await refreshContext();
-    const runtime = await prepareBrowserRuntime(context);
     await checkRuntime();
     const generated = await api("/api/execution/plans", {
       method: "POST",
@@ -157,13 +145,11 @@ async function generatePlan() {
         start_url: context.startUrl,
         user_request: userRequest,
         browser_target_id: context.browserTargetId,
-        browser_runtime_id: runtime.runtimeId,
       }),
     });
     generatedPlan = {
       plan: generated.plan,
       browserTargetId: generated.browser_target_id,
-      browserRuntimeId: generated.browser_runtime_id,
       startUrl: context.startUrl,
       tabId: context.tabId,
     };
@@ -187,12 +173,10 @@ async function executePlan() {
   elements.generate.disabled = true;
   try {
     const context = await refreshContext();
-    const runtime = await prepareBrowserRuntime(context);
     if (
       context.tabId !== generatedPlan.tabId ||
       context.startUrl !== generatedPlan.startUrl ||
-      context.browserTargetId !== generatedPlan.browserTargetId ||
-      runtime.runtimeId !== generatedPlan.browserRuntimeId
+      context.browserTargetId !== generatedPlan.browserTargetId
     ) {
       throw new Error("当前标签页已变化，请重新生成计划");
     }
@@ -202,7 +186,6 @@ async function executePlan() {
         plan: generatedPlan.plan,
         confirmed: true,
         browser_target_id: generatedPlan.browserTargetId,
-        browser_runtime_id: generatedPlan.browserRuntimeId,
       }),
     });
     elements.runCard.hidden = false;
@@ -253,7 +236,6 @@ elements.confirm.addEventListener("change", () => {
 elements.execute.addEventListener("click", executePlan);
 
 globalThis.__KT6_AGENT_PANEL_INTERNALS__ = {
-  prepareBrowserRuntime,
   resolveCurrentBrowserContext,
 };
 

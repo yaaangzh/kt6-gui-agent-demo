@@ -18,7 +18,7 @@ class ExecutionE2EAssetsTest(unittest.TestCase):
         launcher = (ROOT / "scripts" / "start-browser-executor.ps1").read_text(
             encoding="utf-8"
         )
-        self.assertIn('KT6_BROWSER_EXECUTION_DRIVER = "browser_extension"', launcher)
+        self.assertIn('KT6_BROWSER_EXECUTION_DRIVER = "browser_harness"', launcher)
         self.assertIn('[string]$InitialTargetUrl = ""', launcher)
         self.assertIn("if ($null -ne $targetUri)", launcher)
         self.assertIn("chrome://extensions", launcher)
@@ -28,7 +28,8 @@ class ExecutionE2EAssetsTest(unittest.TestCase):
         self.assertNotIn("--load-extension", launcher)
         self.assertNotIn("--user-data-dir", launcher)
         self.assertIn("/api/execution/health", launcher)
-        self.assertIn("No remote debugging port", launcher)
+        self.assertIn("chrome://inspect/#remote-debugging", launcher)
+        self.assertIn("No fixed remote-debugging port", launcher)
         self.assertFalse(
             (ROOT / "fixtures" / "execution" / "mock_ui_graph.json").exists()
         )

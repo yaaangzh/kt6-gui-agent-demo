@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "KT6 Browser Agent",
-  "version": "0.7.0",
-  "description": "Run confirmed natural-language workflows against the exact current tab through the local KT6 service.",
+  "version": "0.8.0",
+  "description": "Select the exact current tab and run confirmed KT6 workflows through Browser Harness in your daily Chrome.",
   "permissions": [
     "activeTab",
     "sidePanel",

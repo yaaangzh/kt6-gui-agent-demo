@@ -17,6 +17,7 @@ KT6 / FreeStyleCopilot 是无线网络运维 PoC，把自然语言意图、页�
 | `eval-ui-tars` | 通用规划模型 API + 独立 UI-TARS 视觉定位 API + Playwright |
 | `ui-graph-textflow-cdp` | CDP、多源 UI Graph、操作 DAG 的实验分支 |
 | `feature/browser-executor` | 自然语言 Action Plan、真实页面感知、DOM/Canvas 受控执行与确定性验证 |
+| `feature/eval-browser-harness` | 复用日常 Chrome 的 Browser Harness 执行架构实验；扩展只选择当前 Tab 和承载确认 |
 | `br_omniParser` | 已停止的 OmniParser 试点，仅保留历史对照，不混入当前方案 |
 
 功能实验保持分支隔离；公共基础设施必须同步到所有仍保留的分支。公共修改包括：
@@ -142,7 +143,16 @@ capture、指纹、一次性令牌和点击前 live revalidation；Canvas 点击
 Runner 只负责编排 capture、grounding、execute、verify 和运行状态，不得另建页面感知链。
 E2E 只替换规划决策，不 Mock 页面世界；不得提交或使用 `mock_ui_graph.json`。
 
-### 4.6 `br_omniParser`
+### 4.6 `feature/eval-browser-harness`
+
+该分支复用 `feature/browser-executor` 的 Action Plan、fresh capture、Grounding、人在环确认
+和确定性 Verifier，只替换浏览器传输层。用户正常打开日常 Chrome，在
+`chrome://inspect/#remote-debugging` 显式允许当前实例后，由本机 Browser Harness daemon
+连接；不得创建专用 profile、固定调试端口或注入 Chrome 启动参数。扩展只选择当前 Tab
+并承载自然语言输入与确认，不 attach、不代发 CDP。Browser Harness 只通过 KT6 固定
+type/click 适配器执行，不允许模型生成的 helper、JavaScript、Python 或 raw CDP 进入主链。
+
+### 4.7 `br_omniParser`
 
 该分支只保留历史试点。除公共基础设施同步和必要安全修复外，不继续扩展 OmniParser，
 也不将其结果混入当前三方案报告。
@@ -160,8 +170,9 @@ E2E 只替换规划决策，不 Mock 页面世界；不得提交或使用 `mock_
 - CDP 只允许 `localhost`、`127.0.0.1` 或 `::1`。
 - 浏览器执行默认关闭，只允许固定 `type`/`click`；`type` 仅限普通文本控件并要求
   输入值确定性验证。禁止自修改 helper、domain skill、任意 raw CDP、任意按键序列和
-  JavaScript 进入正式执行链。现有 Chrome 路线只能由用户点击扩展后 attach 当前 Tab，
-  不能依赖专用 profile、远程调试端口或运行时注入启动参数。
+  JavaScript 进入正式执行链。`feature/browser-executor` 只能由用户点击扩展后 attach
+  当前 Tab；`feature/eval-browser-harness` 只能使用用户在 Chrome UI 中显式授权的日常
+  Chrome 实例。两条路线都不能依赖专用 profile、固定远程调试端口或运行时注入启动参数。
 
 ### 5.1 性能与实现范围
 

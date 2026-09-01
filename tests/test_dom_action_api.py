@@ -1,10 +1,8 @@
 import json
-import os
 from pathlib import Path
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -13,81 +11,6 @@ from tests.test_asset_action_integration import browser_payload
 
 
 class DOMActionAPITest(unittest.TestCase):
-    def test_extension_runtime_api_registers_exact_existing_chrome_tab(self):
-        with patch.dict(
-            os.environ,
-            {
-                "KT6_BROWSER_EXECUTION_DRIVER": "browser_extension",
-                "KT6_EXECUTION_ALLOW_PRIVATE_NETWORKS": "1",
-            },
-            clear=True,
-        ), tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            data_dir = root / "data"
-            data_dir.mkdir()
-            (data_dir / "mock_assets.json").write_text(
-                json.dumps({"assets": []}),
-                encoding="utf-8",
-            )
-            server, _services = create_server(
-                host="127.0.0.1",
-                port=0,
-                root=root,
-            )
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            base_url = f"http://127.0.0.1:{server.server_port}"
-            runtime_id = "runtime_1234567890abcdef"
-            token = "token_1234567890abcdef1234567890abcdef1234567890abcdef"
-            try:
-                before = self.get(
-                    base_url,
-                    "/api/execution/health",
-                    expected_status=200,
-                )
-                self.assertEqual(before["transport"], "chrome_extension")
-                self.assertFalse(before["extension"]["ready"])
-
-                registered = self.post(
-                    base_url,
-                    "/api/execution/extension-runtimes/register",
-                    {
-                        "runtime_id": runtime_id,
-                        "token": token,
-                        "target_id": "TARGET12345678",
-                        "page_url": "http://127.0.0.1:8787/execution-test.html",
-                        "title": "KT6 execution test",
-                    },
-                    expected_status=201,
-                )
-                self.assertTrue(registered["ready"])
-                after = self.get(
-                    base_url,
-                    "/api/execution/health",
-                    expected_status=200,
-                )
-                self.assertTrue(after["extension"]["ready"])
-                self.assertFalse(after["ready"])
-
-                rejected = self.post(
-                    base_url,
-                    "/api/execution/extension-runtimes/poll",
-                    {
-                        "runtime_id": runtime_id,
-                        "token": "token_wrongwrongwrongwrongwrongwrongwrongwrong",
-                        "wait_milliseconds": 0,
-                    },
-                    expected_status=409,
-                )
-                self.assertEqual(
-                    rejected["error"],
-                    "browser_extension_runtime_unauthorized",
-                )
-            finally:
-                server.shutdown()
-                server.server_close()
-                thread.join(timeout=2)
-
     def test_http_api_runs_prepare_preflight_and_dry_run_only(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

@@ -104,7 +104,12 @@ def matching_nodes(
                     continue
                 if not _same_semantic_source(child_source, parent_source):
                     continue
-                inherited_score = _inherited_label_score(target, parent, text_score)
+                inherited_score = _inherited_label_score(
+                    target,
+                    parent,
+                    text_score,
+                    ancestor_depth=_depth + 1,
+                )
                 if inherited_score > scored.get(parent_index, 0):
                     scored[parent_index] = inherited_score
     if not scored:
@@ -207,6 +212,8 @@ def _inherited_label_score(
     target: Mapping[str, Any],
     node: Mapping[str, Any],
     text_score: int,
+    *,
+    ancestor_depth: int,
 ) -> int:
     if compact_text(target.get("asset_id"), 200) or compact_text(
         target.get("action"), 200
@@ -220,13 +227,20 @@ def _inherited_label_score(
     observed_role = compact_text(
         node.get("role") or attributes.get("role"), 100
     ).casefold()
+    if observed_role not in (
+        _SEMANTIC_INTERACTIVE_ROLES | _GENERIC_INTERACTIVE_ROLES
+    ):
+        return 0
     if requested_role and requested_role != observed_role:
         if not (
             requested_role in _SEMANTIC_INTERACTIVE_ROLES
             and observed_role in _GENERIC_INTERACTIVE_ROLES
         ):
             return 0
-    return (30 if text_score >= 20 else 10) + (4 if requested_role else 0)
+    proximity = max(0, _SEMANTIC_PARENT_DEPTH - ancestor_depth)
+    return (30 if text_score >= 20 else 10) + proximity + (
+        4 if requested_role else 0
+    )
 
 
 def _same_semantic_source(
