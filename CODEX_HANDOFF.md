@@ -373,6 +373,11 @@ POST /api/ui-operations/plan
 
 ### 3.2 日常 Chrome + Browser Harness + Browser Agent 扩展 v0.8.0
 
+当前分支的规划模型统一使用根目录 `.env` 中的 `KT6_MODEL_API_*`。Browser Harness
+直接提供日常 Chrome 的 DOM/CDP 感知和固定 type/click 传输，因此这条执行入口不再要求
+CodeAgent/GLM CLI 配置。普通 DOM 页面不配置视觉驱动；确需 Canvas 像素证据时可单独启用
+本地 `KT6_VISION_DRIVER=local_cv_ocr`，它不调用大模型。
+
 推荐启动方式：
 
 ```powershell

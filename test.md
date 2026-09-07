@@ -43,16 +43,7 @@ notepad .\.env
 `.env` 在切换分支时保留。后端和评测 CLI 会自动读取，终端或服务已有的同名变量优先。
 配置改变后重启后端。不要把真实 key 写入 `.env.example`、命令行、suite 或报告。
 
-### 3.1 内部 CodeAgent/GLM 路线
-
-```dotenv
-KT6_VISION_DRIVER=hybrid
-KT6_HYBRID_MODEL_DRIVER=codeagent_cli
-KT6_CODEAGENT_EXECUTABLE=D:\03CodeAgent\CodeAgentCLI\codeagent.bat
-KT6_VISION_TIMEOUT_SECONDS=300
-```
-
-### 3.2 通用规划/语义模型 API
+### 3.1 通用规划/语义模型 API
 
 ```dotenv
 KT6_MODEL_API_PROVIDER=<供应商或内网网关标识>
@@ -61,6 +52,18 @@ KT6_MODEL_API_KEY=<本机密钥>
 KT6_MODEL_API_MODEL=<精确模型名>
 KT6_MODEL_API_ALLOWED_HOSTS=<获批网关精确主机名>
 ```
+
+### 3.2 可选本地 Canvas 感知
+
+普通 DOM 页面无需配置视觉模型。只有目标页面依赖 Canvas 像素证据，且本机已经安装
+RapidOCR/OpenCV 可选依赖时，才增加：
+
+```dotenv
+KT6_VISION_DRIVER=local_cv_ocr
+```
+
+这条本地补充链不调用大模型；当前 Browser Harness 主链不再要求 CodeAgent/GLM CLI
+配置。
 
 ### 3.3 UI-TARS API
 
@@ -89,8 +92,9 @@ KT6_MODEL_API_MODEL=<精确模型名>
 KT6_MODEL_API_ALLOWED_HOSTS=<获批网关精确主机名>
 ```
 
-规划模型复用 `KT6_MODEL_API_*`；Canvas 感知复用 `KT6_VISION_DRIVER`（http、
-codeagent_cli、local_cv_ocr 或 hybrid），没有 `execution_fixture` 专用识别器。公网
+规划模型只使用 `KT6_MODEL_API_*`。Browser Harness 提供当前 Tab 的实时 DOM/CDP 感知
+和固定 type/click 传输，不需要 CodeAgent/GLM CLI；Canvas 像素证据需要时才显式启用
+上述本地 `local_cv_ocr` 补充，没有 `execution_fixture` 专用识别器。公网
 HTTP(S) 目标无需逐域名配置；每次初始导航、当前页面、重定向和新标签绑定都会重新做
 DNS/网络范围校验，并兼容代理常用的 `198.18.0.0/15` synthetic DNS（仅域名解析结果，
 直接输入该网段 IP 仍拒绝）。本机和 RFC1918 页面默认拒绝，仅隔离测试时可设置

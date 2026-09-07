@@ -14,7 +14,7 @@
 
 供其他 Codex 或新开发环境接手时，请同时阅读
 [CODEX_HANDOFF.md](./CODEX_HANDOFF.md)；其中记录了当前工作目录、分阶段拓扑链路、
-CodeAgentCLI 的 Windows 启动方式、真实图片验证结论、已知限制和下一步建议。
+真实图片验证结论、已知限制和下一步建议。
 
 本地运行配置可统一写入根目录 `.env`：复制 `.env.example` 后填写当前方案需要的配置，
 启动后端或评测 CLI 时会自动读取；已在终端、服务或密钥系统设置的同名环境变量优先。
@@ -46,6 +46,11 @@ B 组自动化回归已通过，执行试验分支已经完成受控 type/click 
 [AGENTS.md](./AGENTS.md)。
 
 ### Browser Harness 分支当前运行约束（2026-09-07）
+
+当前执行入口的大模型只通过 `KT6_MODEL_API_*` 配置，用于生成严格 Action Plan。
+Browser Harness 负责日常 Chrome 的 DOM/CDP 感知和固定 type/click 传输，不需要配置
+CodeAgent/GLM CLI。普通 DOM 页面无需视觉模型；Canvas 页面可按需单独启用本地
+`KT6_VISION_DRIVER=local_cv_ocr`，该补充链不调用大模型。
 
 同一后端一次只接受一个规划或执行任务；其他面板立即得到 busy 提示，不排队切换目标。
 Runner 从绑定到结果验证持有浏览器会话锁，资产动作 API 也使用同一把会话锁。
@@ -192,6 +197,9 @@ Popup 或 capture-job UI。
 Tree 与截图在后端融合成 UI Graph；页面 API、vision 和 text 证据只能辅助
 理解，不能授权点击。其他采集客户端若使用只读 `window.__KT6_PAGE_ADAPTER__`，仍必须走
 后端既有的有界、analysis-only 契约。
+
+这条 Browser Harness 执行入口不读取 CodeAgent/GLM CLI 作为规划模型。计划生成只使用
+根目录 `.env` 中的通用 `KT6_MODEL_API_*`；不涉及 Canvas 时不要配置视觉驱动。
 
 在线节点统一带有来源与交互状态：`source.kind=dom|page_api|vision` 表示证据来自
 浏览器 DOM、页面显式 API 或像素识别；`interaction.status` 与 `can_click_now` 明确回答

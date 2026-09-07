@@ -151,6 +151,8 @@ E2E 只替换规划决策，不 Mock 页面世界；不得提交或使用 `mock_
 连接；不得创建专用 profile、固定调试端口或注入 Chrome 启动参数。扩展只选择当前 Tab
 并承载自然语言输入与确认，不 attach、不代发 CDP。Browser Harness 只通过 KT6 固定
 type/click 适配器执行，不允许模型生成的 helper、JavaScript、Python 或 raw CDP 进入主链。
+该执行入口的规划模型只使用通用 `KT6_MODEL_API_*`；不配置 CodeAgent/GLM CLI。普通 DOM
+页面不配置视觉驱动，确需 Canvas 像素补充时才显式启用本地 `local_cv_ocr`。
 
 ### 4.7 `br_omniParser`
 
