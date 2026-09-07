@@ -116,7 +116,7 @@ python -m unittest discover -s tests
 | `eval-ui-tars` | 457 tests OK，46 skipped |
 | `ui-graph-textflow-cdp` | 508 tests OK，46 skipped |
 | `feature/browser-executor` | 2026-08-29：当前 Chrome 扩展与执行主链定向 123 tests OK；最近全量结果见下文 |
-| `feature/eval-browser-harness` | 尚待本分支定向回归与日常 Chrome 实机 run_id |
+| `feature/eval-browser-harness` | 2026-09-07：生命周期、执行链和扩展定向 68 项通过；实机历史记录见第 10 节 |
 | `br_omniParser` | 461 tests OK，46 skipped |
 
 测试数量会随公共同步增加，以当前命令最终 `OK` 为准。公共配置和报告定向测试：
@@ -225,6 +225,29 @@ python -m unittest `
 - 未配置真实 Reasoner 时规划接口 503 是当前预期。
 
 ## 10. `feature/eval-browser-harness` 测试
+
+2026-09-07 生命周期修复的最小定向回归（不访问真实浏览器或模型）：
+
+```powershell
+.\.venv-browser-executor\Scripts\python.exe -m unittest `
+  tests.test_browser_harness_lifecycle `
+  tests.test_execution_scenario `
+  tests.test_browser_executor `
+  tests.test_browser_extension_assets
+```
+
+结果：68 项通过（0.382 秒），其中新增专项 13 项。第一次在 Windows 受限沙箱中有
+4 项被临时目录权限阻断；正常本机权限重跑上述同一命令全部通过。本轮未跑全量、未调用
+模型或操作真实 Chrome。代码更新后需要重启后端，并在 `chrome://extensions` 重新加载
+扩展。人工复测重点：
+
+1. 一个面板正在规划/执行时，从另一个面板提交任务，应立即提示 busy，原任务的目标不变。
+2. Chrome 连接失败时，任务应结束为 failed，下一次新任务可重新连接，不持续占用 running。
+3. 相同输入或相同菜单选项再次执行，新 capture 仍满足目标时应验证通过。
+4. 有延迟的页面跳转应先观察到 URL 改变，再采集验证；未跳转仍应明确失败。
+
+互斥不会增加模型调用；DOM 动作仍保留两次动作前 capture 和一次动作后验证。
+导航等待只读 `Page.getFrameTree`，不重复全页识别；重连仅发生在新绑定边界，不重放动作。
 
 当前固定动作词表只测试 `type` 与 `click`，不支持滚动、快捷键、任意 CDP 或 JavaScript。
 `type` 只能操作普通 INPUT/TEXTAREA，拒绝 password/file/hidden、disabled 和 readonly，

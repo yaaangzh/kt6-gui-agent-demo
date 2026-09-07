@@ -826,8 +826,11 @@ class KT6Handler(SimpleHTTPRequestHandler):
                 runtime_unavailable = str(error_code).startswith(
                     "browser_harness_"
                 )
+                status = 503 if runtime_unavailable else 422
+                if error_code == "execution_runner_busy":
+                    status = 409
                 self._json(
-                    503 if runtime_unavailable else 422,
+                    status,
                     {
                         "error": error_code,
                         "error_category": classify_error(error_code),

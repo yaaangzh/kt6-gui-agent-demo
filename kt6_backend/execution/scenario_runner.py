@@ -56,15 +56,16 @@ class ScenarioRunner:
         browser_target_id: str = "",
     ) -> dict[str, Any]:
         try:
-            target_url = self.url_policy.validate(start_url)
-            if browser_target_id:
-                browser_session = self.client.open_or_bind_target(
-                    target_url,
-                    target_id=browser_target_id,
-                )
-            else:
-                browser_session = self.client.open_or_bind_target(target_url)
-            snapshot, graph, preview = self._capture()
+            with self.client.exclusive_session():
+                target_url = self.url_policy.validate(start_url)
+                if browser_target_id:
+                    browser_session = self.client.open_or_bind_target(
+                        target_url,
+                        target_id=browser_target_id,
+                    )
+                else:
+                    browser_session = self.client.open_or_bind_target(target_url)
+                snapshot, graph, preview = self._capture()
         except BrowserHarnessError as exc:
             raise ScenarioExecutionError(exc.error_code) from exc
         return {
@@ -84,6 +85,30 @@ class ScenarioRunner:
         confirmed: bool,
         browser_target_id: str = "",
         update: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        try:
+            with self.client.exclusive_session():
+                return self._run(
+                    plan,
+                    run_id=run_id,
+                    out_dir=out_dir,
+                    confirmed=confirmed,
+                    browser_target_id=browser_target_id,
+                    update=update,
+                )
+        except BrowserHarnessError as exc:
+            # Includes initial attach, before the per-step execution loop starts.
+            raise ScenarioExecutionError(exc.error_code) from exc
+
+    def _run(
+        self,
+        plan: Mapping[str, Any],
+        *,
+        run_id: str,
+        out_dir: Path,
+        confirmed: bool,
+        browser_target_id: str,
+        update: Callable[[dict[str, Any]], None] | None,
     ) -> dict[str, Any]:
         if not confirmed:
             raise ScenarioExecutionError("execution_confirmation_required")
@@ -303,9 +328,9 @@ class ScenarioRunner:
         if pending is None:
             raise ScenarioExecutionError("scenario_verification_without_action")
         if step["expected"]["type"] in {"page_changed", "url_changed"}:
-            settle = getattr(self.client, "wait_for_page_settle", None)
-            if callable(settle):
-                settle()
+            self.client.wait_for_page_settle(
+                previous_url=pending["before_graph"]["page"]["url"]
+            )
         after, graph, _ = capture(f"{step['id']}-verify")
         verified, verifier_id = self.verifiers.verify_expected(
             expected=step["expected"],

@@ -61,6 +61,9 @@ _CATEGORY_RULES: tuple[tuple[str, str], ...] = (
     ("scenario_step_unsupported", EXECUTION_FAILED),
     ("unsupported_browser", EXECUTION_FAILED),
     ("execution_url_", EXECUTION_FAILED),
+    ("execution_runner_busy", EXECUTION_FAILED),
+    ("execution_worker_", EXECUTION_FAILED),
+    ("execution_scenario_failed", EXECUTION_FAILED),
 )
 
 

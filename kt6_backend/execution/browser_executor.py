@@ -32,14 +32,15 @@ class HarnessBrowserExecutor:
         if action.op not in {"click", "type"}:
             return BrowserExecutionResult(False, "unsupported_browser_action")
         try:
-            if action.op == "type" and isinstance(action.target, BrowserTarget):
-                receipt = self.client.type_backend_node(action.target, action.text)
-            elif action.op == "click" and isinstance(action.target, BrowserTarget):
-                receipt = self.client.click_backend_node(action.target)
-            elif action.op == "click" and isinstance(action.target, VisualTarget):
-                receipt = self.client.click_visual_target(action.target)
-            else:
-                return BrowserExecutionResult(False, "unsupported_browser_target")
+            with self.client.exclusive_session():
+                if action.op == "type" and isinstance(action.target, BrowserTarget):
+                    receipt = self.client.type_backend_node(action.target, action.text)
+                elif action.op == "click" and isinstance(action.target, BrowserTarget):
+                    receipt = self.client.click_backend_node(action.target)
+                elif action.op == "click" and isinstance(action.target, VisualTarget):
+                    receipt = self.client.click_visual_target(action.target)
+                else:
+                    return BrowserExecutionResult(False, "unsupported_browser_target")
         except BrowserHarnessError as exc:
             return BrowserExecutionResult(False, exc.error_code)
         return BrowserExecutionResult(

@@ -72,6 +72,9 @@ async function api(path, options = {}) {
     throw new Error(`本地服务返回了无效响应（HTTP ${response.status}）`);
   }
   if (!response.ok) {
+    if (payload.error === "execution_runner_busy") {
+      throw new Error("另一个任务正在规划或执行，请等它结束后再试");
+    }
     throw new Error(String(payload.error || `HTTP ${response.status}`));
   }
   return payload;

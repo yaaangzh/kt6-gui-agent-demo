@@ -4,9 +4,11 @@ import importlib
 import math
 import os
 import re
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterator, Mapping
 from urllib.parse import urljoin, urlsplit
 
 from .live_page_capture import (
@@ -54,6 +56,19 @@ class BrowserHarnessClient:
         self._ready = False
         self._bound_target_id = ""
         self._bound_page_url = ""
+        self._bound_session_id = ""
+        self._session_lock = threading.RLock()
+
+    @contextmanager
+    def exclusive_session(self) -> Iterator[None]:
+        """Keep planning, scenarios and the asset-action API from sharing a turn."""
+
+        if not self._session_lock.acquire(blocking=False):
+            raise BrowserHarnessError("execution_runner_busy")
+        try:
+            yield
+        finally:
+            self._session_lock.release()
 
     def open_or_bind_target(
         self,
@@ -68,6 +83,10 @@ class BrowserHarnessClient:
         except ExecutionURLPolicyError as exc:
             raise BrowserHarnessError(exc.error_code) from exc
         try:
+            # Reconnect only at a new binding boundary, never replay a type/click.
+            if self._ready and not self.runtime_health()["ready"]:
+                self._ready = False
+                self._bound_session_id = ""
             self._load_runtime()
             requested_target_id = str(target_id).strip()
             if requested_target_id:
@@ -669,17 +688,41 @@ class BrowserHarnessClient:
             helper_workspace = Path(helpers.AGENT_WORKSPACE).resolve()
             if helper_workspace != self.workspace:
                 raise BrowserHarnessError("browser_harness_workspace_mismatch")
-            self._cdp_call = helpers.cdp
-            self._click_call = helpers.click_at_xy
-            self._switch_tab_call = lambda target_id: helpers.switch_tab(
-                target_id,
-                activate=True,
-            )
+
+            def bound_cdp(method: str, **params: Any) -> Mapping[str, Any]:
+                browser_command = method.startswith(("Target.", "Browser."))
+                session_id = None if browser_command else self._bound_session_id
+                if not browser_command and not session_id:
+                    raise BrowserHarnessError("browser_session_not_bound")
+                return helpers.cdp(method, session_id=session_id, **params)
+
+            def switch_tab(target_id: str) -> None:
+                session_id = helpers.switch_tab(target_id, activate=True)
+                if not isinstance(session_id, str) or not session_id:
+                    raise BrowserHarnessError("browser_target_binding_failed")
+                self._bound_session_id = session_id
+
+            def click(x: float, y: float) -> None:
+                # Harness 0.1.9 click_at_xy cannot take a session ID. Dispatch
+                # the same fixed pair through its session-aware CDP transport.
+                for event_type in ("mousePressed", "mouseReleased"):
+                    bound_cdp(
+                        "Input.dispatchMouseEvent",
+                        type=event_type,
+                        x=x,
+                        y=y,
+                        button="left",
+                        clickCount=1,
+                    )
+
+            self._cdp_call = bound_cdp
+            self._click_call = click
+            self._switch_tab_call = switch_tab
             self._current_tab_call = helpers.current_tab
 
             def open_visible_tab(url: str) -> Any:
                 target_id = helpers.new_tab(url)
-                helpers.activate_tab(target_id)
+                switch_tab(target_id)
                 return target_id
 
             self._new_tab_call = open_visible_tab
@@ -862,8 +905,13 @@ class BrowserHarnessClient:
             time.sleep(0.05)
         raise BrowserHarnessError("browser_navigation_timeout")
 
-    def wait_for_page_settle(self, timeout_seconds: float = 3.0) -> str:
-        """Wait for two consecutive valid main-frame URLs after navigation."""
+    def wait_for_page_settle(
+        self, timeout_seconds: float = 3.0, *, previous_url: str = ""
+    ) -> str:
+        """Wait for a changed URL, then two consistent reads of that URL.
+
+        This only observes navigation; fresh perception must still verify it.
+        """
 
         try:
             timeout = float(timeout_seconds)
@@ -889,7 +937,10 @@ class BrowserHarnessClient:
                 stable_reads = 0
             else:
                 last_error_code = ""
-                if current_url == stable_url:
+                if current_url == previous_url:
+                    stable_url = ""
+                    stable_reads = 0
+                elif current_url == stable_url:
                     stable_reads += 1
                 else:
                     stable_url = current_url

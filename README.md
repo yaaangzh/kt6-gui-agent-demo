@@ -45,6 +45,19 @@ B 组自动化回归已通过，执行试验分支已经完成受控 type/click 
 分支职责、统一测试入口和开发约束分别见 [test.md](./test.md) 与
 [AGENTS.md](./AGENTS.md)。
 
+### Browser Harness 分支当前运行约束（2026-09-07）
+
+同一后端一次只接受一个规划或执行任务；其他面板立即得到 busy 提示，不排队切换目标。
+Runner 从绑定到结果验证持有浏览器会话锁，资产动作 API 也使用同一把会话锁。
+KT6 保存 Harness `switch_tab` 返回的 session ID；DOM/AX/截图和固定输入事件均显式指定
+该 session，不依赖 daemon 可变的默认标签页。Harness 0.1.9 的 `click_at_xy` 不接受 session
+ID，因此点击由 KT6 固定适配器通过 Harness `cdp` 发送按下/释放两条事件，仍保留全部
+live frame、identity 与 hit-test 校验。
+
+连接或工作线程异常会进入明确 failed 状态并释放占用；下次新任务绑定时可重新连接，
+不会自动重放动作。重复输入/选择按新 capture 的目标状态判断；导航验证先等 URL 真正
+改变，再重新感知。2026-09-07 定向回归 68 项通过；本轮未调用模型或操作真实 Chrome。
+
 ## 已实现能力
 
 | 能力 | 当前实现 |

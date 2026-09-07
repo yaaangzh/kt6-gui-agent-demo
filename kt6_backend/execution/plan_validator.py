@@ -47,7 +47,11 @@ class ActionPlanValidator:
             raise ActionPlanValidationError("action_plan_schema_mismatch")
         scenario_id = compact_text(value.get("scenario_id"), 200)
         start_url = compact_text(value.get("start_url"), 2048)
-        user_request = compact_text(value.get("user_request"), 2_000)
+        raw_request = value.get("user_request")
+        if not isinstance(raw_request, str) or len(raw_request.strip()) > 2_000:
+            raise ActionPlanValidationError("action_plan_request_invalid")
+        # Preserve intentional line breaks/spaces for the exact planner context check.
+        user_request = raw_request.strip()
         if not scenario_id or not user_request:
             raise ActionPlanValidationError("action_plan_identity_missing")
         parsed = urlsplit(start_url)

@@ -167,7 +167,11 @@ class UIGraphOutcomeVerifier:
         before: Mapping[str, Any],
         after: Mapping[str, Any],
     ) -> bool:
-        if before.get("capture_id") == after.get("capture_id"):
+        if (
+            not before.get("capture_id")
+            or not after.get("capture_id")
+            or before["capture_id"] == after["capture_id"]
+        ):
             return False
         expected_type = compact_text(expected.get("type"), 100)
         if expected_type in {"page_changed", "url_changed"}:
@@ -190,17 +194,13 @@ class UIGraphOutcomeVerifier:
             expected_value = expected.get("value")
             if not isinstance(expected_value, str):
                 return False
-            before_value = (
-                _node_attribute(before_matches[0], "value")
-                if len(before_matches) == 1
-                else None
-            )
             after_value = (
                 _node_attribute(after_matches[0], "value")
                 if len(after_matches) == 1
                 else None
             )
-            return after_value == expected_value and before_value != expected_value
+            # This is a postcondition, not a requirement that the value change.
+            return after_value == expected_value
         if expected_type == "element_visible":
             return len(after_matches) == 1
         if expected_type == "element_disappeared":
@@ -211,16 +211,11 @@ class UIGraphOutcomeVerifier:
             explicitly_selected = (
                 len(after_matches) == 1
                 and node_selected(after_matches[0])
-                and not (
-                    len(before_matches) == 1
-                    and node_selected(before_matches[0])
-                )
             )
             if explicitly_selected:
                 return True
             return _selection_reflected_in_control(
                 target=target,
-                before=before,
                 after=after,
                 before_matches=before_matches,
                 after_matches=after_matches,
@@ -239,7 +234,6 @@ def _node_attribute(node: Mapping[str, Any], name: str) -> str | None:
 def _selection_reflected_in_control(
     *,
     target: Mapping[str, Any],
-    before: Mapping[str, Any],
     after: Mapping[str, Any],
     before_matches: list[Mapping[str, Any]],
     after_matches: list[Mapping[str, Any]],
@@ -260,9 +254,6 @@ def _selection_reflected_in_control(
     if not query:
         return False
     state_target = {"query": query}
-    before_state = matching_nodes(
-        state_target, before, source_kinds=frozenset({"cdp"})
-    )
     after_state = matching_nodes(
         state_target, after, source_kinds=frozenset({"cdp"})
     )
@@ -273,10 +264,9 @@ def _selection_reflected_in_control(
         and compact_text(node.get("role"), 100).casefold()
         in {"button", "combobox", "generic"}
     ]
-    if len(after_controls) != 1:
-        return False
-    before_ids = {compact_text(node.get("id"), 300) for node in before_state}
-    return compact_text(after_controls[0].get("id"), 300) not in before_ids
+    # A closed menu and a unique control reflecting the requested value also
+    # verify a repeated selection whose trigger already displayed that value.
+    return len(after_controls) == 1
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:

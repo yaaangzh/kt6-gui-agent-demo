@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import copy
+from contextlib import nullcontext
 from pathlib import Path
 import struct
 import tempfile
@@ -574,6 +575,8 @@ class UnifiedGroundingTest(unittest.TestCase):
 class GenericScenarioRunnerTest(unittest.TestCase):
     def test_inspection_maps_harness_startup_failure_to_scenario_error(self):
         class Client:
+            exclusive_session = staticmethod(nullcontext)
+
             def open_or_bind_target(self, _page_url):
                 raise BrowserHarnessError("browser_harness_daemon_unavailable")
 
@@ -602,6 +605,8 @@ class GenericScenarioRunnerTest(unittest.TestCase):
 
     def test_runner_executes_real_grounded_click_and_verifies_new_graph(self):
         class Client:
+            exclusive_session = staticmethod(nullcontext)
+
             def __init__(self):
                 self.sequence = 0
 
@@ -671,6 +676,8 @@ class GenericScenarioRunnerTest(unittest.TestCase):
 
     def test_runner_executes_grounded_type_and_verifies_exact_value(self):
         class Client:
+            exclusive_session = staticmethod(nullcontext)
+
             def __init__(self):
                 self.sequence = 0
 
