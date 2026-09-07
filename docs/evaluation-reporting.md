@@ -125,11 +125,11 @@ UI-TARS 响应集中保存在一份 JSONL。每行必须带 `run_id`、`step_ind
 `invalid_response` 还要引用同包的 `model_events` 或 `model_stderr` 原始诊断：
 
 ```json
-{"schema_version":"kt6.evaluation-vision-model-call.v1","run_id":"current-T01-r1","call_index":1,"producer":{"provider":"codeagent","model":"GLM-5.1"},"status":"success","duration_ms":1260,"screenshot_artifact_id":"original-screenshot-001","screenshot_sha256":"<64位截图哈希>","routing_artifact_id":"routing-result-001","model_result_artifact_id":"model-result-001","model_result_sha256":"<64位结果哈希>","diagnostic_artifact_ids":["model-events-001"]}
+{"schema_version":"kt6.evaluation-vision-model-call.v1","run_id":"current-T01-r1","call_index":1,"producer":{"provider":"model_api","model":"approved-vision-model"},"status":"success","duration_ms":1260,"screenshot_artifact_id":"original-screenshot-001","screenshot_sha256":"<64位截图哈希>","routing_artifact_id":"routing-result-001","model_result_artifact_id":"model-result-001","model_result_sha256":"<64位结果哈希>","diagnostic_artifact_ids":["model-events-001"]}
 ```
 
 ```json
-{"schema_version":"kt6.evaluation-vision-model-call.v1","run_id":"current-T01-r1","call_index":1,"producer":{"provider":"codeagent","model":"GLM-5.1"},"status":"timeout","duration_ms":300000,"screenshot_artifact_id":"original-screenshot-001","screenshot_sha256":"<64位截图哈希>","routing_artifact_id":"routing-result-001","diagnostic_artifact_ids":[],"error_code":"transport_timeout"}
+{"schema_version":"kt6.evaluation-vision-model-call.v1","run_id":"current-T01-r1","call_index":1,"producer":{"provider":"model_api","model":"approved-vision-model"},"status":"timeout","duration_ms":300000,"screenshot_artifact_id":"original-screenshot-001","screenshot_sha256":"<64位截图哈希>","routing_artifact_id":"routing-result-001","diagnostic_artifact_ids":[],"error_code":"transport_timeout"}
 ```
 
 框架会校验“截图 artifact/SHA → CV 元数据 → CV 结果 SHA → 路由 source → 模型调用状态
@@ -386,7 +386,7 @@ conclusion.md   是否具备排名条件及推荐结论
 ## 7. 数据安全和运维约束
 
 - `runtime_data/` 已被 `.gitignore` 忽略，但仍需使用测试区访问控制和保留周期。
-- 截图、DOM/CDP、UI Graph、模型响应和 CodeAgent events 可能包含敏感页面数据。
+- 截图、DOM/CDP、UI Graph、模型响应和模型调用事件可能包含敏感页面数据。
 - 不把证据、Manifest、runs、报告或 API key 提交 Git、上传公网或粘贴到外部模型。
 - `model_events` 可能包含图片 Base64；仅在确有排障需要时归档，不在终端完整打印。
 - 原始证据与脱敏展示材料分开保存。报告默认只显示统计和相对引用，不展示原始内容。

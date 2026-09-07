@@ -65,9 +65,8 @@ Canvas 基线路线：
 截图 → OpenCV/OCR → 可选模型语义补充 → 确定性融合 → UI/文本证据
 ```
 
-测试区内部 GLM5.1 通过 `D:\03CodeAgent\CodeAgentCLI\codeagent.bat` 使用，不是独立
-HTTP endpoint。外部或内网大模型实验统一使用可配置的 OpenAI-compatible Chat
-Completions endpoint；UI-TARS 的截图定位服务使用独立配置。
+所有大模型能力统一使用可配置的 OpenAI-compatible Chat Completions endpoint；
+UI-TARS 的截图定位服务使用独立 API 配置。不允许通过本地模型 CLI 子进程调用大模型。
 
 ## 3. 统一本地配置
 
@@ -125,7 +124,7 @@ provider/model 必须分别记录。默认不执行动作，真实基准执行�
 ### 4.4 `ui-graph-textflow-cdp`
 
 UI Graph 统一 `dom/cdp/page_api/vision/text` 来源，并生成 `locate/click/wait/verify`
-操作 DAG。当前 UI Graph CodeAgent CLI Adapter 尚未接通；未配置 HTTP Reasoner 时规划
+操作 DAG。未配置 HTTP Reasoner 时规划
 接口返回 503 是预期边界，不能写成“内部 GLM UI Graph 编排已实机完成”。
 
 ### 4.5 `feature/browser-executor`
@@ -151,7 +150,7 @@ E2E 只替换规划决策，不 Mock 页面世界；不得提交或使用 `mock_
 连接；不得创建专用 profile、固定调试端口或注入 Chrome 启动参数。扩展只选择当前 Tab
 并承载自然语言输入与确认，不 attach、不代发 CDP。Browser Harness 只通过 KT6 固定
 type/click 适配器执行，不允许模型生成的 helper、JavaScript、Python 或 raw CDP 进入主链。
-该执行入口的规划模型只使用通用 `KT6_MODEL_API_*`；不配置 CodeAgent/GLM CLI。普通 DOM
+该执行入口的规划模型只使用通用 `KT6_MODEL_API_*`。普通 DOM
 页面不配置视觉驱动，确需 Canvas 像素补充时才显式启用本地 `local_cv_ocr`。
 
 ### 4.7 `br_omniParser`

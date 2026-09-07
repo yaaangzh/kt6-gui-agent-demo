@@ -1,1091 +1,194 @@
-# KT6 / FreeStyleCopilot Codex 交接总结
+# KT6 当前交接说明
 
-本文用于把当前项目迁移到另一个 Codex 任务或新的开发环境。接手者应先阅读本文
-和 [README.md](./README.md)，再检查 Git 状态和最近提交，不要仅依据旧对话继续
-修改。
+## 1. 当前分支与目标
 
-## 当前 Browser Harness 修复摘要（2026-09-07）
+当前开发分支：`feature/eval-browser-harness`。
 
-以下历史记录包含旧扩展中继和专用 CDP 路线；当前
-`feature/eval-browser-harness` 使用扩展选 Tab/确认、本机 Harness 感知/执行，具体启动见
-`test.md` 第 10 节。本轮只修改该功能分支，不改变公共配置或其他分支的实现。
-
-- `ExecutionScenarioService` 在规划和执行排队前互斥占用；同步运行也遵守该规则。
-  busy 返回 HTTP 409，其他面板不再抢切正在执行的 Target。
-- `ScenarioRunner` 全程持有客户端会话锁；`HarnessBrowserExecutor` 同样使用此锁，
-  防止独立资产动作 API 插入执行。每个页面命令显式绑定 `switch_tab` 返回的 session ID；
-  固定鼠标按下/释放经 Harness `cdp` 发送，不使用不能指定 session 的 `click_at_xy`。
-- 初始绑定失败、工作线程异常及失败证据写盘异常均会收尾并释放占用；新任务绑定时
-  探测失效连接并重新确保 daemon 就绪，中途断连不重放动作。
-- `input_value`、`selected` 验证的是动作后新证据中的状态，重复执行已满足的目标不再
-  因缺少状态变化而误报。菜单关闭后仍需唯一控件显示期望值；歧义、旧 capture 继续拒绝。
-- 导航等待先观察到与动作前不同的 URL，再检查连续两次一致并做 fresh capture；它不
-  等于页面所有异步业务已完成。多行自然语言原样保留，避免计划上下文比对失败。
-- 新增生命周期专项 13 项，与原有执行、Harness 适配和扩展测试合计 68 项通过（0.382 秒）。
-  该结果是离线定向回归；本轮未跑全量、未调用模型、未做真实 Chrome 页面验收。
-
-仍保留的产品边界：静态 Action Plan 无执行期自动重规划；通用页面断言不等于设备业务
-成功。生产身份授权、结果证据的业务语义绑定与高风险设备动作验收仍需单独建设。
-
-## 0. 2026-08-13 公共能力与分支状态
-
-公共证据归档/评测报告、共享 API 运行时和统一 `.env` 加载已经同步到所有保留分支。
-根目录 `.env` 由后端和评测 CLI 自动读取，进程已有变量优先；真实 key 不得提交。
-
-当前三套功能执行器保持独立：
-
-- `eval-current`：本地 OpenCV/OCR + 通用 OpenAI-compatible 语义模型 API；
-- `eval-browser-use`：Browser Use/CDP + 通用 OpenAI-compatible 规划 API；
-- `eval-ui-tars`：通用规划 API + 独立 UI-TARS 截图定位 API。
-
-`ui-graph-textflow-cdp` 继续作为多源 UI Graph/DAG 实验；`feature/browser-executor` 在其上
-隔离验证现有 Chrome 扩展的固定 type/click 执行层；`br_omniParser` 只保留历史。
-公共文件修改后必须逐分支同步检查代码、README、`test.md`、`AGENTS.md` 和方案文档，
-但不得用公共同步名义合并各分支的功能实现。最新可执行流程以 `test.md` 为准。
-
-### 0.1 UI Graph 阶段接手摘要
-
-当前工作已从单纯拓扑图片识别扩展到“多源页面结构理解 + 内部模型操作规划”，
-并刻意保留为 A/B 分支，不应在测试完成前合入 `main`：
-
-| 分组 | 分支 | 本地提交 | 状态 |
-|---|---|---|---|
-| A 组 | `main` | `dd0aca6` | 现有 DOM、Canvas、OpenCV/OCR 与安全动作链基线 |
-| B 组 | `ui-graph-textflow-cdp` | 以 `git log -1` 为准 | 新增 Playwright/CDP、多源 UI Graph、内部 GLM5.1 DAG 规划 |
-
-当前 B 组已推送为 `origin/ui-graph-textflow-cdp` 并设置 upstream。是否与远端最新
-提交同步，以及 `main` 与 `origin/main` 的关系，必须以当前 `git status -sb`、
-`git branch -vv` 和 `git fetch` 结果为准。
-
-B 组已经实现：
-
-- `dom/cdp/page_api/vision/text` 五类来源的统一 UI Graph。
-- 节点来源、稳定引用、frame/document、字段 provenance 和冲突审计。
-- DOM/CDP 点击候选门禁；候选不等于实时可点击或执行授权。
-- Playwright/CDP 只读 Sidecar，采集 DOMSnapshot、AXTree、iframe 和 Shadow DOM。
-- 内部 GLM5.1 有界请求契约，以及 `locate/click/wait/verify` 操作 DAG。
-- `capture_id/graph_id` 绑定、模型投影约束和确定性 fail-closed 校验。
-- `parent_of/owner_of/claims_business_object/supports_action/semantic_relation` 关系。
-- `GET /api/ui-graphs/{capture_id}` 与 `POST /api/ui-operations/plan`。
-- 现有方案、Browser Use、UI-TARS 的统一离线评测结果契约、逐次原始证据归档、
-Manifest/SHA-256 完整性校验、覆盖率/公平性/安全门禁，以及 JSON、CSV、Markdown、
-HTML 报告生成流程。
-
-2026-08-18 `feature/browser-executor` 完整回归为 536 项通过、47 项跳过；真实浏览器
-E2E 因环境未启用而跳过。
-这只证明开发环境自动化路径通过；真实 Chromium/CDP、真实 NCE/FEBS 页面和测试区
-内部 GLM5.1 endpoint 尚未现场验收。UI Operation DAG 始终为 `dry_run_only=true`、
-`safe_for_execution=false`。`feature/browser-executor` 已固定 `kt6.action-plan.v1`
-作为模型到 Runner 的语义契约；规划由可配置 LLM Planner 生成语义目标，经
-ActionPlanValidator 兜底校验。用户确认后 ScenarioRunner 每步重新 capture，
-TargetGrounderRegistry 优先使用 DOM/CDP Grounding，缺失时回退 Vision Grounding；
-DOM 目标经 fresh capture 复核后受控 click，Vision 目标在对应步骤做一次真实像素识别和
-live box 重绑定。UIGraphOutcomeVerifier 用新 capture 的 UI Graph 验证
-element_visible、element_disappeared、element_selected、selected、text_present、
-url_changed 或 page_changed；失败按稳定类别（planner_failed、target_not_found、
-target_ambiguous、perception_failed、execution_failed、verify_failed、page_changed）归类。
-2026-08-20 在本机隔离安装的 Python 3.12、Chrome CDP 与 Browser Harness 上补做了公开
-页面实机复核。通用 DOM/CDP Grounding 现支持没有 DOM `id`、但具有正整数 backend node
-id 与 fresh capture 语义/属性指纹的候选；0×0 可点击容器只能绑定唯一可见直接子节点，
-点击前固定 `DOM.describeNode` 深度重新验证授权/点击/hit-test 节点仍处于同一实时子树。
-链接会先校验 `href` 解析后的网络地址；`target=_blank` 再绑定本次新增且 opener/URL
-匹配的 page target 供后续 capture。公网 HTTP(S) 无需逐域名配置，本机、私网、链路
-本地和保留地址默认 fail closed；域名解析兼容代理 synthetic DNS，但直接输入其测试
-网段 IP 仍拒绝。`点击百度热搜`，以及无逐域名配置的 `example.com → IANA` 跨域点击，
-均由真实 click 与 `url_changed` Verifier 得到 `status=success`；相关 61 项回归通过、
-1 项按环境开关跳过。百度首次复核时配置 Planner 曾返回 HTTP 402，因此只验证了执行层；
-后续 `example.com` 复核已由正式 `/api/execution/plans` 调用 `deepseek-v4-pro` 生成语义
-计划并原样执行成功，完整 URL + 自然语言 Planner E2E 已通过。Planner 失败时仍不得用
-规则或假计划静默兜底。
-
-详细设计见 [docs/ui-graph-architecture.md](./docs/ui-graph-architecture.md)，完整 A/B
-测试手册见 [test.md](./test.md)。TextFlow 只作为“输入 → 中间文本图 → 推理器”的
-架构参考，实际 DOM 采集底座是开源 Playwright/CDP；不要声称集成了 TextFlow 的
-DOM 解析代码。
-
-`review.md` 是用户未跟踪文件，不得暂存或提交。OmniParser 试点改动仍应保持独立，
-不参与本轮 A/B；是否存在对应 stash 必须以 `git stash list` 为准。
-## 1. 当前阶段目标
-
-历史阶段已经稳定打通拓扑图片的分阶段处理链路：
+该分支验证以下架构：
 
 ```text
-原始拓扑图片
-├─ RapidOCR + OpenCV
-│  └─ cv-result.json
-│
-└─ 图片 + 精简 CV 候选
-   └─ CodeAgentCLI / 默认多模态模型
-      ├─ model-result.json
-      ├─ codeagent-events.jsonl
-      └─ codeagent-stderr.log
-
-cv-result.json + model-result.json
-└─ Python 确定性融合
-   └─ fused-result.json
+日常 Chrome 当前 Tab
+→ Browser Agent Side Panel 选择精确 Target
+→ Browser Harness 绑定 Tab/session
+→ KT6 fresh capture + UI Graph
+→ OpenAI-compatible API 生成 Action Plan
+→ 人在环确认
+→ 固定 type/click
+→ 新 capture + 确定性结果验证
 ```
 
-当前页面方向的优先级是完成 A/B 实机验证，而不是继续引入新的视觉模型。CV 提供
-坐标、OCR 置信度和像素连线；DOM、CDP、页面 API 提供结构证据；内部 GLM5.1
-只提出操作计划，最后由确定性算法校验。
+浏览器扩展不 attach、不代发 CDP，也不读取目标页面内容。Browser Harness 负责实际浏览器
+连接，KT6 只暴露固定采集和操作能力，不接受模型生成的脚本或任意协议命令。
 
-同时已经增加在线页面 DOM 路线。由于当前仓库没有 FEBS/NCE 前端源码，暂不做
-嵌入式 SDK 集成；现阶段使用 Chrome Browser Agent 扩展 v0.7.0；其页面感知工具可显式采集普通
-HTTP(S) 页面中的 DOM/ARIA、iframe 上下文和稳定选择器，并自动检测可见的
-Canvas/SVG/图形区域。扩展每次采集至多截取一个视觉主帧，与 DOM 证据一起提交给
-本机 KT6。耗时识别由后端异步 capture job 执行，扩展把待完成 `job_id` 保存到
-`chrome.storage.local`，关闭并重开弹窗后可以继续查询；同步 capture 接口仍保留。
+## 2. 模型调用边界
 
-页面可选显式暴露只读 `window.__KT6_PAGE_ADAPTER__` 快照。扩展只调用这个明确的
-适配器，不会监听或拦截任意 `fetch`/XHR；`snapshot_complete` 决定快照能否作为完整
-页面 API 证据，不完整快照会与像素视觉并行并作为失败回退保留。后端以 `dom_scene`、
-`canvas_scene` 分治处理并另行保留 `page_api_perception`，节点用
-`source.kind=dom|page_api|vision` 标明来源，并通过 `interaction.status`/`can_click_now` 明确交互资格。DOM `ui_tree` 是
-带 frame 根、父子引用和省略祖先计数的语义投影，`action_binding_complete` 单独表示
-动作证据是否完整。
+所有大模型调用统一走 API。本仓库不再包含本地模型 CLI 子进程适配器、离线模型 CLI、
+专用事件日志或进程重试实现。
 
-扩展同时采集资产 ID、管理 IP、序列号、站点、版本、动作 ID 和控件归属。后端已
-实现权威资产唯一解析、设备/控件双重绑定、六步 `operation_plan`、新鲜页面复核、
-一次性令牌和 dry-run；计划与令牌过期可通过查询接口观察。旧 capture pipeline 不直接
-点击页面；功能分支由扩展 service worker attach 当前 Tab，并把已授权 CDP 目标交给固定
-type/click 执行逻辑，但没有真实设备 API 下发，
-也没有把点击回执当作业务结果。
+规划模型配置：
 
-用户已明确：新 UI Graph 方案必须保留在独立分支，与 `main` 做 A/B 对比；先验证
-真实页面识别效率、来源标记、父子关系、点击候选和内部 GLM 编排，再决定是否合入
-主干或继续开发真实执行器。
-
-## 2. 仓库与工作目录
-
-当前机器：
-
-```text
-开发目录：D:\yangzehui\FreeStyleCopilot
-测试目录（另一台测试机）：D:\04project\FreeStyle_Copilot_KT6_demo
-GitHub：git@github.com:yaaangzh/kt6-gui-agent-demo.git
-基线分支（A 组）：main
-方案分支（B 组）：ui-graph-textflow-cdp
-执行基线分支：feature/browser-executor
-Browser Harness 日常 Chrome 实验分支：feature/eval-browser-harness
-当前检出分支：以 `git branch --show-current` 为准
-当前本地 HEAD 与远端状态：以 `git log`、`git status` 和 `git fetch` 的结果为准
+```dotenv
+KT6_MODEL_API_PROVIDER=<provider-or-internal-gateway>
+KT6_MODEL_API_BASE_URL=https://<approved-model-gateway>/v1
+KT6_MODEL_API_KEY=<secret>
+KT6_MODEL_API_MODEL=<exact-model-name>
+KT6_MODEL_API_ALLOWED_HOSTS=<approved-model-gateway-host>
+KT6_MODEL_API_MAX_TOKENS=4096
+KT6_MODEL_API_TIMEOUT_SECONDS=60
 ```
 
-当前开发机未挂载 `D:\04project`，不要把测试目录不存在误判为代码问题。
+Canvas 视觉有以下配置状态：
 
-包含本文和 README 更新的实际最新提交应以以下命令为准：
+- 未配置：普通 DOM/CDP 页面主路径；
+- `local_cv_ocr`：本机 RapidOCR/OpenCV，不调用模型；
+- `http`：调用获批的严格 HTTP 视觉服务；
+- `hybrid`：本地 CV 优先，证据不足时调用同一个 HTTP 视觉服务。
+
+HTTP/Hybrid 视觉配置：
+
+```dotenv
+KT6_VISION_DRIVER=http
+KT6_VISION_ENDPOINT=https://<approved-vision-service>/v1/topology
+KT6_VISION_API_KEY=<secret>
+KT6_VISION_TIMEOUT_SECONDS=60
+```
+
+远程模型 endpoint 必须经过数据出区审批；真实 key、截图、DOM/CDP、模型原文和真实运行
+证据不能提交 Git。
+
+## 3. 页面感知与执行
+
+Browser Harness 每次 fresh capture 固定读取 frame tree、DOMSnapshot、Accessibility Tree、
+layout metrics 和页面截图。检测到原生 Canvas 时只截取最大的可见 Canvas 区域。后端将
+DOM、CDP、Canvas、可选 page API 和文本证据融合到统一 UI Graph。
+
+计划只包含语义目标。执行时 `TargetGrounderRegistry` 先尝试唯一 DOM/CDP Grounding，找不到
+才尝试配置的 Vision Grounding。点击和输入前重新校验 URL、frame、backend node、属性、
+可访问名称、viewport、box model 和 hit-test。动作后重新采集，由 Verifier Registry 判断
+输入值、选中状态、元素出现或 URL 变化。
+
+任何标签页切换、非预期导航、目标歧义、页面截断、目标遮挡、身份变化或验证不满足都应
+进入明确失败状态，不得把派发回执当成成功。
+
+## 4. 启动方式
 
 ```powershell
-git log -1 --oneline --decorate
+cd D:\yangzehui\FreeStyleCopilot
+Copy-Item .\.env.example .\.env
+notepad .\.env
+python -m pip install -r requirements-browser-executor.txt
+.\scripts\start-browser-executor.ps1
 ```
 
-注意事项：
+可选打开目标页：
 
-- 当前网络下 GitHub SSH 22 端口可能不可用；远端状态以 `git fetch` 后结果为准。
-- 本轮 README/交接文档修改是否已提交，必须以 `git status` 和 `git log` 为准。
-- `review.md` 是用户的未跟踪文件，不得加入提交。
-- B 组已跟踪 `origin/ui-graph-textflow-cdp`；只有 `git push` 成功且状态没有 ahead
-  提示时，才能说明当前本地提交已经上传。
-- A/B 测试结束并得到用户确认前，不要把 B 组快进合入 `main`。
-- 本地 `main` 与缓存的 `origin/main` 当前不一致；联网后先 `git fetch`，再判断远端
-  实际状态，不要直接 reset 或改写历史。
-- OmniParser 旧修改保存在独立 stash 中；接手时用 `git stash list` 核对，不要混入
-  本轮 UI Graph A/B 分支。
-- 用户明确要求 push 时才上传；认证或网络失败必须明确报告，不能只以本地 commit
-  代替 push。
-- 不要无依据清理 `runtime_data/`；其中可能保留耗时数分钟的真实模型结果。
+```powershell
+.\scripts\start-browser-executor.ps1 -InitialTargetUrl "https://www.baidu.com/"
+```
 
-## 3. 当前代码状态
+Chrome 一次性准备：
 
-分阶段链路主要文件：
+1. `chrome://extensions` 开启开发者模式，加载 `browser_extension`。
+2. 代码更新后在扩展管理页点“重新加载”。
+3. `chrome://inspect/#remote-debugging` 允许当前 Chrome 实例远程调试。
+4. 第一次连接时在 Chrome 提示中点击 Allow。
+
+健康检查：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8787/api/health
+Invoke-RestMethod http://127.0.0.1:8787/api/execution/health
+```
+
+`/api/execution/health` 至少应显示：
 
 ```text
-kt6_backend/topology_artifact_common.py
-kt6_backend/topology_cv_cli.py
-kt6_backend/topology_model_cli.py
-kt6_backend/topology_model_contract.py
-kt6_backend/topology_hybrid_cli.py
-kt6_backend/topology_fusion.py
-kt6_backend/topology_fusion_cli.py
-kt6_backend/codeagent_canvas_vision.py
+configured=true
+planner_configured=true
+transport=browser_harness
+browser_harness.ready=true
+```
+
+## 5. 当前主要文件
+
+```text
+kt6_backend/app.py
+kt6_backend/openai_compatible_api.py
 kt6_backend/page_perception.py
-kt6_backend/page_capture_jobs.py
-kt6_backend/cdp_snapshot.py
 kt6_backend/ui_graph.py
-kt6_backend/ui_graph_reasoner.py
-kt6_backend/ui_operation_graph.py
-kt6_backend/ui_graph_planning.py
-kt6_backend/evaluation_artifacts.py
-kt6_backend/evaluation_report.py
-kt6_backend/evaluation_report_cli.py
-kt6_backend/asset_inventory.py
-kt6_backend/dom_action_binding.py
-kt6_backend/safe_dom_actions.py
+kt6_backend/http_canvas_vision.py
+kt6_backend/local_cv_canvas_vision.py
+kt6_backend/hybrid_canvas_vision.py
+kt6_backend/topology_model_contract.py
+kt6_backend/topology_fusion.py
+kt6_backend/execution/action_planner.py
+kt6_backend/execution/live_page_capture.py
 kt6_backend/execution/browser_harness_client.py
 kt6_backend/execution/browser_executor.py
-kt6_backend/execution/target_resolver.py
-kt6_backend/execution/live_page_capture.py
-kt6_backend/execution/action_planner.py
-kt6_backend/execution/plan_validator.py
-kt6_backend/execution/scenario_runner.py
-kt6_backend/execution/scenario_service.py
 kt6_backend/execution/grounding.py
-kt6_backend/execution/semantic_target.py
-kt6_backend/execution/url_policy.py
-kt6_backend/execution/action_guard.py
-kt6_backend/execution/models.py
+kt6_backend/execution/scenario_runner.py
 kt6_backend/execution/verifier.py
-kt6_backend/execution/verifier_registry.py
-scripts/start-browser-executor.ps1
-kt6_backend/runtime.py
-browser_sidecar/capture-ui-graph.mjs
 browser_extension/manifest.json
 browser_extension/background.js
 browser_extension/sidepanel.html
 browser_extension/sidepanel.js
-docs/ui-graph-architecture.md
-test.md
+scripts/start-browser-executor.ps1
 ```
 
-测试文件：
-
-```text
-tests/test_codeagent_canvas_vision.py
-tests/test_topology_model_contract.py
-tests/test_topology_artifact_clis.py
-tests/test_topology_fusion.py
-tests/test_page_perception.py
-tests/test_page_capture_jobs.py
-tests/test_cdp_sidecar_assets.py
-tests/test_cdp_snapshot.py
-tests/test_page_perception_cdp.py
-tests/test_page_perception_ui_graph.py
-tests/test_ui_graph.py
-tests/test_ui_graph_reasoner.py
-tests/test_ui_operation_graph.py
-tests/test_ui_graph_planning.py
-tests/test_ui_graph_api.py
-tests/test_asset_inventory.py
-tests/test_dom_action_binding.py
-tests/test_safe_dom_actions.py
-tests/test_safe_dom_action_plan.py
-tests/test_browser_executor.py
-tests/test_execution_scenario.py
-tests/test_execution_e2e.py
-tests/test_outcome_verifier.py
-tests/test_asset_action_integration.py
-tests/test_dom_action_api.py
-tests/test_browser_extension_assets.py
-tests/test_hybrid_canvas_vision.py
-tests/test_evaluation_artifacts.py
-tests/test_evaluation_report.py
-tests/fixtures/extension_plain_page.html
-tests/fixtures/extension_complex_page.html
-tests/fixtures/extension_canvas_page.html
-```
-
-当前代码已包含：
-
-- 无交互启动时移除继承的 `CI` 环境变量。
-- 发送给 CodeAgent 的 stdin 保证以换行结尾。
-- CodeAgent stdout 实时追加到 `codeagent-events.jsonl`。
-- stderr 实时追加到 `codeagent-stderr.log`。
-- 终端每 10 秒输出心跳、最后事件、stdout/stderr 字节数和空闲时间。
-- timeout 或 `Ctrl+C` 时终止 CodeAgent 进程树。
-- `result/success` 在截止线到达或仍在 stdout 缓冲区时优先按成功处理。
-- 允许顺序重复读取同一张白名单暂存图片。
-- 仍禁止读取其他路径、调用其他工具或发起未完成的并发重复读取。
-- 离线模型阶段使用 `kt6.topology-model.v1` 精简协议。
-- 接受纯 JSON、单个 JSON fenced block，以及 JSON 前后追加的模型分析文字。
-- 在有界响应中定位唯一 `kt6.topology-model.v1` 根对象，随后执行严格协议校验。
-- 同一 stream 中逐个验证 assistant/result 候选；较早候选唯一有效时不再被末尾无效文本覆盖。
-- 显式围栏必须直接包含协议对象；损坏围栏、多个围栏或多个协议对象仍会拒绝。
-- 离线 model/hybrid CLI 默认最多尝试 2 次，共享同一个总 timeout。
-- 图片 Read 完成后默认 300 秒无 stdout 会终止停滞进程并在剩余预算内重试。
-- 首次失败 events/stderr 归档为 `*.attempt-1.*`，不会被下一次尝试覆盖。
-- CLI 错误 JSON 包含 `error_code`、`category` 和 `retryable`。
-- 扩展按业务语义优先采集元素，并限制每个 frame 最多提交 220 个候选。
-- 扩展过滤继承 `cursor:pointer` 产生的按钮子节点重复，同时保留普通文本页回退。
-- 扩展采集 iframe/document 上下文、稳定 selector、业务 ID、资产身份、动作归属、
-  ARIA、SVG 文本证据和 Canvas/SVG 视觉区域。
-- 扩展通过 `POST /api/perception/capture-jobs` 创建后端异步任务，待完成 `job_id`
-  保存在 `chrome.storage.local`；弹窗关闭不终止后端识别，重开后继续轮询。
-- 同步 `POST /api/perception/captures` 仍作为兼容和诊断接口保留。
-- 显式只读 `window.__KT6_PAGE_ADAPTER__` 只导出有界结构化快照；扩展不拦截任意
-  `fetch`/XHR。`snapshot_complete=false` 或缺失时，页面 API 与视觉并行并可作回退。
-- 大尺寸 Canvas、SVG、图形容器与嵌入区域会成为视觉 ROI；装饰性小图标被过滤。
-- 每次点击只调用一次 `captureVisibleTab()`，且只提交一个最高优先级视觉主帧；
-  原生 Canvas `toDataURL()` 是像素回退，不与可见截图组成多帧请求。
-- 截图裁剪按实际 bitmap/viewport 比例计算；超限 PNG 会转 WebP 并降采样。
-- DOM 元素太少且没有视觉区域/原生 Canvas 像素时，允许整页视觉兜底，但固定为
-  `unverified` 和 analysis-only。
-- 弹窗展示扫描数、候选数、提交数、可操作数、原生 Canvas、视觉区域、可见截图、
-  视觉证据、`perception_decision`、截断状态和关键元素预览。
-- 后端保留 `selector`、`source_ref`、`frame_id`、`frame_url`、`document_id` 和
-  `actionable`，以及 `asset_id`、管理 IP、序列号、站点、资产版本、`action_id` 和
-  `owner_business_id`。
-- 在线节点以 `source.kind=dom|page_api|vision` 标明来源；`interaction.status`、
-  `can_click_now`、`preflight_required` 和拒绝原因明确区分可定位与可立即点击。当前
-  所有节点的 `can_click_now=false`。
-- DOM `ui_tree` 是每个 frame/document 有独立根节点的语义投影；节点保留
-  `parent_element_id`、`children`、`parent_relation`、`omitted_ancestor_count`，并以
-  `action_binding_complete` 对截断、frame 错误和 open Shadow Root fail closed。
-- 后端以 `perception_decision` 标记 `dom`、`page_api`、`canvas` 三种证据的全部八种
-  组合，包括 `empty`、`page_api_only`、`dom_and_canvas` 和
-  `dom_and_page_api_and_canvas`；`page_api_perception`、`canvas_perception`、
-  `dom_business_object_bindings` 和 `dom_action_bindings` 并行保留。
-- `svg_element_texts` 只作为原始文本证据，不能自动生成业务对象或动作绑定。
-- 所有 `capture_kind=visible_tab` 截图固定为 analysis-only，不能作为直接点击依据。
-- 原始 DOM 绑定固定为 `observed`、不可执行；disabled 元素不会成为交互候选。
-- 扩展权限为 `activeTab` + `scripting` + `storage` + `sidePanel` + `debugger`，没有申请
-  `<all_urls>`；`debugger` 先用 `getTargets()` 做 active Tab 精确映射，再由用户触发 attach，
-  仅发送固定感知/type/click 命令；`storage` 仅供保留的 capture-job 资源恢复本机任务。
-
-### 3.1 多源 UI Graph、Playwright/CDP 与内部 GLM5.1
-
-B 组在现有 DOM/OCR/OpenCV 路线之外增加一层“中间文本图表示”，但不引入新的视觉
-大模型。它参考 TextFlow 的图式中间表示思想，实际页面采集和浏览器协议由
-Playwright/CDP sidecar 完成：
-
-1. `dom`、`cdp`、显式 `page_api`、`vision`、`text` 节点统一进入 UI Graph；每个节点
-   保留 `source.kind`、`source_ref` 和来源证据，避免模型把推断内容当成页面事实。
-2. `interaction.candidate` 只表示“可以进入点击提案校验”，不是授权。DOM 必须有稳定
-   selector/ref，CDP 必须有可重新绑定的 backend node id；OCR/视觉/模型推断节点不能
-   直接获得点击资格。
-3. 页面 API 只读取页面显式提供、可审计的 adapter 快照，不拦截任意网络请求，也不
-   monkey-patch `fetch`/XHR。没有站点 adapter 时继续使用 DOM/CDP/OCR/视觉来源。
-4. 内部 GLM5.1 只输出 `locate/click/wait/verify` 操作 DAG；确定性验证器检查目标来源、
-   可点击资格、依赖关系、重绑定信息和循环，失败时 fail closed。
-5. `parent`、`owner`、`business`、`action`、`semantic` 边保留父子和业务归属，支持后续
-   “定位设备容器 -> 选择子控件 -> 点击 -> 等待 -> 验证”的联动编排。
-6. 当前规划 API 只有 dry-run，不包含真实点击执行器，也不替代原有资产绑定、权限、
-   二次采集和执行前复核链路。
-
-接口：
-
-```text
-GET  /api/ui-graphs/{capture_id}
-POST /api/ui-operations/plan
-```
-
-设计与安全边界见 `docs/ui-graph-architecture.md`；完整 A/B 准备、命令、样例和验收指标
-见根目录 `test.md`。
-
-### 3.2 日常 Chrome + Browser Harness + Browser Agent 扩展 v0.8.0
-
-当前分支的规划模型统一使用根目录 `.env` 中的 `KT6_MODEL_API_*`。Browser Harness
-直接提供日常 Chrome 的 DOM/CDP 感知和固定 type/click 传输，因此这条执行入口不再要求
-CodeAgent/GLM CLI 配置。普通 DOM 页面不配置视觉驱动；确需 Canvas 像素证据时可单独启用
-本地 `KT6_VISION_DRIVER=local_cv_ocr`，它不调用大模型。
-
-推荐启动方式：
-
-```powershell
-.\scripts\start-browser-executor.ps1 -InitialTargetUrl "https://www.baidu.com/"
-```
-
-第一次使用时，在 Chrome 的 `chrome://extensions` 打开开发者模式，选择“加载已解压的
-扩展程序”，加载：
-
-```text
-D:\yangzehui\FreeStyleCopilot\browser_extension
-```
-
-代码更新后必须在扩展管理页点击“重新加载”。启动脚本会先启动后端，再在现有 Chrome
-打开新标签页。随后在 `chrome://inspect/#remote-debugging` 开启当前浏览器实例的远程
-调试；Browser Harness 首次连接时按 Chrome 提示点击 Allow。回到目标页点击
-“KT6 Browser Agent” 打开 Side Panel。扩展只选择精确 Target 并承载人工确认；Browser
-Harness 直接连接日常 Chrome，执行固定 DOMSnapshot/AXTree/截图与 type/click 能力。
-
-旧 popup、content collector、独立 Runner 页面和扩展 CDP 中继已删除；当前浏览器执行
-入口是 Side Panel + 本机 Browser Harness daemon。同步或异步
-perception API 仍可供其他采集客户端调用，但不属于这条执行入口。
-
-若目标页面能修改，可在页面中显式提供只读 `window.__KT6_PAGE_ADAPTER__`，让扩展
-读取结构化对象与关系。它不是通用页面 API 抓包器：当前实现不会 monkey-patch
-`fetch`/XHR，也不会自行扫描业务接口。适配器应准确声明 `snapshot_complete=true`；
-否则后端保留 `page_api_perception`，同时优先继续像素视觉，视觉不可用或失败时才降级
-使用这份不完整分析证据。
-
-结果解释：
-
-- `truncated: true` 表示候选超过预算且已明确截断，不等于采集失败。
-- SVG/Canvas 页面允许原生 `Canvas: 0`，但应检测到视觉区域，并产生一张视觉主帧。
-- `perception_decision` 覆盖 `dom`、`page_api`、`canvas` 的全部组合；例如
-  `page_api_only` 表示只有页面显式 API 证据，`dom_and_page_api_and_canvas` 表示三路
-  都已进入后端。这些状态只描述证据通道，不代表坐标可以直接执行。
-- 低 DOM、无视觉区域且无原生 Canvas 像素时才启用整页兜底；它始终仅用于分析。
-- 普通文本页即使没有按钮，也应通过标题/正文回退产生少量 DOM 候选。
-- 视觉拓扑与 DOM 业务/动作绑定会并行保留；扩展不会执行点击，后续真实动作仍需
-  业务资产绑定、重新校验和授权。
-- `source.kind=dom|page_api|vision` 是来源说明，不是权限证明；应结合
-  `interaction.status` 与 `can_click_now` 判断。当前没有任何节点能立即点击。
-- `ui_tree.tree_scope=semantic_projection` 表示它是受预算约束的语义树，不是完整原始
-  HTML 镜像；查看 `frame_roots`、父子引用、省略祖先计数和
-  `action_binding_complete` 判断结构与动作证据覆盖。
-
-
-### 3.3 设备资产绑定与执行前复核
-
-当前完成的是可测试、默认拒绝的 dry-run 安全骨架：
-
-1. `AssetResolver` 按资产 ID、规范化 IP、保留标点的序列号唯一解析资产；仅名称
-   匹配必须附带站点/楼层 scope。重复身份、证据冲突和 scope 冲突全部拒绝。
-2. `DOMActionBindingService` 校验顶层页面与 frame origin 白名单，在相同
-   frame/document 内分别绑定设备主体和其 DOM 后代动作控件。重复 ref/selector、
-   伪 selector、全局按钮和伪造 owner 均拒绝。
-3. `shutdown_ap` 等高风险动作必须有严格机器 ID（如 `data-kt6-action="ap.shutdown"`），
-   不能只根据“关闭”“disable”等文字或近义 ID 猜测。
-4. `prepare` 生成六步 `operation_plan`：`bind_target`、`confirm_and_authorize`、
-   `fresh_capture_revalidation`、`final_revalidation`、`execute`、`verify_outcome`。
-5. `preflight` 要求不同且新鲜的二次页面采集、准确的 asset/action 确认、精确权限、
-   资产状态/版本和完整 DOM 目标指纹一致。
-6. 复核通过后签发 15 秒有效、只能消费一次的随机令牌；并发消费只有一个成功。
-   `GET /api/dom-actions/plans/{plan_id}` 会显示步骤推进、阻断和令牌到期后的过期状态。
-7. 默认配置下 `execute(dry_run=false)` 仍返回 `live_execution_channel_unavailable`。
-   功能分支只有显式配置 Browser Harness 运行时后才接受实时 click，并额外要求本次
-   `graph_id/target_node_id` 与 fresh capture 一致，CDP 节点具备 backend id，且其稳定
-   `#id`、owner、action 与 SafeDOMAction 绑定完全一致。点击前固定执行逻辑还会
-   重新核对 live frame、节点属性和中心点 hit-test。点击后状态为
-   `executed_pending_verification`；调用新的结果验证接口并由 fresh KT6 capture 观察到
-   预期业务状态后才进入 `verified`。所有 `safe_for_execution` 仍为 `false`。
-
-接口：
-
-```text
-POST /api/dom-actions/prepare
-POST /api/dom-actions/preflight
-POST /api/dom-actions/execute
-POST /api/dom-actions/verify
-GET  /api/dom-actions/plans/{plan_id}
-GET  /api/dom-actions/audit
-```
-
-`feature/eval-browser-harness` 提供可重复的通用 GUI 多步骤闭环：
-
-```powershell
-.\scripts\start-browser-executor.ps1 -InitialTargetUrl "https://www.baidu.com/"
-Invoke-RestMethod http://127.0.0.1:8787/api/execution/health
-```
-
-统一启动脚本只启动或复用 8787 后端，然后用 `chrome.exe --new-tab` 在已经运行的日常
-Chrome 打开可选的目标 URL；不传 `-InitialTargetUrl` 时只启动后端，由用户随后手动打开
-目标网页。脚本不创建专用 profile，不固定使用 9222，也不传 remote-debugging 启动参数
-或 `--load-extension`。扩展 v0.8.0 首次在 `chrome://extensions` 手动“加载已解压的扩展
-程序”，代码更新后点“重新加载”即可。用户需要在
-`chrome://inspect/#remote-debugging` 显式授权当前 Chrome 实例，并在 Browser Harness
-首次连接时点击 Allow。Side Panel 只提交 `browser_target_id` 和 URL；Action Plan 不保存
-这些临时绑定。后端仍只开放固定 type/click 适配，不把模型生成的任意 JavaScript、按键
-序列、Python 或 raw CDP 放进执行链。
-2026-08-21 当前环境已用统一脚本从零拉起并再次幂等复用，正式模型生成的
-`example.com → Learn more → url_changed` 运行 `run_2bbfb40b1b6d46c4` 为 success；相关
-历史启动链专项 110 项通过、1 项真实浏览器测试按开关跳过。2026-08-21 Browser Agent
-v0.6.0/type 改造后，专项为 121 passed、1 skipped，全量 564 项为 562 passed、1 skipped；仅
-`VisionFrameMatcherOpenCVTests.test_small_translation_with_blank_new_border_is_reusable`
-失败，并在 Python 3.12/3.14 均复现；该文件未被本次启动链修改。
-精确 Target 计划已实机生成且 Target ID 未进入 Action Plan。真实百度运行
-`run_48b7041ddf7844bf` 的 type 与 input_value 已完成并验证；百度新版页面输入后自行进入
-搜索结果页，该页 UI Graph 因超过 2000 节点被标记 truncated，后续 click 正确 fail closed，
-不能宣称该四步站点工作流已整体成功。这些是旧专用 CDP Chrome 传输的历史证据；
-v0.7.0 现有 Chrome 扩展传输仍需重新记录实机 run_id。
-
-2026-08-24 v0.7.0 自动化复核：扩展 runtime 中继、HTTP 注册/鉴权、精确绑定、固定 CDP
-参数、Side Panel 载荷和启动脚本相关 65 项通过、1 项真实浏览器测试跳过；全量 570 项为
-568 passed、1 skipped、1 failed。唯一失败仍是既有 OpenCV 小平移用例返回
-`insufficient_transform_inliers`，与本次扩展执行链无关。真实 Chrome E2E 尚待重新记录。
-
-该命令先通过 URL Safety Policy 校验目标 URL，再感知真实页面并调用 LLM 生成语义
-`kt6.action-plan.v1`，不再固定中文任务、固定测试页或规则解析器。扩展运行时通过
-固定 CDP 方法现场采集 DOMSnapshot/AXTree 和目标 Canvas 像素。动作词表现在为 type/click；
-type 只接受普通 textbox-like INPUT/TEXTAREA，拒绝敏感或不可编辑控件，固定执行 focus、
-全选清空和 insertText，随后重新采集 AX/DOM，由新 UI Graph `input_value` 核验。ScenarioRunner 每步使用
-fresh capture：TargetGrounderRegistry 优先 DOM/CDP，缺失时回退 Vision；Vision
-目标只在对应步骤识别一次真实像素，并与实时 Canvas box 重新绑定。每个 type/click 之后由
-新 capture 的 UIGraphOutcomeVerifier 检查 element_visible、element_disappeared、
-element_selected、selected、text_present、input_value、url_changed 或 page_changed，不能把动作
-回执当成成功。计划、逐次 UI Graph 与结果写入
-`runtime_data/execution_scenarios/<run_id>/`；仓库没有 `mock_ui_graph.json`。
-
-### 3.4 三方案评测报告
-
-`kt6_backend.evaluation_artifacts` 和 `kt6_backend.evaluation_report_cli` 已完成报告侧
-闭环：创建28项三组 suite 草稿、生成单次 run 模板、按显式白名单归档原始截图、CV
-结果及元数据、模型/路由/融合 JSON、DOM/CDP、UI Graph、操作轨迹和验证结果，生成
-Manifest 与文件 SHA-256；有规划模型调用时要求 `planner_result` 绑定 run/call、生产者
-和同包输入，操作轨迹必须绑定 run 并覆盖全部步骤。现有方案通过
-`vision_model_call` ledger 保存视觉调用成功、超时、传输错误和无效响应；成功调用绑定
-合法 `model_result`，失败调用即使没有模型结果也能进入完成率。UI-TARS 响应按调用绑定
-具体截图 artifact ID 和 SHA，允许两个独立步骤画面相同，但不能拿未引用截图凑数量。
-归档会校验图片完整结构并交叉核对截图 artifact→CV→路由→模型调用→融合，重算 UI
-Graph 内容 ID，再严格追加 JSONL。报告前
-重新计算所有哈希，并检查
-缺失运行、同方案实现版本、统一
-规划模型/提示/环境，聚合完成率/耗时/步骤/命中/误点/循环/模型分阶段调用、
-Token/成本/安全和证据完整率，输出 `report.json`、`metrics.csv`、`runs.csv`、
-`report.md`、`report.html`、`issues.md` 和 `conclusion.md`。缺失运行按未完成计入严格
-完成率；同一模型自评、模型/环境不一致、证据缺失或哈希异常都会阻断自动排名；有安全
-违规的方案不参与推荐。展示报告不复制 `failure.reason`、`notes` 或本地验证引用等自由
-文本，完整原始信息只保留在测试区证据归档中。
-
-报告模块完全离线，不会调用任何模型 API、Browser Use、UI-TARS 或控制浏览器。三套真实
-执行器仍需在获批环境中分别生成 `kt6.evaluation-run.v1` 结果和对应原始证据，不能把
-归档/报告工具的合成单元测试写成真实28项对比已经完成。完整证据矩阵、归档命令和数据
-安全边界见 `docs/evaluation-reporting.md`。
-
-Demo 资产来自 `data/mock_assets.json`。生产必须将 `JSONAssetInventoryAdapter`
-替换为经过认证的 NCE/FEBS 查询 Adapter，并把权限、用户、scope 与页面采集来源
-绑定到服务端认证会话。当前 capture 和 `permissions` 都是客户端测试输入，不能
-作为生产授权凭据；最终复核读取的是存储快照，不是原子 live DOM，因此在接入受控
-浏览器执行器或设备 API 前必须继续保持 dry-run。
-查看后端最近一次页面采集：
-
-```powershell
-Invoke-RestMethod `
-  -Uri 'http://127.0.0.1:8787/api/perception/captures?limit=1' |
-  ConvertTo-Json -Depth 10
-```
-
-当前没有 FEBS/NCE 前端源码，因此不能把本扩展描述成“已经嵌入目标系统”。拿到
-源码后可复用相同采集协议改成页面内 SDK。
-
-## 4. CodeAgentCLI 运行事实
-
-测试环境中确认可用的入口：
-
-```text
-D:\03CodeAgent\CodeAgentCLI\codeagent.bat
-D:\03CodeAgent\CodeAgentCLI\codeagentcli.bat
-```
-
-两者版本：
-
-```text
-1.2605.03-IN.2 (codeAgentCLI)
-```
-
-`codeagentcli.bat` 会设置企业 CA、清空代理变量，然后启动：
-
-```text
-D:\03CodeAgent\CodeAgentCLI\bin\codeagentcli.exe
-```
-
-不要改用：
-
-```text
-D:\03CodeAgent\CodeAgentCLI\bin\codeagent.exe
-```
-
-该文件会拉起旧版本 CodeAgent。
-
-KT6 当前以 Python subprocess 启动以下逻辑参数：
-
-```text
-codeagent -p
-  --output-format stream-json
-  --input-format text
-  --verbose
-  --tools Read
-  --allowedTools Read
-  --permission-mode dontAsk|bypassPermissions
-  --no-session-persistence
-  --disable-slash-commands
-```
-
-暂存图片位于：
-
-```text
-<workdir>\runtime_data\codeagent_jobs\kt6-vision-*\frame-*.png
-```
-
-CodeAgent 使用自身配置的默认模型。KT6 不在代码中写死 GLM 型号；测试期间默认
-模型为 GLM-5.1。
-
-## 5. 两份输入协议
-
-### 5.1 CV 文件
-
-`cv-result.json` 由本地 RapidOCR/OpenCV 生成，重点字段：
-
-```text
-objects[].business_id
-objects[].bbox
-objects[].center
-objects[].confidence
-objects[].attributes
-links[].source
-links[].target
-links[].confidence
-links[].attributes
-```
-
-CV 负责真实像素坐标和可追溯像素证据。
-
-### 5.2 模型文件
-
-`model-result.json` 使用：
-
-```text
-schema_version = kt6.topology-model.v1
-```
-
-核心字段：
-
-```text
-nodes
-links
-structure_templates
-negative_edges
-no_connections
-confidence
-```
-
-模型提示只携带精简 CV 候选：
-
-- 节点 ID
-- 类型与标签
-- 画布 ID
-- 中心点（CV 只有 bbox 时由 KT6 本地派生）
-- 置信度
-- 候选连接
-
-不会把 bbox、OCR polygon、像素路径等完整 CV 属性再次塞给模型，也不要求模型
-重新输出坐标。
-
-模型响应校验：
-
-- 响应可以是纯 JSON，也可以在自然语言说明中包含单个 JSON fenced block。
-- 使用 `JSONDecoder.raw_decode` 定位唯一 `kt6.topology-model.v1` 根对象。
-- JSON 前后的自然语言分析可以忽略。
-- 显式围栏必须直接包含协议对象；第二个 fenced block、第二个协议对象、损坏
-  围栏、重复 key、NaN、无限值、未知字段和超限数组仍会拒绝。
-- schema marker 和候选起点扫描均有上限；嵌套属性中的同名 marker 不算协议根。
-- 节点、连接、模板、置信度和属性均有类型及数量边界。
-
-## 6. 融合逻辑
-
-融合完全由 Python 确定性执行，不再调用模型。
-
-已实现：
-
-- 全局一对一对齐模型节点和 CV 节点：精确匹配优先，其次仅接受唯一紧凑 ID
-  匹配，例如 `GW001` 与 `GW-001`。
-- 歧义紧凑 ID、前缀相似 ID 和模型内部 compact-key 冲突均 fail-closed，绝不
-  猜测绑定坐标。
-- 保留 CV bbox、派生 center、canvas_id、OCR 置信度和像素证据。
-- 通过 `node_coordinate_mappings` 显式审计语义节点、模型节点、CV 节点和坐标
-  的对应关系。
-- 补充模型角色、厂商、型号、层级和连接。
-- 支持直接连接和多跳路径等价。
-- 保留 `star`、`layered` 结构模板。
-- 支持模型明确否决 CV 误连，但全局 `no_connections` 不再无条件硬删除 CV 链路。
-- 保留负证据置信度，并以 `accepted`、`disputed`、`rejected` 三态决策。
-- 对仅用于渲染的未定位节点推断坐标。
-- 同时输出 grounded、display 和 semantic 三层图。
-- 推断坐标及 display-only 链路不可用于真实 GUI 点击。
-
-常见 `fusion_status`：
-
-```text
-confirmed
-cv_only
-model_only
-path_equivalent
-structurally_derived
-llm_rejected
-spatially_inferred
-```
-
-融合顶层视图：
-
-```text
-result / grounded_graph  真实像素落地图，保持既有消费者兼容
-display_graph            grounded + 可渲染推断节点/链路，始终不可交互
-semantic_graph           完整语义并集，可包含未定位节点和 unresolved 链路
-node_coordinate_mappings 节点 ID 与 canvas/bbox/center 的显式审计表
-```
-
-`node_coordinate_mappings` 的 `mapping_status` 为 `matched`、`cv_only` 或
-`unmatched`，`match_method` 为 `exact`、`compact_unique` 或 `none`。推断坐标
-保持 `unmatched` 和 `rendering_only=true`。该表不授予点击权限，所有映射的
-`interaction_eligible` 固定为 `false`；真实动作仍需 PagePerception 资产绑定、
-适配器能力和动作授权共同通过。
-
-链路另有正交字段 `relation_state=accepted|disputed|rejected`。仅高置信的明确
-pair-level 负证据与低于阈值的 CV 链路组合会真正 rejected；全局
-`no_connections`、孤立声明、弱负证据和高置信 CV 链路均保留为 disputed。
-`display_only_links`、`disputed_links`、`rejected_links` 分别保留审计明细。
-
-## 7. 推荐测试命令
-
-### 7.1 自动化测试
-
-2026-08-13 `ui-graph-textflow-cdp` 全量结果为 508 项通过、46 项跳过；本轮评测证据归档与报告
-定向回归为43项通过，此前 NCE Adapter 和 UI Graph 专项回归为68项通过。后续通过、跳过
-和失败数量仍以当前命令输出为准。跳过项主要
-来自开发环境缺少可选 RapidOCR/OpenCV 运行依赖，不是测试失败。A/B 环境准备、样例
-和人工验收步骤统一以根目录 `test.md` 为准。
-
-全量命令：
-
-```powershell
-python -m unittest discover -s tests
-```
-
-拓扑链路定向命令：
+## 6. 验证命令
 
 ```powershell
 python -m unittest `
-  tests.test_topology_model_contract `
-  tests.test_codeagent_canvas_vision `
-  tests.test_topology_artifact_clis
-```
-
-定向测试数量会随回归用例增长，以命令实际输出为准。
-
-页面感知、资产绑定与扩展定向命令：
-
-```powershell
-python -m unittest `
-  tests.test_page_capture_jobs `
-  tests.test_browser_extension_assets `
-  tests.test_asset_inventory `
-  tests.test_dom_action_binding `
-  tests.test_safe_dom_actions `
-  tests.test_safe_dom_action_plan `
-  tests.test_asset_action_integration `
-  tests.test_dom_action_api `
-  tests.test_page_perception `
+  tests.test_app `
+  tests.test_http_canvas_vision `
   tests.test_hybrid_canvas_vision `
-  tests.test_app
+  tests.test_topology_model_contract `
+  tests.test_topology_cv_cli `
+  tests.test_browser_executor `
+  tests.test_execution_scenario `
+  tests.test_execution_e2e
+
+python -m compileall kt6_backend
+node --check browser_extension/background.js
+node --check browser_extension/sidepanel.js
+git diff --check
 ```
 
-UI Graph、CDP 与 GLM 规划定向命令：
+完整回归：
 
 ```powershell
-python -m unittest `
-  tests.test_cdp_sidecar_assets `
-  tests.test_cdp_snapshot `
-  tests.test_page_perception_cdp `
-  tests.test_page_perception_ui_graph `
-  tests.test_ui_graph `
-  tests.test_ui_graph_reasoner `
-  tests.test_ui_operation_graph `
-  tests.test_ui_graph_planning `
-  tests.test_ui_graph_api
-
-cd .\browser_sidecar
-npm run check
-```
-
-### 7.2 测试环境端到端命令
-
-每张图片使用独立 `source-id` 和输出目录：
-
-```powershell
-cd D:\04project\FreeStyle_Copilot_KT6_demo
-
-$imageName = "3.png"
-$id = "topology-3-" + (Get-Date -Format "yyyyMMddHHmmss")
-$out = ".\runtime_data\$id"
-
-python -m kt6_backend.topology_hybrid_cli `
-  "..\topo_pic_data\$imageName" `
-  --source-id $id `
-  --out-dir $out `
-  --timeout 900 `
-  --permission-mode bypassPermissions `
-  --executable "D:\03CodeAgent\CodeAgentCLI\codeagent.bat"
-
-$LASTEXITCODE
-```
-
-`bypassPermissions` 只用于隔离测试环境，不应在代码中设为默认值。
-
-成功条件：
-
-```text
-终端 JSON 中 status = ok
-进程退出码 = 0
-cv-result.json 存在
-model-result.json 存在
-codeagent-events.jsonl 存在
-codeagent-stderr.log 存在
-fused-result.json 存在
-```
-
-融合摘要：
-
-```powershell
-$f = Get-Content "$out\fused-result.json" `
-  -Raw -Encoding UTF8 | ConvertFrom-Json
-
-$f.summary | Format-List
-```
-
-至少确认：
-
-```text
-cv_object_count > 0
-model_object_count > 0
-fused_object_count > 0
-```
-
-### 7.3 复用 CV
-
-模型失败但 CV 已完成时，可以把 `cv-result.json` 放入新的 `$out` 后执行：
-
-```powershell
-python -m kt6_backend.topology_hybrid_cli `
-  "..\topo_pic_data\3.png" `
-  --source-id $id `
-  --out-dir $out `
-  --timeout 900 `
-  --permission-mode bypassPermissions `
-  --executable "D:\03CodeAgent\CodeAgentCLI\codeagent.bat" `
-  --reuse-cv
-```
-
-不要把另一张图片的 CV 文件复用于当前图片。
-
-## 8. 真实图片验证记录
-
-测试环境不是公用电脑。
-
-已观察到：
-
-- 两张真实拓扑图片已经完成 CV、CodeAgent、模型 JSON 解析和融合，终端返回成功。
-- 一张样例的融合摘要曾得到 21 个 CV 节点、22 个模型节点、21 个最终可定位节点、
-  20 条融合连接；其中有 1 个模型独有未定位节点和 1 条未解析连接。这属于准确率
-  分析，不是链路失败。
-- CodeAgent 处理困难图片时可能顺序读取同一图片两次，事件日志中的图片 Base64
-  因此可能从约 1 MB 增至 2 MB 以上。
-- 第三张图片最近一次运行中，CodeAgent 已返回 `result/success`；最终文本长
-  22177 字符，前 1329 字符是英文分析，随后才是单个完整 JSON fenced block。
-  旧解析器因要求 JSON 位于响应开头而失败。当前版本已改为提取唯一协议根，并用
-  同形态回归测试覆盖；测试环境仍需同步后重新做一次端到端确认。
-- `1.png` 在 2026-07-27 11:28 的运行已完成 Read，但旧代码最终只得到无效模型
-  协议。当前版本会验证 stream 中全部候选、避免有效 assistant JSON 被末尾无效
-  `result.result` 覆盖，并对真正无效的模型响应在剩余总预算内重试一次。
-- `2.png` 在 2026-07-27 14:09 的运行完成 Read 后 860 秒无 stdout，最终命中
-  900 秒总超时。当前离线 CLI 默认在图后空闲 300 秒时终止该进程并重试一次。
-
-上述三张图片都需要在测试环境同步当前版本后复测，不要提前写成已经通过。
-
-## 9. 已知限制
-
-### 9.1 timeout 与有限重试
-
-- 独立 CodeAgent Adapter 当前硬上限为 900 秒。
-- 离线 model/hybrid CLI 的 `--timeout` 是所有模型尝试共享的总预算，不是每次
-  尝试各等待相同时间；默认最多 2 次尝试。
-- Read 完成后的默认 idle timeout 为 300 秒，只在离线 CLI 启用；核心 Runner
-  默认仍关闭，HTTP/嵌入式调用不受影响。
-- `--idle-timeout 0 --max-attempts 1` 可恢复为单次、无 idle watchdog 的行为。
-- 收到完整 `result/success` 后会立即继续；截止线已缓冲的终止事件仍优先处理。
-- HTTP 感知接口上限为 300 秒。
-- 复杂图片超过 900 秒的离线总预算拆分仍未实现。
-
-### 9.2 CodeAgent 非确定性
-
-- 同一图片的 Read 和推理时间可能显著波动。
-- 模型可能重复 Read 同一张图。
-- 模型可能用 fenced JSON，或在 JSON 前后追加说明。
-- 模型成功不代表语义识别一定正确。
-
-### 9.3 事件文件
-
-- `codeagent-events.jsonl` 包含原始 stream-json。
-- `Read` 的 `tool_result` 可能内含图片 Base64，文件会很大。
-- 不要在终端直接完整输出，也不要未经确认上传包含真实拓扑图片的事件文件。
-- 当前 stdout 上限为 8 MB；大图片、多次重复 Read 可能触及上限。
-- 发生自动重试时，首次日志保存为 `codeagent-events.attempt-1.jsonl` 和
-  `codeagent-stderr.attempt-1.log`，最终一次仍使用标准文件名。
-- 目前没有正式的“从成功 events 恢复 model-result.json”CLI，只有事件保留和
-  手工诊断能力。
-
-### 9.4 准确率与执行安全
-
-- 真实图片准确率评测尚未完成。
-- 模型推断语义、未定位节点坐标和页面自报的业务 ID 不可直接用于 GUI 点击。
-- 只有 CV 或渲染器提供的可验证几何信息可以参与真实定位。
-- DOM 安全链路已完成资产解析、双重绑定、复核和令牌；默认仍是 dry-run，功能分支已
-  接入现有 Chrome 扩展的受控 type/click、live identity/hit-test 和结果验证；v0.7.0
-  传输尚未重新完成真实 Chrome E2E，也未完成真实 NCE 验收。
-- 当前 capture、权限、资产数据、业务语义、指标和设备动作仍有 Mock/测试边界。
-- 生产必须接入服务端身份授权、可信浏览器会话和点击前原子 live DOM 复核，或优先
-  使用以 canonical asset_id 为参数的受控设备 API。
-
-### 9.5 在线 DOM 扩展
-
-- 只支持普通 HTTP(S) 页面；不能采集 `chrome://`、浏览器扩展商店、内部 PDF 或
-  `file://` 页面。
-- `activeTab` 权限下，跨域 iframe 的脚本注入可能受页面和浏览器安全策略限制。
-- iframe 内视觉区域无法可靠换算为顶层截图坐标时，只保留顶层 viewport 兜底并标记
-  `unverified`，不能用于动作定位。
-- closed Shadow DOM 无法从外部扩展读取。
-- 纯 Canvas/SVG 的业务对象没有原生业务 DOM 节点，需要继续走视觉识别；SVG
-  `<text>` 只作文字证据。
-- 整页兜底可能包含页面中的非目标信息；当前只在 DOM 极少且没有其他像素证据时
-  启用，并受截图大小、后端持久化和部署环境隐私策略约束。
-- open Shadow Root 会被检测并计入覆盖统计；其内部当前不作为完整动作绑定证据，
-  `action_binding_complete=false`，不能因外层 DOM 看似完整而继续执行。
-- 当前尚未用真实 FEBS/NCE 在线页面完成扩展验证，不能把通用网页测试结果等同于
-  目标系统已经适配。
-- 目标页面需要提供强资产身份；高风险动作还需要严格 `data-kt6-action`。无法修改
-  页面时，应由受信任的站点专用 Adapter 提供等价证据，不能靠按钮文字猜测。
-- 顶层页面和目标 iframe origin 都必须在资产允许列表中。
-- 原始 `dom_action_bindings` 始终只是观察证据，`actionable_grounding=false`，
-  所有安全链路结果也保持 `safe_for_execution=false`。视觉截图不绕过该限制。
-
-### 9.6 UI Graph、CDP 与内部 GLM5.1
-
-- 当前只通过单元测试和本地样例验证，尚未在真实测试区 Chromium/CDP 环境跑完 A/B。
-- 内部 GLM5.1 的实际 endpoint、模型响应格式、耗时和稳定性仍需在测试区联调；没有
-  GLM 时可以使用确定性/fixture 规划验证图构建和安全校验，但不能代表模型效果。
-- CDP sidecar 仍是独立只读快照入口；功能分支的扩展运行时只承担固定页面感知与授权后的
-  type/click，不向模型或上层暴露 runtime JavaScript、任意 raw CDP 或网络拦截。
-- `page_api` 只有站点显式提供受信任 adapter 时才可用；不能把页面自报字段直接提升为
-  可点击或可执行证据。
-- `interaction.candidate=true` 不是“可以立即点击”。操作仍需稳定 rebind、确定性 DAG
-  校验，以及原有资产、权限、二次采集和 preflight 安全链路。
-- UI Graph 与模型请求/响应可能包含页面文本和业务标识；测试区落盘、日志和导出需按
-  数据隔离要求处理，不能未经确认上传外部服务。
-
-## 10. 近期已解决问题
-
-```text
-无进度、600 秒无 stdout
-→ 修复 CI 环境变量和 stdin 换行
-
-权限确认或路径入口不确定
-→ 支持显式 permission-mode 和 executable
-
-终端看似卡死
-→ 实时 events/stderr + 10 秒心跳
-
-Ctrl+C/timeout 残留进程
-→ 终止 CodeAgent 进程树
-
-result/success 在截止线仍报 timeout
-→ 成功事件优先，并在管道清理后复查缓冲事件
-
-模型重复 Read 同一图片
-→ 允许已完成后的顺序重复，仍限制路径和工具
-
-模型返回 fenced JSON
-→ 兼容单个 JSON fenced block，关闭围栏不计作第二个代码块
-
-模型在 JSON 前后追加分析
-→ 定位唯一 `kt6.topology-model.v1` 根对象，再进行严格协议校验
-
-模型返回多个协议对象或损坏围栏
-→ 拒绝歧义响应，不绕过严格协议校验
-
-模型独有节点有推断坐标但链路在主结果中不可见
-→ 保持 grounded 点击安全，同时在 display_graph 输出 display-only 节点和链路
-
-模型用 no_connections 全局否决 CV 链路
-→ 改为 disputed；只有高置信明确负边与较弱 CV 证据组合才真正 rejected
-
-模型 ID 与多个 CV ID 紧凑化后相同，或仅为前缀相似
-→ `node_coordinate_mappings` 保持 unmatched/cv_only，不猜测坐标绑定
-
-模型 negative_edges 引用未列入 nodes 的 CV 端点别名
-→ 仅在精确或唯一紧凑候选时安全解析，但不会伪造 model-node 坐标绑定
-
-有效 assistant 模型 JSON 被末尾无效 result 文本覆盖
-→ 逐候选严格验证并按规范化 payload 去重；多个不同有效对象仍拒绝
-
-图片 Read 完成后长时间无 stdout，直到 900 秒才失败
-→ 离线 CLI 默认 300 秒图后 idle watchdog，并在共享总预算内有限重试
-
-任意网页采集固定显示 DOM 600，无法判断采集了什么
-→ 改成语义优先候选、每 frame 220 上限、显式截断统计和关键元素预览
-
-一个按钮因子节点继承 cursor:pointer 被重复采集
-→ 过滤已有可操作祖先的非语义子节点，同时保留真正独立的交互元素
-
-纯文本页面没有可操作控件时采集为空
-→ 增加标题和正文文本回退，不再把“无按钮”等同于“无页面语义”
-
-纯 Canvas 页面 DOM 为零
-→ 保留 Canvas 像素证据并交给视觉路线，DOM 为零不再自动判定失败
-
-SVG/地图页面原生 Canvas 为零，扩展只提交 DOM
-→ 自动检测大尺寸 SVG/图形区域，单次可见标签页截图并裁剪为视觉主帧；视觉拓扑和
-DOM 绑定在后端并行保留
-
-扩展弹窗绑定同步长请求，关闭后丢失进度
-→ 后端异步 capture job 持续执行，`chrome.storage.local` 保存 job_id，弹窗重开恢复；
-同步接口继续保留给兼容调用
-
-DOM、OCR、视觉和页面 API 结果各自孤立，模型无法稳定理解结构
-→ 统一构建带来源、父子、owner、business、action 和 semantic 边的多源 UI Graph
-
-模型或原始 `actionable` 字段可能把观察节点误授予点击资格
-→ 只接受精确的 `interaction.candidate=true`，并要求 DOM 稳定 ref 或 CDP backend id；
-`@capture:` 等临时标记、仅业务 ID/element ID 和大小写变体全部 fail closed
-
-GLM 输出可以直接描述任意点击目标或产生循环依赖
-→ 先投影有界文本图，再对 `locate/click/wait/verify` DAG 做目标、依赖、重绑定和环校验
-
-节点已识别但父子与业务归属丢失，后续操作只能扁平猜测
-→ 显式保留 parent/owner/business/action/semantic 关系，支持容器到子控件的联动规划
-```
-
-## 11. 后续建议
-
-按当前用户优先级排序：
-
-1. 严格按 `test.md` 保持 A 组 `main` 与 B 组 `ui-graph-textflow-cdp` 分离，在相同
-   页面、相同任务、相同机器上完成对比，禁止在测试前把 B 合入 A。
-2. 在真实测试区启动 Chromium remote debugging 和 Playwright/CDP sidecar，验证 DOM、
-   CDP、page_api、vision、text 来源标记、父子/owner 边和交互候选是否符合页面事实。
-3. 接入测试区内部 GLM5.1，记录 UI Graph 构建耗时、prompt/response 耗时、任务成功率、
-   目标命中率、无效计划率和安全拒绝率；同时保留原方案的同口径数据。
-4. 在现有 Chrome 加载扩展 v0.8.0，在 `chrome://inspect/#remote-debugging` 开启本次
-   远程调试，运行 `start-browser-executor.ps1` 并从 Side Panel 确认公开可恢复页面闭环；
-   再用相同链路验证真实 NCE 可恢复任务。点击回执不得直接算成功。
-5. 规划结果需要接执行链时，只桥接已有 DOM 安全动作链，并继续要求强资产身份、稳定
-   rebind、服务端权限、二次采集和 preflight；不要让 GLM 或 UI Graph 直接执行动作。
-6. 将 `JSONAssetInventoryAdapter` 替换成经过认证的 NCE/FEBS 资产查询，把权限、用户和
-   scope 换成服务端身份会话；为真实 NCE 动作增加对应 OutcomeVerifier 与回滚前不要
-   扩大 click 范围。
-7. 继续复测 `1.png`、`2.png`、`3.png` 并建立人工节点/链路真值和多图片黄金数据集，
-   不再用“链接越多越好”判断准确率。
-8. 后续再处理超过 900 秒的离线任务预算和正式 events 恢复 CLI；不要让这些工作阻塞
-   当前 UI Graph A/B 验证。
-
-## 12. 新 Codex 接手检查清单
-
-新任务开始后先执行：
-
-```powershell
-cd D:\yangzehui\FreeStyleCopilot
-git status --short
-git branch --show-current
-git log -5 --oneline --decorate
-git branch -vv
-git stash list
 python -m unittest discover -s tests
 ```
 
-然后确认：
+自动化测试不操作真实 Chrome。实机验收必须重新加载扩展，从目标标签页 Side Panel 发起，
+记录计划、run 状态和每一步验证结果。
 
-- `review.md` 是否仍为未跟踪文件。
-- 当前是否仍检出 `ui-graph-textflow-cdp`；不要在未完成 A/B 前切到 `main` 合并方案。
-- B 组是否仍跟踪 `origin/ui-graph-textflow-cdp`，以及本地是否存在尚未 push 的 ahead
-  提交；只有远端命令成功后才能说当前代码已经上传。
-- 联网后用 `git fetch` 重新确认 `main`、B 组和 `origin/*`，不要依据缓存状态改写历史。
-- OmniParser WIP 是否仍保存在独立 stash，且没有混入 UI Graph 分支。
-- 扩展 `manifest.json` 是否为 v0.8.0；在 `chrome://extensions` 点击“重新加载”，再运行
-  统一脚本并确认工具栏 action 能打开 KT6 Browser Agent Side Panel、选择当前 Tab；
-  attach、感知和动作由本机 Browser Harness 完成。
-- 目标系统源码目前并不在仓库中，不要误称已经完成 FEBS/NCE 页面内嵌集成。
-- 当前提交/推送状态以 `git log`、`git status` 为准，不沿用本文中的历史哈希。
-- UI Graph 设计读 `docs/ui-graph-architecture.md`，A/B 执行读根目录 `test.md`。
-- 测试环境最新失败属于 CV、CodeAgent transport、模型协议还是融合阶段。
-- 不要在没有真实事件证据时继续放宽协议。
-- 不要为了准确率问题破坏已经通过的路径安全和严格 JSON 校验。
-- 修改完成后运行定向测试和全量测试。
-- 用户要求 commit 或 push 时严格按当次指令执行；认证/网络失败要明确报告。
+## 7. 已知边界
+
+- 当前资产和业务工具仍含 Mock 数据，不代表真实设备下发。
+- `permissions` 测试字段不是生产身份授权。
+- Canvas 视觉识别结果默认是分析证据，生产使用前需要黄金数据准确率评测。
+- 同一后端只接受一个浏览器规划或执行会话；busy 请求不排队。
+- 页面导航、标签页变化或 DOM 重建会使当前绑定失效，必须重新采集或重新生成计划。
+- 后端只支持固定 `type`/`click`；不增加任意 JavaScript、Python、按键序列或 raw CDP。
+
+## 8. Git 与接手检查
+
+新任务开始先执行：
+
+```powershell
+git status -sb
+git branch --show-current
+git branch -vv
+git log -5 --oneline --decorate
+git stash list
+```
+
+注意：
+
+- `deliverables/`、`runtime_data/` 和用户未跟踪文件不得误提交。
+- OmniParser WIP stash 只核对，不自动 apply/drop。
+- 只暂存当前任务文件，不使用 `git add -A`。
+- 未经用户明确要求，不合并、变基、删除分支、创建 PR 或推送。
+- push 前必须 fetch；只有远端命令成功后才能说已上传。
+- 代码、README、`test.md`、`AGENTS.md` 和本文件必须保持一致。

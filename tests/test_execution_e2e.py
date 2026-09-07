@@ -30,11 +30,9 @@ class ExecutionE2EAssetsTest(unittest.TestCase):
         self.assertIn("/api/execution/health", launcher)
         self.assertIn("chrome://inspect/#remote-debugging", launcher)
         self.assertIn("No fixed remote-debugging port", launcher)
-        self.assertIn("no CodeAgent/GLM CLI configuration is required", launcher)
+        self.assertIn("OpenAI-compatible KT6_MODEL_API_*", launcher)
         env_template = (ROOT / ".env.example").read_text(encoding="utf-8")
         self.assertIn("KT6_MODEL_API_BASE_URL", env_template)
-        self.assertNotIn("KT6_CODEAGENT_", env_template)
-        self.assertNotIn("codeagent_cli", env_template)
         self.assertFalse(
             (ROOT / "fixtures" / "execution" / "mock_ui_graph.json").exists()
         )

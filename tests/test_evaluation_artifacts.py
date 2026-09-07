@@ -1000,7 +1000,7 @@ class EvaluationArtifactTests(unittest.TestCase):
             "schema_version": _VISION_MODEL_CALL_SCHEMA,
             "run_id": run["run_id"],
             "call_index": 1,
-            "producer": {"provider": "codeagent_cli", "model": "glm-5.1"},
+            "producer": {"provider": "model_api", "model": "vision-model"},
             "status": status,
             "duration_ms": 300_000 if status == "timeout" else 125,
             "screenshot_artifact_id": "original-screenshot-001",

@@ -414,7 +414,7 @@ class EvaluationReportTest(unittest.TestCase):
                     "run_id": run["run_id"],
                     "call_index": 1,
                     "producer": {
-                        "provider": "codeagent_cli",
+                        "provider": "model_api",
                         "model": "glm-5.1-evaluation-fixture",
                     },
                     "status": vision_status,

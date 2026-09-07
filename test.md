@@ -62,8 +62,7 @@ RapidOCR/OpenCV 可选依赖时，才增加：
 KT6_VISION_DRIVER=local_cv_ocr
 ```
 
-这条本地补充链不调用大模型；当前 Browser Harness 主链不再要求 CodeAgent/GLM CLI
-配置。
+这条本地补充链不调用大模型；所有模型能力都通过 API 配置。
 
 ### 3.3 UI-TARS API
 
@@ -93,7 +92,7 @@ KT6_MODEL_API_ALLOWED_HOSTS=<获批网关精确主机名>
 ```
 
 规划模型只使用 `KT6_MODEL_API_*`。Browser Harness 提供当前 Tab 的实时 DOM/CDP 感知
-和固定 type/click 传输，不需要 CodeAgent/GLM CLI；Canvas 像素证据需要时才显式启用
+和固定 type/click 传输；Canvas 像素证据需要时才显式启用
 上述本地 `local_cv_ocr` 补充，没有 `execution_fixture` 专用识别器。公网
 HTTP(S) 目标无需逐域名配置；每次初始导航、当前页面、重定向和新标签绑定都会重新做
 DNS/网络范围校验，并兼容代理常用的 `198.18.0.0/15` synthetic DNS（仅域名解析结果，

@@ -17,7 +17,7 @@ class TopologyModelResponseError(ValueError):
 
 
 class TopologyModelContract:
-    """Compact contract used only by the offline CodeAgent model stage."""
+    """Compact contract for topology semantics returned by a model API."""
 
     MAX_OBJECTS = 1000
     MAX_RELATIONS = 4000

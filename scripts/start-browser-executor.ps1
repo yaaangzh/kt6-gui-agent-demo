@@ -159,4 +159,4 @@ Write-Host "6. On the first run, click Allow in Chrome when Browser Harness asks
 Write-Host ""
 Write-Host "The extension only selects the current tab; Browser Harness performs capture and actions."
 Write-Host "No fixed remote-debugging port, dedicated Chrome profile, or new browser instance is used."
-Write-Host "Planning uses KT6_MODEL_API_* from .env; no CodeAgent/GLM CLI configuration is required."
+Write-Host "Planning uses the OpenAI-compatible KT6_MODEL_API_* settings from .env."
