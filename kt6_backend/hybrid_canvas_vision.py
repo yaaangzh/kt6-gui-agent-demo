@@ -80,8 +80,11 @@ class HybridCanvasVisionAdapter:
                 fused = fuse_topology_payloads(local_result, model_result)
             except TopologyFusionError:
                 # Geometry is the safer fallback when model output cannot be aligned.
+                result = self._local_only_result(local_result)
+                if "vision_model_call" in model_result:
+                    result["vision_model_call"] = copy.deepcopy(model_result["vision_model_call"])
                 return self._with_vision_routing(
-                    self._local_only_result(local_result),
+                    result,
                     self._routing_with_reason(
                         routing,
                         "model_fusion_failed_degraded_to_local_cv",
@@ -91,6 +94,8 @@ class HybridCanvasVisionAdapter:
             result = copy.deepcopy(fused["result"])
             result["fusion_summary"] = copy.deepcopy(fused["summary"])
             result["fusion_analysis"] = self._fusion_analysis(fused)
+            if "vision_model_call" in model_result:
+                result["vision_model_call"] = copy.deepcopy(model_result["vision_model_call"])
             return self._with_vision_routing(
                 result,
                 routing,

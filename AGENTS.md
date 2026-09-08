@@ -150,8 +150,11 @@ E2E 只替换规划决策，不 Mock 页面世界；不得提交或使用 `mock_
 连接；不得创建专用 profile、固定调试端口或注入 Chrome 启动参数。扩展只选择当前 Tab
 并承载自然语言输入与确认，不 attach、不代发 CDP。Browser Harness 只通过 KT6 固定
 type/click 适配器执行，不允许模型生成的 helper、JavaScript、Python 或 raw CDP 进入主链。
-该执行入口的规划模型只使用通用 `KT6_MODEL_API_*`。普通 DOM
-页面不配置视觉驱动，确需 Canvas 像素补充时才显式启用本地 `local_cv_ocr`。
+该执行入口的规划及视觉模型复用通用 `KT6_MODEL_API_*`，`KT6_VISION_MODEL` 可覆盖同一
+网关下的视觉模型名称。普通 DOM 页面不配置视觉驱动；Canvas 分析可选本地 `local_cv_ocr`、
+直接多模态 API `openai_compatible`，或 CV 优先的自适应 `hybrid`。后两者允许发送经过
+验证的截图和有界 CV/OCR 上下文，必须使用支持图片的获批模型；不发送路径或完整页面 URL。
+此图片输入仅属于本功能分支，不改变 `eval-current` 的纯 CV JSON 模型输入边界。
 
 ### 4.7 `br_omniParser`
 

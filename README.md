@@ -46,8 +46,8 @@ Browser Harness 主路径每次采集：
 |---|---|---|
 | DOM/CDP | 无需视觉配置 | 普通输入框、按钮、链接、菜单、表格 |
 | 本地 CV/OCR | `KT6_VISION_DRIVER=local_cv_ocr` | 不调用模型的 Canvas 分析补充 |
-| 模型视觉 API | `KT6_VISION_DRIVER=http` | 将有界 Canvas 图片发给获批 HTTP 视觉服务 |
-| Hybrid | `KT6_VISION_DRIVER=hybrid` | 本地 CV 优先，证据不足时调用 HTTP 视觉 API |
+| 模型视觉 API | `KT6_VISION_DRIVER=openai_compatible` | 将有界 Canvas 图片发给支持图片的 Chat Completions 模型 |
+| Hybrid | `KT6_VISION_DRIVER=hybrid` | 本地 CV 优先，自适应判断后把截图和 CV/OCR 上下文一起发给模型，再确定性融合 |
 
 `page_api` 和 topology text 是其他采集入口的可选证据，不是当前 Browser Harness
 Side Panel 的默认输入。视觉、页面 API 和文本结果均不能自行授予操作权限。
@@ -68,17 +68,34 @@ KT6_MODEL_API_MAX_TOKENS=4096
 KT6_MODEL_API_TIMEOUT_SECONDS=60
 ```
 
-Canvas 模型视觉使用经过审批的严格 HTTP 视觉接口：
+Canvas 视觉复用上述 API 网关、密钥、获批主机、token 上限和超时。要启用
+“本地 CV/OCR → 自动分类 → 按需模型补充 → 确定性融合”，增加：
 
 ```dotenv
-KT6_VISION_DRIVER=http
-KT6_VISION_ENDPOINT=https://<approved-vision-service>/v1/topology
-KT6_VISION_API_KEY=<secret>
-KT6_VISION_TIMEOUT_SECONDS=60
+KT6_VISION_DRIVER=hybrid
+# 可选：同一网关下单独指定视觉模型；省略时使用 KT6_MODEL_API_MODEL
+KT6_VISION_MODEL=<支持图片输入和JSON输出的模型名>
 ```
 
-需要本地 CV + API 自适应融合时，把 `KT6_VISION_DRIVER` 改为 `hybrid`。普通 DOM 页面
-不要配置视觉驱动，避免无意义的图片处理和模型调用。
+模型需要支持 Chat Completions 的 `image_url` 内容块与 JSON 输出。一次请求包含经过哈希、
+尺寸校验的 Canvas 截图及有界 CV 节点、连线、OCR 标识候选；不发送本地图片路径或完整页面
+URL。不再使用 `/v1/topology` 专用视觉协议及其独立 endpoint/key 配置。
+
+Hybrid 的 `auto` 分类规则保持不变：高质量散点只保留节点；清晰结构拓扑直接使用 CV；
+复杂或无有效 CV 结果时最多调用模型一次，随后严格校验结果并融合。模型调用失败按既有逻辑
+保留可用 CV 证据，`vision_routing.execution_status` 会标明降级。相同截图可使用缓存，模型、
+网关或 token 设置改变后不会复用旧模型结果。`vision_model_call` 记录当次调用与用量；
+缓存命中时调用数为 0，原始信息放在 `source_call_count` / `source_usage`，不重复计费统计。
+视觉输出仍是分析证据，不授予点击权限。
+
+安装本地识别依赖（`local_cv_ocr` 和 `hybrid` 需要）：
+
+```powershell
+python -m pip install -r requirements-local-vision.txt
+```
+
+只调用视觉模型可将 driver 改为 `openai_compatible`。普通 DOM 页面无需视觉驱动；只配
+`KT6_MODEL_API_*` 不会启用截图发送。
 
 配置统一放在根目录 `.env`：
 
@@ -149,9 +166,9 @@ kt6_backend/execution/action_planner.py     OpenAI-compatible Action Plan
 kt6_backend/execution/grounding.py          DOM/CDP 优先、Vision 兜底 Grounding
 kt6_backend/execution/scenario_runner.py    fresh capture → execute → verify 循环
 kt6_backend/execution/verifier.py           确定性结果验证
-kt6_backend/http_canvas_vision.py           HTTP Canvas 视觉适配器
+kt6_backend/openai_canvas_vision.py         截图 + CV 上下文的多模态 API 适配器
 kt6_backend/local_cv_canvas_vision.py       本地 RapidOCR/OpenCV 适配器
-kt6_backend/hybrid_canvas_vision.py         本地 CV + HTTP API 自适应融合
+kt6_backend/hybrid_canvas_vision.py         本地 CV + 多模态 API 自适应融合
 kt6_backend/openai_compatible_api.py        通用模型 API 客户端
 browser_extension/                         Chrome Side Panel 扩展
 scripts/start-browser-executor.ps1          Windows 统一启动入口
@@ -167,7 +184,7 @@ python -m unittest `
   tests.test_browser_executor `
   tests.test_execution_scenario `
   tests.test_execution_e2e `
-  tests.test_http_canvas_vision `
+  tests.test_openai_canvas_vision `
   tests.test_hybrid_canvas_vision `
   tests.test_topology_cv_cli
 

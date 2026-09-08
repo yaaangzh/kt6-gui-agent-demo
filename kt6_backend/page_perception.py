@@ -2227,6 +2227,10 @@ class PagePerceptionService:
             scene["vision_cache"] = self._bounded_metadata(
                 recognized.get("vision_cache")
             )
+        if "vision_model_call" in recognized:
+            scene["vision_model_call"] = self._bounded_metadata(
+                recognized.get("vision_model_call")
+            )
         return self._stamp_provenance(
             scene,
             semantic_source="canvas_pixels",

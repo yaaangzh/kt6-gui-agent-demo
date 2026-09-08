@@ -100,34 +100,6 @@ class TopologyModelContractTest(unittest.TestCase):
         self.assertEqual(context["candidate_counts"]["ocr_text_anchors"], 6)
         self.assertNotIn("bbox", json.dumps(context))
 
-    def test_prompt_requests_semantics_without_full_pixel_schema(self):
-        prompt = TopologyModelContract.prompt(
-            [
-                {
-                    "canvas_id": "uploaded_topology",
-                    "local_path": "C:\\staged\\frame.png",
-                    "screenshot_sha256": "ignored",
-                    "mime_type": "image/png",
-                    "width": 1920,
-                    "height": 1080,
-                }
-            ],
-            cv_observations={"source": "local_cv_candidates", "objects": [], "links": []},
-        )
-        _heading, request_text = prompt.split("\n", 1)
-        request = json.loads(request_text)
-
-        self.assertEqual(request["operation"], "topology_semantic_enrichment")
-        self.assertNotIn("output_schema", request)
-        self.assertNotIn("screenshot_sha256", request["frames"][0])
-        self.assertNotIn("mime_type", request["frames"][0])
-        self.assertNotIn("bbox", json.dumps(request["output_shape"]))
-        self.assertEqual(
-            request["output_shape"]["schema_version"],
-            MODEL_SCHEMA_VERSION,
-        )
-        self.assertIn("fallible local OCR", request["instructions"][4])
-
     def test_accepts_compact_semantic_response(self):
         payload = {
             "schema_version": MODEL_SCHEMA_VERSION,

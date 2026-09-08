@@ -319,8 +319,9 @@ class VisionCacheCoordinator:
             for name in (
                 "requested_profile",
                 "endpoint",
-                "executable",
-                "agent",
+                "provider",
+                "model",
+                "max_tokens",
                 "timeout_seconds",
             ):
                 setting = getattr(value, name, None)
@@ -510,6 +511,12 @@ class VisionCacheCoordinator:
             metadata.update(copy.deepcopy(dict(extra)))
         annotated["vision_cache"] = metadata
         if status in {"exact_hit", "reprojected", "coalesced"}:
+            model_call = annotated.get("vision_model_call")
+            if isinstance(model_call, dict):
+                model_call.setdefault("source_call_count", model_call.get("call_count", 0))
+                model_call.setdefault("source_usage", copy.deepcopy(model_call.get("usage", {})))
+                model_call["call_count"] = 0
+                model_call["usage"] = {}
             routing = annotated.get("vision_routing")
             if isinstance(routing, dict):
                 updated = copy.deepcopy(routing)

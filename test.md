@@ -64,6 +64,21 @@ KT6_VISION_DRIVER=local_cv_ocr
 
 这条本地补充链不调用大模型；所有模型能力都通过 API 配置。
 
+`feature/eval-browser-harness` 要启用 CV＋图片模型自适应识别，先安装
+`requirements-local-vision.txt`，然后复用 3.1 的 API 配置，增加：
+
+```dotenv
+KT6_VISION_DRIVER=hybrid
+# 可选；同一网关下的图片模型。省略时使用 KT6_MODEL_API_MODEL。
+KT6_VISION_MODEL=<支持image_url内容块和JSON输出的模型名>
+```
+
+视觉请求包含 Canvas 截图和有界 CV/OCR 上下文，不含本地路径、完整页面 URL；普通规划
+请求仍是文本。直接图片识别可选 `openai_compatible`，无需本地 CV。旧 `http` driver 和
+`KT6_VISION_ENDPOINT` / `KT6_VISION_API_KEY` / `KT6_VISION_TIMEOUT_SECONDS` 已移除，
+网关、密钥、超时和 token 上限统一由 `KT6_MODEL_API_*` 配置。图片发送需显式启用视觉
+driver；`eval-current` 的模型仍只接收 CV JSON，不因本分支增加图片输入而改变。
+
 ### 3.3 UI-TARS API
 
 ```dotenv
@@ -93,7 +108,7 @@ KT6_MODEL_API_ALLOWED_HOSTS=<获批网关精确主机名>
 
 规划模型只使用 `KT6_MODEL_API_*`。Browser Harness 提供当前 Tab 的实时 DOM/CDP 感知
 和固定 type/click 传输；Canvas 像素证据需要时才显式启用
-上述本地 `local_cv_ocr` 补充，没有 `execution_fixture` 专用识别器。公网
+上述 `local_cv_ocr` / `hybrid` / `openai_compatible` 识别，没有 `execution_fixture` 专用识别器。公网
 HTTP(S) 目标无需逐域名配置；每次初始导航、当前页面、重定向和新标签绑定都会重新做
 DNS/网络范围校验，并兼容代理常用的 `198.18.0.0/15` synthetic DNS（仅域名解析结果，
 直接输入该网段 IP 仍拒绝）。本机和 RFC1918 页面默认拒绝，仅隔离测试时可设置
@@ -228,6 +243,32 @@ python -m unittest `
 - 未配置真实 Reasoner 时规划接口 503 是当前预期。
 
 ## 10. `feature/eval-browser-harness` 测试
+
+2026-09-08 多模态视觉 API 专项（固定图片与传输替身，不访问模型服务或真实 Chrome）：
+
+```powershell
+.\.venv-browser-executor\Scripts\python.exe -m unittest `
+  tests.test_app `
+  tests.test_openai_canvas_vision `
+  tests.test_openai_compatible_api `
+  tests.test_topology_model_contract `
+  tests.test_hybrid_canvas_vision `
+  tests.test_topology_cv_routing `
+  tests.test_topology_fusion `
+  tests.test_vision_cache_coordinator `
+  tests.test_page_perception_vision_cache
+```
+
+检查点：同一请求含图片和 CV/OCR 上下文；图片哈希/尺寸错误时不调用 API；可信
+`cv_only` 跳过模型；需要模型时只发一次请求；输出校验后使用现有融合；模型设置变化使
+缓存失效；缓存命中的当次模型调用数为 0、usage 为空，原始用量单独标为来源统计。
+配置后重启后端，通过 `/api/health` 的 `vision.routing_mode=cv_first_adaptive`
+及 `vision.model` 确认 Hybrid 与模型选择。健康检查只证明配置，图片识别准确率仍需实机验证。
+
+结果：上述 107 项全部通过（4.406 秒）；后端 `compileall` 和 `git diff --check` 通过。
+测试使用正常 Windows 临时目录权限，未调用真实模型、未操作 Chrome、未改动本地 `.env`。
+当前本机配置仍为 `local_cv_ocr`；需要按 3.2 节改为 `hybrid`，指定支持图片的模型并重启后端，
+才能验收真实截图识别。
 
 2026-09-07 生命周期修复的最小定向回归（不访问真实浏览器或模型）：
 

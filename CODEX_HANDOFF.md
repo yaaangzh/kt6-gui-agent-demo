@@ -41,17 +41,23 @@ Canvas 视觉有以下配置状态：
 
 - 未配置：普通 DOM/CDP 页面主路径；
 - `local_cv_ocr`：本机 RapidOCR/OpenCV，不调用模型；
-- `http`：调用获批的严格 HTTP 视觉服务；
-- `hybrid`：本地 CV 优先，证据不足时调用同一个 HTTP 视觉服务。
+- `openai_compatible`：直接调用支持图片输入的 Chat Completions 模型；
+- `hybrid`：本地 CV 优先，自适应路由后将截图与 CV/OCR 上下文一起传给模型并融合。
 
-HTTP/Hybrid 视觉配置：
+API/Hybrid 视觉复用 `KT6_MODEL_API_*` 网关、密钥、主机限制、超时和 token 上限：
 
 ```dotenv
-KT6_VISION_DRIVER=http
-KT6_VISION_ENDPOINT=https://<approved-vision-service>/v1/topology
-KT6_VISION_API_KEY=<secret>
-KT6_VISION_TIMEOUT_SECONDS=60
+KT6_VISION_DRIVER=hybrid
+# 可选；未指定时使用 KT6_MODEL_API_MODEL
+KT6_VISION_MODEL=<同一网关下支持image_url和JSON输出的模型名>
 ```
+
+`hybrid` 和 `local_cv_ocr` 都需安装 `requirements-local-vision.txt`。分类/路由仍固定
+`auto`：可信散点和简单结构拓扑跳过模型，复杂或 CV 无效时最多调用一次模型；无修复调用
+或自动重试。输入图片经过尺寸/哈希校验，CV/OCR 上下文按已有契约限量压缩；不发送路径、
+完整 URL。输出仍用严格拓扑契约和既有确定性融合，保留路由、模型调用和缓存证据。
+缓存指纹包含模型/网关/token 设置；缓存命中不重复计算模型调用与 token，原始用量另标
+`source_call_count` / `source_usage`。原 `http` driver 与专用视觉 HTTP 协议已移除。
 
 远程模型 endpoint 必须经过数据出区审批；真实 key、截图、DOM/CDP、模型原文和真实运行
 证据不能提交 Git。
@@ -116,7 +122,7 @@ kt6_backend/app.py
 kt6_backend/openai_compatible_api.py
 kt6_backend/page_perception.py
 kt6_backend/ui_graph.py
-kt6_backend/http_canvas_vision.py
+kt6_backend/openai_canvas_vision.py
 kt6_backend/local_cv_canvas_vision.py
 kt6_backend/hybrid_canvas_vision.py
 kt6_backend/topology_model_contract.py
@@ -137,10 +143,14 @@ scripts/start-browser-executor.ps1
 
 ## 6. 验证命令
 
+2026-09-08 多模态视觉专项 107 项通过（4.406 秒），命令及范围见 `test.md` 第 10 节。
+后端编译和 diff 空白检查通过。此次没有调用真实模型或操作 Chrome，本机 `.env` 仍为
+`local_cv_ocr`，真实多模态识别需配置 `hybrid` 与支持图片的模型后重启验收。
+
 ```powershell
 python -m unittest `
   tests.test_app `
-  tests.test_http_canvas_vision `
+  tests.test_openai_canvas_vision `
   tests.test_hybrid_canvas_vision `
   tests.test_topology_model_contract `
   tests.test_topology_cv_cli `

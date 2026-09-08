@@ -46,6 +46,12 @@ class RecordingAdapter:
                 "model_invoked": True,
                 "execution_status": "model_completed",
             },
+            "vision_model_call": {
+                "provider": "test-gateway",
+                "model": "test-vision",
+                "call_count": 1,
+                "usage": {"total_tokens": 120},
+            },
         }
 
 
@@ -119,6 +125,63 @@ class VisionCacheCoordinatorTest(unittest.TestCase):
             second["vision_routing"]["source_execution_status"],
             "model_completed",
         )
+        self.assertEqual(first["vision_model_call"]["call_count"], 1)
+        self.assertEqual(first["vision_model_call"]["usage"], {"total_tokens": 120})
+        self.assert_cached_model_call(second)
+
+    def assert_cached_model_call(self, result):
+        call = result["vision_model_call"]
+        self.assertEqual(call["call_count"], 0)
+        self.assertEqual(call["usage"], {})
+        self.assertEqual(call["source_call_count"], 1)
+        self.assertEqual(call["source_usage"], {"total_tokens": 120})
+
+    def test_coalesced_cached_result_preserves_original_usage_without_recounting(self):
+        raw = self.adapter.recognize(page=self.page, frames=(self.frame("frame.png", b"pixels"),))
+        result = raw
+        for status in ("exact_hit", "coalesced"):
+            result = VisionCacheCoordinator._annotate(
+                result,
+                status=status,
+                cache_key="test-key",
+                semantic_change_check="same_frame",
+                adapter_invocation_avoided=True,
+                model_invocation_avoided=True,
+            )
+            self.assert_cached_model_call(result)
+        self.assertEqual(raw["vision_model_call"]["call_count"], 1)
+        self.assertNotIn("source_usage", raw["vision_model_call"])
+
+    def test_model_settings_change_invalidates_nested_model_cache(self):
+        class Pipeline:
+            adapter_id = "hybrid-test"
+            adapter_version = "1.0"
+
+            def __init__(self, model):
+                self.model_adapter = model
+
+            def recognize(self, **kwargs):
+                return self.model_adapter.recognize(**kwargs)
+
+        coordinator = self.coordinator()
+        for field, old_value, new_value in (
+            ("model", "vision-a", "vision-b"),
+            ("provider", "gateway-a", "gateway-b"),
+            ("max_tokens", 4096, 8192),
+        ):
+            with self.subTest(field=field):
+                model = RecordingAdapter()
+                setattr(model, field, old_value)
+                adapter = Pipeline(model)
+                frame = self.frame(f"{field}.png", field.encode("ascii"))
+                coordinator.recognize(adapter=adapter, page=self.page, frames=(frame,))
+                cached = coordinator.recognize(adapter=adapter, page=self.page, frames=(frame,))
+                self.assertEqual(cached["vision_cache"]["status"], "exact_hit")
+                self.assertEqual(model.calls, 1)
+                setattr(model, field, new_value)
+                refreshed = coordinator.recognize(adapter=adapter, page=self.page, frames=(frame,))
+                self.assertEqual(refreshed["vision_cache"]["status"], "miss")
+                self.assertEqual(model.calls, 2)
 
     def test_page_identity_and_force_refresh_do_not_reuse(self):
         frame = self.frame("frame.png", b"pixels")
@@ -160,10 +223,11 @@ class VisionCacheCoordinatorTest(unittest.TestCase):
                 frames=(frame,),
             )
             self.adapter.release.set()
-            statuses = {
-                leader.result()["vision_cache"]["status"],
-                follower.result()["vision_cache"]["status"],
-            }
+            results = (leader.result(), follower.result())
+            statuses = {result["vision_cache"]["status"] for result in results}
+            for result in results:
+                if result["vision_cache"]["status"] != "miss":
+                    self.assert_cached_model_call(result)
 
         self.assertEqual(self.adapter.calls, 1)
         self.assertIn("miss", statuses)
@@ -205,6 +269,7 @@ class VisionCacheCoordinatorTest(unittest.TestCase):
         self.assertEqual(result["objects"][0]["canvas_id"], "new-canvas")
         self.assertTrue(result["objects"][0]["analysis_only"])
         self.assertFalse(result["vision_routing"]["model_invoked"])
+        self.assert_cached_model_call(result)
 
     def test_semantic_pixel_change_runs_adapter_again(self):
         first_frame = self.frame("first.png", b"old")

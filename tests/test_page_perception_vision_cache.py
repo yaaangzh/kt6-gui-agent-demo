@@ -39,6 +39,16 @@ class CountingVisionAdapter:
                 }
             ],
             "links": [],
+            "vision_model_call": {
+                "provider": "test-gateway",
+                "model": "test-vision-model",
+                "call_count": 1,
+                "usage": {
+                    "input_tokens": 17,
+                    "output_tokens": 9,
+                    "total_tokens": 26,
+                },
+            },
         }
 
 
@@ -132,6 +142,22 @@ class PagePerceptionVisionCacheTest(unittest.TestCase):
         self.assertEqual(second["summary"]["dom_element_count"], 2)
         self.assertEqual(second["scene"]["vision_cache"]["status"], "exact_hit")
         self.assertFalse(second["scene"]["actionable_grounding"])
+        first_call = first["scene"]["vision_model_call"]
+        self.assertEqual(first_call["provider"], "test-gateway")
+        self.assertEqual(first_call["model"], "test-vision-model")
+        self.assertEqual(first_call["call_count"], 1)
+        self.assertEqual(first_call["usage"], {
+            "input_tokens": 17,
+            "output_tokens": 9,
+            "total_tokens": 26,
+        })
+        cached_call = second["scene"]["vision_model_call"]
+        self.assertEqual(cached_call["provider"], first_call["provider"])
+        self.assertEqual(cached_call["model"], first_call["model"])
+        self.assertEqual(cached_call["call_count"], 0)
+        self.assertEqual(cached_call["usage"], {})
+        self.assertEqual(cached_call["source_call_count"], 1)
+        self.assertEqual(cached_call["source_usage"], first_call["usage"])
 
     def test_force_refresh_bypasses_visual_cache(self):
         payload = capture_payload()

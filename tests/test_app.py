@@ -91,206 +91,109 @@ class AppFactoryTest(unittest.TestCase):
                     app._canvas_vision_health(invalid_adapter)["timeout_seconds"]
                 )
 
-    def test_create_services_builds_canvas_vision_from_environment(self):
-        adapter = object()
-        environment = {
-            "KT6_VISION_ENDPOINT": "  https://vision.internal/v1/topology  ",
-            "KT6_VISION_API_KEY": "  production-secret  ",
-            "KT6_VISION_TIMEOUT_SECONDS": "12.5",
+    @staticmethod
+    def model_environment():
+        return {
+            "KT6_MODEL_API_PROVIDER": "test-gateway",
+            "KT6_MODEL_API_BASE_URL": "https://models.internal/v1",
+            "KT6_MODEL_API_KEY": "must-not-appear-in-health",
+            "KT6_MODEL_API_MODEL": "planner-model",
+            "KT6_MODEL_API_ALLOWED_HOSTS": "models.internal",
+            "KT6_MODEL_API_TIMEOUT_SECONDS": "75",
+            "KT6_MODEL_API_MAX_TOKENS": "8192",
         }
-        with (
-            patch.dict(os.environ, environment, clear=True),
-            patch.object(app, "HTTPTopologyVisionAdapter", return_value=adapter) as constructor,
-            tempfile.TemporaryDirectory() as temp_dir,
-        ):
-            services = app.create_services(Path(temp_dir))
 
-        self.assertIs(services.page_perception.canvas_vision, adapter)
-        constructor.assert_called_once_with(
-            endpoint="https://vision.internal/v1/topology",
-            api_key="production-secret",
-            timeout_seconds=12.5,
-        )
-
-    def test_create_services_uses_default_canvas_vision_timeout(self):
-        adapter = object()
-        with (
-            patch.dict(
-                os.environ,
-                {"KT6_VISION_ENDPOINT": "https://vision.internal/v1/topology"},
-                clear=True,
-            ),
-            patch.object(app, "HTTPTopologyVisionAdapter", return_value=adapter) as constructor,
-            tempfile.TemporaryDirectory() as temp_dir,
-        ):
-            services = app.create_services(Path(temp_dir))
-
-        self.assertIs(services.page_perception.canvas_vision, adapter)
-        constructor.assert_called_once_with(
-            endpoint="https://vision.internal/v1/topology",
-            api_key=None,
-            timeout_seconds=30.0,
-        )
-
-    def test_unknown_canvas_vision_driver_is_rejected(self):
-        with patch.dict(
-            os.environ,
-            {"KT6_VISION_DRIVER": "unknown"},
-            clear=True,
-        ), tempfile.TemporaryDirectory() as temp_dir, self.assertRaisesRegex(
-            ValueError, "must be http, local_cv_ocr, or hybrid"
-        ):
-            app.create_services(Path(temp_dir))
-
-    def test_create_services_builds_local_cv_ocr_vision_without_remote_config(self):
-        adapter = object()
-        with (
-            patch.dict(
-                os.environ,
-                {"KT6_VISION_DRIVER": "local_cv_ocr"},
-                clear=True,
-            ),
-            patch.object(
-                app,
-                "LocalCVTopologyVisionAdapter",
-                return_value=adapter,
-            ) as constructor,
-            tempfile.TemporaryDirectory() as temp_dir,
-        ):
-            services = app.create_services(Path(temp_dir))
-
-        self.assertIs(services.page_perception.canvas_vision, adapter)
-        constructor.assert_called_once_with()
-
-    def test_create_services_builds_hybrid_http_vision(self):
-        local_adapter = object()
-        model_adapter = object()
-        hybrid_adapter = object()
+    def test_hybrid_shares_api_config_but_can_use_a_distinct_vision_model(self):
         environment = {
+            **self.model_environment(),
             "KT6_VISION_DRIVER": "hybrid",
-            "KT6_VISION_ENDPOINT": "https://vision.internal/v1/topology",
-            "KT6_VISION_API_KEY": "secret",
-            "KT6_VISION_TIMEOUT_SECONDS": "20",
+            "KT6_VISION_MODEL": "image-model",
         }
-        with (
-            patch.dict(os.environ, environment, clear=True),
-            patch.object(
-                app, "LocalCVTopologyVisionAdapter", return_value=local_adapter
-            ),
-            patch.object(
-                app, "HTTPTopologyVisionAdapter", return_value=model_adapter
-            ) as model_constructor,
-            patch.object(
-                app, "HybridCanvasVisionAdapter", return_value=hybrid_adapter
-            ) as hybrid_constructor,
-            tempfile.TemporaryDirectory() as temp_dir,
-        ):
+        with patch.dict(os.environ, environment, clear=True), tempfile.TemporaryDirectory() as temp_dir:
             services = app.create_services(Path(temp_dir))
+            vision = services.page_perception.canvas_vision
+            planner = services.execution_scenarios.planner
 
-        self.assertIs(services.page_perception.canvas_vision, hybrid_adapter)
-        model_constructor.assert_called_once_with(
-            endpoint="https://vision.internal/v1/topology",
-            api_key="secret",
-            timeout_seconds=20.0,
-        )
-        hybrid_constructor.assert_called_once_with(
-            local_adapter=local_adapter,
-            model_adapter=model_adapter,
-        )
+        self.assertIsInstance(vision, app.HybridCanvasVisionAdapter)
+        self.assertIsInstance(vision.local_adapter, app.LocalCVTopologyVisionAdapter)
+        self.assertEqual(vision.requested_profile, "auto")
+        self.assertIsInstance(vision.model_adapter, app.OpenAICompatibleCanvasVisionAdapter)
+        self.assertEqual(vision.model_adapter.client.endpoint, "https://models.internal/v1/chat/completions")
+        self.assertEqual(vision.model_adapter.client.api_key, environment["KT6_MODEL_API_KEY"])
+        self.assertEqual(vision.model_adapter.model, "image-model")
+        self.assertEqual(vision.model_adapter.timeout_seconds, 75)
+        self.assertEqual(vision.model_adapter.max_tokens, 8192)
+        self.assertEqual(planner.client.model, "planner-model")
+        health = app._canvas_vision_health(vision)
+        self.assertEqual(health["routing_mode"], "cv_first_adaptive")
+        self.assertEqual(health["model"], "image-model")
+        self.assertEqual(health["provider"], "test-gateway")
+        self.assertNotIn(environment["KT6_MODEL_API_KEY"], str(health))
+        self.assertNotIn("models.internal", str(health))
 
-    def test_local_cv_ocr_rejects_remote_model_configuration(self):
-        for conflicting in (
-            {"KT6_VISION_ENDPOINT": "https://vision.internal/v1/topology"},
-            {"KT6_VISION_API_KEY": "must-not-be-passed"},
-            {"KT6_VISION_TIMEOUT_SECONDS": "30"},
-        ):
-            environment = {"KT6_VISION_DRIVER": "local_cv_ocr", **conflicting}
-            with (
-                self.subTest(conflicting=tuple(conflicting)),
-                patch.dict(os.environ, environment, clear=True),
-                patch.object(app, "LocalCVTopologyVisionAdapter") as constructor,
-                tempfile.TemporaryDirectory() as temp_dir,
-                self.assertRaisesRegex(
-                    ValueError,
-                    "must not be configured for local_cv_ocr",
-                ),
-            ):
-                app.create_services(Path(temp_dir))
+    def test_direct_vision_uses_the_configured_general_model_when_not_overridden(self):
+        environment = {
+            **self.model_environment(),
+            "KT6_VISION_DRIVER": "openai_compatible",
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            adapter = app._create_canvas_vision_from_env()
+        self.assertIsInstance(adapter, app.OpenAICompatibleCanvasVisionAdapter)
+        self.assertEqual(adapter.model, "planner-model")
+        self.assertFalse(adapter.supports_actionable_grounding)
 
-            constructor.assert_not_called()
+    def test_general_model_config_does_not_enable_image_transmission(self):
+        with patch.dict(os.environ, self.model_environment(), clear=True):
+            self.assertIsNone(app._create_canvas_vision_from_env())
 
-    def test_maximum_vision_timeout_is_accepted_by_factory_and_adapter(self):
+    def test_local_cv_does_not_construct_a_model_client(self):
         with (
-            patch.dict(
-                os.environ,
-                {
-                    "KT6_VISION_ENDPOINT": "https://vision.internal/v1/topology",
-                    "KT6_VISION_TIMEOUT_SECONDS": "300",
-                },
-                clear=True,
-            ),
-            tempfile.TemporaryDirectory() as temp_dir,
+            patch.dict(os.environ, {"KT6_VISION_DRIVER": "local_cv_ocr"}, clear=True),
+            patch.object(app, "_create_model_client_from_env") as model_factory,
         ):
-            services = app.create_services(Path(temp_dir))
+            adapter = app._create_canvas_vision_from_env()
+        self.assertIsInstance(adapter, app.LocalCVTopologyVisionAdapter)
+        model_factory.assert_not_called()
 
-        self.assertEqual(services.page_perception.canvas_vision.timeout_seconds, 300.0)
+    def test_vision_model_override_requires_an_explicit_model_driver(self):
+        for driver in (None, "local_cv_ocr"):
+            environment = {"KT6_VISION_MODEL": "image-model"}
+            if driver:
+                environment["KT6_VISION_DRIVER"] = driver
+            with self.subTest(driver=driver), patch.dict(os.environ, environment, clear=True):
+                with self.assertRaisesRegex(ValueError, "KT6_VISION_MODEL"):
+                    app._create_canvas_vision_from_env()
 
-    def test_vision_companion_config_requires_endpoint_before_runtime_creation(self):
-        secret = "must-not-appear-in-errors"
-        for environment in (
-            {"KT6_VISION_API_KEY": secret},
-            {"KT6_VISION_TIMEOUT_SECONDS": "10"},
-        ):
-            with self.subTest(environment=tuple(environment)), patch.dict(
-                os.environ,
-                environment,
-                clear=True,
-            ), tempfile.TemporaryDirectory() as temp_dir:
-                runtime_dir = Path(temp_dir) / "runtime_data"
-                with self.assertRaises(ValueError) as raised:
-                    app.create_services(Path(temp_dir))
+    def test_unknown_and_removed_drivers_are_rejected(self):
+        for driver in ("unknown", "http"):
+            with self.subTest(driver=driver), patch.dict(
+                os.environ, {"KT6_VISION_DRIVER": driver}, clear=True
+            ), self.assertRaisesRegex(ValueError, "openai_compatible, local_cv_ocr, or hybrid"):
+                app._create_canvas_vision_from_env()
 
-                self.assertIn("KT6_VISION_ENDPOINT", str(raised.exception))
-                self.assertNotIn(secret, str(raised.exception))
-                self.assertFalse(runtime_dir.exists())
+    def test_model_vision_missing_api_configuration_fails_before_runtime_creation(self):
+        for driver in ("hybrid", "openai_compatible"):
+            for config in ({}, {"KT6_MODEL_API_KEY": "secret-never-in-errors"}):
+                environment = {**config, "KT6_VISION_DRIVER": driver}
+                with (
+                    self.subTest(driver=driver, config=tuple(config)),
+                    patch.dict(os.environ, environment, clear=True),
+                    tempfile.TemporaryDirectory() as temp_dir,
+                ):
+                    with self.assertRaisesRegex(ValueError, "KT6_MODEL_API") as raised:
+                        app.create_services(Path(temp_dir))
+                    self.assertNotIn("secret-never-in-errors", str(raised.exception))
+                    self.assertFalse((Path(temp_dir) / "runtime_data").exists())
 
-    def test_invalid_vision_timeouts_fail_fast_without_exposing_api_key(self):
-        secret = "must-not-appear-in-errors"
-        for timeout in ("not-a-number", "nan", "inf", "0", "-1", "300.1"):
-            with self.subTest(timeout=timeout), patch.dict(
-                os.environ,
-                {
-                    "KT6_VISION_ENDPOINT": "https://vision.internal/v1/topology",
-                    "KT6_VISION_API_KEY": secret,
-                    "KT6_VISION_TIMEOUT_SECONDS": timeout,
-                },
-                clear=True,
-            ), tempfile.TemporaryDirectory() as temp_dir:
-                runtime_dir = Path(temp_dir) / "runtime_data"
-                with self.assertRaises(ValueError) as raised:
-                    app.create_services(Path(temp_dir))
-
-                self.assertIn("KT6_VISION_TIMEOUT_SECONDS", str(raised.exception))
-                self.assertNotIn(secret, str(raised.exception))
-                self.assertFalse(runtime_dir.exists())
-
-    def test_invalid_vision_endpoint_fails_before_runtime_creation(self):
-        secret = "must-not-appear-in-errors"
-        with patch.dict(
-            os.environ,
-            {
-                "KT6_VISION_ENDPOINT": "http://vision.internal/v1/topology",
-                "KT6_VISION_API_KEY": secret,
-            },
-            clear=True,
-        ), tempfile.TemporaryDirectory() as temp_dir:
-            runtime_dir = Path(temp_dir) / "runtime_data"
-            with self.assertRaises(ValueError) as raised:
-                app.create_services(Path(temp_dir))
-
-            self.assertIn("HTTPS", str(raised.exception))
-            self.assertNotIn(secret, str(raised.exception))
-            self.assertFalse(runtime_dir.exists())
+    def test_vision_uses_the_shared_api_host_boundary(self):
+        environment = {
+            **self.model_environment(),
+            "KT6_VISION_DRIVER": "hybrid",
+            "KT6_MODEL_API_ALLOWED_HOSTS": "other.internal",
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            with self.assertRaisesRegex(ValueError, "allowed_hosts"):
+                app._create_canvas_vision_from_env()
 
     def test_request_body_is_json_only_and_bounded(self):
         handler = object.__new__(app.KT6Handler)

@@ -34,7 +34,7 @@ from .execution.verifier import (
 )
 from .execution.verifier_registry import OutcomeVerifierRegistry
 from .execution.url_policy import ExecutionURLPolicy
-from .http_canvas_vision import HTTPTopologyVisionAdapter
+from .openai_canvas_vision import OpenAICompatibleCanvasVisionAdapter
 from .hybrid_canvas_vision import HybridCanvasVisionAdapter
 from .local_cv_canvas_vision import LocalCVTopologyVisionAdapter
 from .memory import SQLiteMemoryStore
@@ -64,9 +64,7 @@ from .vision_result_cache import SQLiteVisionResultCacheStore
 ROOT = Path(__file__).resolve().parent.parent
 DEMO_DIR = ROOT / "demo"
 VISION_DRIVER_ENV = "KT6_VISION_DRIVER"
-VISION_ENDPOINT_ENV = "KT6_VISION_ENDPOINT"
-VISION_API_KEY_ENV = "KT6_VISION_API_KEY"
-VISION_TIMEOUT_ENV = "KT6_VISION_TIMEOUT_SECONDS"
+VISION_MODEL_ENV = "KT6_VISION_MODEL"
 UI_GRAPH_REASONER_ENDPOINT_ENV = "KT6_UI_GRAPH_REASONER_ENDPOINT"
 UI_GRAPH_REASONER_API_KEY_ENV = "KT6_UI_GRAPH_REASONER_API_KEY"
 UI_GRAPH_REASONER_ALLOWED_HOSTS_ENV = "KT6_UI_GRAPH_REASONER_ALLOWED_HOSTS"
@@ -80,9 +78,7 @@ MODEL_API_MODEL_ENV = "KT6_MODEL_API_MODEL"
 MODEL_API_ALLOWED_HOSTS_ENV = "KT6_MODEL_API_ALLOWED_HOSTS"
 MODEL_API_MAX_TOKENS_ENV = "KT6_MODEL_API_MAX_TOKENS"
 MODEL_API_TIMEOUT_ENV = "KT6_MODEL_API_TIMEOUT_SECONDS"
-DEFAULT_VISION_TIMEOUT_SECONDS = 30.0
 DEFAULT_UI_GRAPH_REASONER_TIMEOUT_SECONDS = 60.0
-MAX_VISION_TIMEOUT_SECONDS = 300.0
 MAX_JSON_REQUEST_BYTES = 32 * 1024 * 1024
 MAX_UI_GRAPH_REASONER_TIMEOUT_SECONDS = 300.0
 
@@ -115,76 +111,39 @@ def _create_canvas_vision_from_env() -> CanvasVisionAdapter | None:
     """Build the production vision adapter without exposing secret config."""
 
     driver = _optional_env(VISION_DRIVER_ENV)
-    endpoint = _optional_env(VISION_ENDPOINT_ENV)
-    api_key = _optional_env(VISION_API_KEY_ENV)
-    timeout_text = _optional_env(VISION_TIMEOUT_ENV)
-    if driver is None and endpoint is None:
-        configured_companions = [
-            name
-            for name, value in (
-                (VISION_API_KEY_ENV, api_key),
-                (VISION_TIMEOUT_ENV, timeout_text),
-            )
-            if value is not None
-        ]
-        if configured_companions:
-            names = ", ".join(configured_companions)
+    model = _optional_env(VISION_MODEL_ENV)
+    if driver is None:
+        if model is not None:
             raise ValueError(
-                f"{VISION_ENDPOINT_ENV} is required when {names} is configured"
+                f"{VISION_MODEL_ENV} requires {VISION_DRIVER_ENV}=hybrid or openai_compatible"
             )
         return None
 
-    selected_driver = (driver or "http").strip().lower()
+    selected_driver = driver.lower()
     if selected_driver not in {
-        "http",
+        "openai_compatible",
         "local_cv_ocr",
         "hybrid",
     }:
         raise ValueError(
-            f"{VISION_DRIVER_ENV} must be http, local_cv_ocr, or hybrid"
+            f"{VISION_DRIVER_ENV} must be openai_compatible, local_cv_ocr, or hybrid"
         )
 
     if selected_driver == "local_cv_ocr":
-        conflicting = [
-            name
-            for name, value in (
-                (VISION_ENDPOINT_ENV, endpoint),
-                (VISION_API_KEY_ENV, api_key),
-                (VISION_TIMEOUT_ENV, timeout_text),
-            )
-            if value is not None
-        ]
-        if conflicting:
+        if model is not None:
             raise ValueError(
-                f"{', '.join(conflicting)} must not be configured for local_cv_ocr"
+                f"{VISION_MODEL_ENV} must not be configured for local_cv_ocr"
             )
         return LocalCVTopologyVisionAdapter()
 
-    timeout_seconds = DEFAULT_VISION_TIMEOUT_SECONDS
-    if timeout_text is not None:
-        try:
-            timeout_seconds = float(timeout_text)
-        except ValueError:
-            raise ValueError(
-                f"{VISION_TIMEOUT_ENV} must be a finite number in (0, "
-                f"{MAX_VISION_TIMEOUT_SECONDS:g}]"
-            ) from None
-        if not math.isfinite(timeout_seconds) or not (
-            0 < timeout_seconds <= MAX_VISION_TIMEOUT_SECONDS
-        ):
-            raise ValueError(
-                f"{VISION_TIMEOUT_ENV} must be a finite number in (0, "
-                f"{MAX_VISION_TIMEOUT_SECONDS:g}]"
-            )
-
-    if endpoint is None:
+    client = _create_model_client_from_env(model_override=model)
+    if client is None:
         raise ValueError(
-            f"{VISION_ENDPOINT_ENV} is required for the http or hybrid vision driver"
+            f"KT6_MODEL_API_* settings are required for {VISION_DRIVER_ENV}={selected_driver}"
         )
-    model_adapter = HTTPTopologyVisionAdapter(
-        endpoint=endpoint,
-        api_key=api_key,
-        timeout_seconds=timeout_seconds,
+    model_adapter = OpenAICompatibleCanvasVisionAdapter(
+        client=client,
+        provider=_optional_env(MODEL_API_PROVIDER_ENV) or "",
     )
     if selected_driver == "hybrid":
         return HybridCanvasVisionAdapter(
@@ -225,6 +184,11 @@ def _canvas_vision_health(adapter: Any | None) -> dict[str, Any]:
         "routing_mode": "cv_first_adaptive" if hybrid else "single_adapter",
         "timeout_seconds": timeout_seconds,
     }
+    model_source = model_adapter or adapter
+    if isinstance(model_source, OpenAICompatibleCanvasVisionAdapter):
+        result["provider"] = model_source.provider
+        result["model"] = model_source.model
+        result["input_mode"] = "canvas_images_and_cv_context"
     if hybrid:
         result["local_adapter_id"] = str(
             getattr(adapter.local_adapter, "adapter_id", "unknown")
@@ -296,7 +260,9 @@ def _create_execution_url_policy_from_env() -> ExecutionURLPolicy:
     )
 
 
-def _create_action_planner_from_env() -> ActionPlanner | None:
+def _create_model_client_from_env(
+    *, model_override: str | None = None,
+) -> OpenAICompatibleChatClient | None:
     values = {
         MODEL_API_PROVIDER_ENV: _optional_env(MODEL_API_PROVIDER_ENV),
         MODEL_API_BASE_URL_ENV: _optional_env(MODEL_API_BASE_URL_ENV),
@@ -316,7 +282,7 @@ def _create_action_planner_from_env() -> ActionPlanner | None:
         return None
     missing = [name for name in required if values[name] is None]
     if missing:
-        raise ValueError(f"{', '.join(missing)} are required for the action planner")
+        raise ValueError(f"{', '.join(missing)} are required for the model API")
     allowed_hosts = tuple(
         host.strip()
         for host in (values[MODEL_API_ALLOWED_HOSTS_ENV] or "").split(",")
@@ -327,17 +293,23 @@ def _create_action_planner_from_env() -> ActionPlanner | None:
         timeout_seconds = float(values[MODEL_API_TIMEOUT_ENV] or "60")
     except ValueError as exc:
         raise ValueError("model API token and timeout settings are invalid") from exc
-    client = OpenAICompatibleChatClient(
+    return OpenAICompatibleChatClient(
         base_url=values[MODEL_API_BASE_URL_ENV] or "",
         api_key=values[MODEL_API_KEY_ENV] or "",
-        model=values[MODEL_API_MODEL_ENV] or "",
+        model=model_override or values[MODEL_API_MODEL_ENV] or "",
         timeout_seconds=timeout_seconds,
         max_tokens=max_tokens,
         allowed_hosts=allowed_hosts,
     )
+
+
+def _create_action_planner_from_env() -> ActionPlanner | None:
+    client = _create_model_client_from_env()
+    if client is None:
+        return None
     return OpenAIActionPlanner(
         client=client,
-        provider=values[MODEL_API_PROVIDER_ENV] or "",
+        provider=_optional_env(MODEL_API_PROVIDER_ENV) or "",
     )
 
 
