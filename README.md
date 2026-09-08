@@ -60,7 +60,7 @@ Side Panel 的默认输入。视觉、页面 API 和文本结果均不能自行�
 
 ```dotenv
 KT6_MODEL_API_PROVIDER=<provider-or-internal-gateway>
-KT6_MODEL_API_BASE_URL=https://<approved-model-gateway>/v1
+KT6_MODEL_API_BASE_URL=http://<approved-model-gateway>/v1
 KT6_MODEL_API_KEY=<secret>
 KT6_MODEL_API_MODEL=<exact-model-name>
 KT6_MODEL_API_ALLOWED_HOSTS=<approved-model-gateway-host>
@@ -74,7 +74,7 @@ Canvas 视觉使用另一套独立的 OpenAI-compatible API。要启用“本地
 ```dotenv
 KT6_VISION_DRIVER=hybrid
 KT6_VISION_API_PROVIDER=<vision-provider-or-internal-gateway>
-KT6_VISION_API_BASE_URL=https://<approved-vision-gateway>/v1
+KT6_VISION_API_BASE_URL=http://<approved-vision-gateway>/v1
 KT6_VISION_API_KEY=<secret>
 KT6_VISION_API_MODEL=<支持图片输入和JSON输出的模型名>
 KT6_VISION_API_ALLOWED_HOSTS=<approved-vision-gateway-host>
@@ -112,6 +112,8 @@ notepad .\.env
 
 `.env` 已被 Git 忽略。不要把真实密钥写入命令行、日志、suite、报告或提交记录。修改
 `.env` 后必须重启后端。测试区页面数据未经审批不得发送到公网模型服务。
+内网 OpenAI-compatible 网关允许使用 `http://`；非 loopback 地址仍必须把精确主机名或
+IP 写入对应的 `KT6_MODEL_API_ALLOWED_HOSTS` / `KT6_VISION_API_ALLOWED_HOSTS`。
 
 ## 启动 Browser Harness 演示
 

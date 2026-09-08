@@ -29,7 +29,7 @@
 
 ```dotenv
 KT6_MODEL_API_PROVIDER=<provider-or-internal-gateway>
-KT6_MODEL_API_BASE_URL=https://<approved-model-gateway>/v1
+KT6_MODEL_API_BASE_URL=http://<approved-model-gateway>/v1
 KT6_MODEL_API_KEY=<secret>
 KT6_MODEL_API_MODEL=<exact-model-name>
 KT6_MODEL_API_ALLOWED_HOSTS=<approved-model-gateway-host>
@@ -49,7 +49,7 @@ API/Hybrid 视觉使用独立的 OpenAI-compatible 网关、密钥、模型、�
 ```dotenv
 KT6_VISION_DRIVER=hybrid
 KT6_VISION_API_PROVIDER=<vision-provider-or-internal-gateway>
-KT6_VISION_API_BASE_URL=https://<approved-vision-gateway>/v1
+KT6_VISION_API_BASE_URL=http://<approved-vision-gateway>/v1
 KT6_VISION_API_KEY=<secret>
 KT6_VISION_API_MODEL=<支持image_url和JSON输出的模型名>
 KT6_VISION_API_ALLOWED_HOSTS=<approved-vision-gateway-host>
@@ -68,6 +68,8 @@ KT6_VISION_API_TIMEOUT_SECONDS=60
 
 远程模型 endpoint 必须经过数据出区审批；真实 key、截图、DOM/CDP、模型原文和真实运行
 证据不能提交 Git。
+内网模型与视觉网关允许使用明文 HTTP；远程地址仍需配置精确 `ALLOWED_HOSTS`，HTTP 不会
+自动放开任意目标主机。
 
 ## 3. 页面感知与执行
 

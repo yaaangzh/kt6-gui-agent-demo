@@ -45,9 +45,13 @@ notepad .\.env
 
 ### 3.1 通用规划/语义模型 API
 
+内网 OpenAI-compatible endpoint 可以使用 `http://`；非 loopback 主机仍需加入精确的
+`KT6_MODEL_API_ALLOWED_HOSTS`。视觉 API 同理使用独立的
+`KT6_VISION_API_ALLOWED_HOSTS`。
+
 ```dotenv
 KT6_MODEL_API_PROVIDER=<供应商或内网网关标识>
-KT6_MODEL_API_BASE_URL=https://<获批网关>/v1
+KT6_MODEL_API_BASE_URL=http://<获批网关>/v1
 KT6_MODEL_API_KEY=<本机密钥>
 KT6_MODEL_API_MODEL=<精确模型名>
 KT6_MODEL_API_ALLOWED_HOSTS=<获批网关精确主机名>
@@ -105,7 +109,7 @@ KT6_BROWSER_EXECUTION_DRIVER=browser_harness
 # 公网 HTTP(S) 无需逐域名配置；仅测试本机/RFC1918 页面时设为 1
 KT6_EXECUTION_ALLOW_PRIVATE_NETWORKS=0
 KT6_MODEL_API_PROVIDER=<供应商或内网网关标识>
-KT6_MODEL_API_BASE_URL=https://<获批网关>/v1
+KT6_MODEL_API_BASE_URL=http://<获批网关>/v1
 KT6_MODEL_API_KEY=<本机密钥>
 KT6_MODEL_API_MODEL=<精确模型名>
 KT6_MODEL_API_ALLOWED_HOSTS=<获批网关精确主机名>

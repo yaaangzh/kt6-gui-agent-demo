@@ -324,8 +324,6 @@ class OpenAICompatibleChatClient:
             raise ValueError("base_url must not contain credentials")
         if parsed.query or parsed.fragment:
             raise ValueError("base_url must not contain a query or fragment")
-        if parsed.scheme == "http" and not cls._is_loopback(host):
-            raise ValueError("remote model API must use HTTPS")
         normalized_host = host.rstrip(".").casefold()
         if not cls._is_loopback(host) and normalized_host not in allowed_hosts:
             raise ValueError("remote model API host is not in allowed_hosts")

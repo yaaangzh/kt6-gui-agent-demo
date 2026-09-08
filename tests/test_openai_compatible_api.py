@@ -98,9 +98,29 @@ class OpenAICompatibleChatClientTest(unittest.TestCase):
             "http://127.0.0.1:8000/v1/chat/completions",
         )
 
-    def test_rejects_remote_plain_http_and_credentials_in_url(self):
+    def test_accepts_allowed_remote_plain_http_and_rejects_credentials(self):
+        client = OpenAICompatibleChatClient(
+            base_url="http://models.example.test/v1",
+            api_key="key",
+            model="model",
+            allowed_hosts=["models.example.test"],
+        )
+        self.assertEqual(
+            client.endpoint,
+            "http://models.example.test/v1/chat/completions",
+        )
+        ip_client = OpenAICompatibleChatClient(
+            base_url="http://10.20.30.40:8000/v1",
+            api_key="key",
+            model="model",
+            allowed_hosts=["10.20.30.40"],
+        )
+        self.assertEqual(
+            ip_client.endpoint,
+            "http://10.20.30.40:8000/v1/chat/completions",
+        )
+
         for endpoint in (
-            "http://models.example.test/v1",
             "https://user:pass@models.example.test/v1",
             "https://models.example.test/v1?token=secret",
         ):

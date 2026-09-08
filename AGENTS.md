@@ -112,6 +112,8 @@ KT6_UI_TARS_API_ALLOWED_HOSTS
 
 不得把 API key 写进命令行、suite、运行 JSON、报告、健康检查或日志。远程 endpoint
 必须经过数据出区审批并使用精确 host 白名单；测试区页面数据默认不得发送到公网模型。
+获批内网 endpoint 可以使用 HTTP，协议本身不作为拒绝条件；非 loopback 地址仍必须命中
+对应的精确 host 白名单。
 
 ## 4. 分支专属边界
 
