@@ -44,8 +44,12 @@ class BrowserAction:
     """The fixed action vocabulary exposed to a browser runtime."""
 
     op: str
-    target: BrowserTarget | VisualTarget
+    target: BrowserTarget | VisualTarget | None
     text: str = ""
+    key: str = ""
+    direction: str = ""
+    amount: str = ""
+    option: str = ""
 
 
 @dataclass(frozen=True)

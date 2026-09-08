@@ -399,6 +399,94 @@ class URLAndPlanContractTest(unittest.TestCase):
                 with self.assertRaises(ActionPlanValidationError):
                     validator.validate(invalid)
 
+    def test_bounded_extended_actions_validate_with_required_outcomes(self):
+        validator = ActionPlanValidator()
+        target = {"query": "搜索框", "role": "textbox"}
+        cases = (
+            (
+                {"id": "step-1", "op": "double_click", "target": target},
+                {
+                    "id": "step-2",
+                    "op": "verify",
+                    "expected": {"type": "page_changed"},
+                },
+            ),
+            (
+                {"id": "step-1", "op": "hover", "target": target},
+                {
+                    "id": "step-2",
+                    "op": "wait",
+                    "expected": {
+                        "type": "element_visible",
+                        "target": {"query": "提示"},
+                    },
+                },
+            ),
+            (
+                {
+                    "id": "step-1",
+                    "op": "press_key",
+                    "target": target,
+                    "key": "Enter",
+                },
+                {
+                    "id": "step-2",
+                    "op": "verify",
+                    "expected": {"type": "page_changed"},
+                },
+            ),
+            (
+                {
+                    "id": "step-1",
+                    "op": "scroll",
+                    "direction": "down",
+                    "amount": "page",
+                },
+                {
+                    "id": "step-2",
+                    "op": "wait",
+                    "expected": {
+                        "type": "element_visible",
+                        "target": {"query": "页面底部"},
+                    },
+                },
+            ),
+            (
+                {
+                    "id": "step-1",
+                    "op": "select_option",
+                    "target": {"query": "时间范围", "role": "combobox"},
+                    "option": "近 7 天",
+                },
+                {
+                    "id": "step-2",
+                    "op": "verify",
+                    "expected": {
+                        "type": "selected",
+                        "target": {"query": "近 7 天", "role": "option"},
+                    },
+                },
+            ),
+        )
+        for action, outcome in cases:
+            with self.subTest(op=action["op"]):
+                plan = semantic_plan()
+                plan["steps"] = [action, outcome]
+                self.assertEqual(validator.validate(plan)["steps"][0]["op"], action["op"])
+
+    def test_extended_actions_reject_unbounded_parameters(self):
+        invalid_actions = (
+            {"id": "step-1", "op": "press_key", "target": {"query": "输入框"}, "key": "F12"},
+            {"id": "step-1", "op": "scroll", "direction": "left", "amount": "infinite"},
+            {"id": "step-1", "op": "select_option", "target": {"query": "范围"}, "option": ""},
+        )
+        for action in invalid_actions:
+            with self.subTest(op=action["op"]):
+                plan = semantic_plan()
+                plan["steps"][0] = action
+                with self.assertRaises(ActionPlanValidationError):
+                    ActionPlanValidator().validate(plan)
+
 
 class PlannerAndServiceTest(unittest.TestCase):
     def test_openai_planner_validates_model_action_plan(self):
@@ -419,6 +507,8 @@ class PlannerAndServiceTest(unittest.TestCase):
 
         self.assertEqual(result["schema_version"], ACTION_PLAN_SCHEMA_VERSION)
         self.assertIn("untrusted page data", client.messages[0]["content"])
+        self.assertIn("double_click", client.messages[0]["content"])
+        self.assertIn("select_option", client.messages[0]["content"])
         self.assertEqual(planner.last_plan_metrics["model_calls"], 1)
         self.assertLessEqual(planner.last_plan_metrics["projection_bytes"], 48 * 1024)
         self.assertGreater(planner.last_plan_metrics["projection_nodes"], 0)
@@ -639,6 +729,91 @@ class GenericScenarioRunnerTest(unittest.TestCase):
             raised.exception.error_code,
             "browser_harness_daemon_unavailable",
         )
+
+    def test_runner_builds_guarded_extended_browser_actions(self):
+        class Executor:
+            client = object()
+
+            def __init__(self):
+                self.actions = []
+
+            def execute(self, action):
+                self.actions.append(action)
+                backend_node_id = (
+                    action.target.backend_node_id
+                    if isinstance(action.target, BrowserTarget)
+                    else None
+                )
+                return BrowserExecutionResult(True, "", backend_node_id=backend_node_id)
+
+        executor = Executor()
+        runner = ScenarioRunner(
+            page_perception=object(),
+            browser_executor=executor,
+            grounders=TargetGrounderRegistry(),
+            verifiers=OutcomeVerifierRegistry(
+                [], ui_graph_verifier=UIGraphOutcomeVerifier()
+            ),
+            url_policy=public_url_policy(),
+        )
+        capture_index = 0
+
+        def capture(_label, **_kwargs):
+            nonlocal capture_index
+            capture_index += 1
+            capture_id = f"extended-{capture_index}"
+            current_graph = graph(capture_id)
+            return {"capture_id": capture_id}, current_graph, {}
+
+        for op in ("double_click", "hover"):
+            runner._pointer_action(
+                {"id": f"step-{capture_index + 1}", "op": op, "target": {"query": "AP_001 详情"}},
+                pending=None,
+                capture=capture,
+            )
+        runner._press_key(
+            {
+                "id": "step-key",
+                "op": "press_key",
+                "target": {"query": "AP_001 详情"},
+                "key": "Enter",
+            },
+            pending=None,
+            capture=capture,
+        )
+        runner._scroll(
+            {"id": "step-scroll", "op": "scroll", "direction": "down", "amount": "page"},
+            pending=None,
+            capture=capture,
+        )
+
+        def select_capture(_label, **_kwargs):
+            nonlocal capture_index
+            capture_index += 1
+            capture_id = f"select-{capture_index}"
+            current_graph = graph(capture_id)
+            current_graph["nodes"][0]["name"] = "时间范围"
+            current_graph["nodes"][0]["role"] = "combobox"
+            return {"capture_id": capture_id}, current_graph, {}
+
+        runner._select_option(
+            {
+                "id": "step-select",
+                "op": "select_option",
+                "target": {"query": "时间范围", "role": "combobox"},
+                "option": "近 7 天",
+            },
+            pending=None,
+            capture=select_capture,
+        )
+
+        self.assertEqual(
+            [action.op for action in executor.actions],
+            ["double_click", "hover", "press_key", "scroll", "select_option"],
+        )
+        self.assertEqual(executor.actions[2].key, "Enter")
+        self.assertIsNone(executor.actions[3].target)
+        self.assertEqual(executor.actions[4].option, "近 7 天")
 
     def test_runner_executes_real_grounded_click_and_verifies_new_graph(self):
         class Client:
@@ -933,6 +1108,9 @@ class FailureCategoryAndGenericVerifierTest(unittest.TestCase):
             "browser_page_changed": PAGE_CHANGED,
             "browser_target_occluded": EXECUTION_FAILED,
             "browser_session_target_changed": EXECUTION_FAILED,
+            "browser_key_invalid": EXECUTION_FAILED,
+            "browser_scroll_invalid": EXECUTION_FAILED,
+            "browser_select_option_missing": EXECUTION_FAILED,
             "execution_cancelled": CANCELLED,
         }
         for code, category in cases.items():

@@ -55,6 +55,18 @@ class DOMActionAPITest(unittest.TestCase):
                 self.assertEqual(
                     health["page_api"]["mode"], "explicit_read_only_adapter"
                 )
+                self.assertEqual(
+                    health["browser_execution"]["supported_operations"],
+                    [
+                        "type",
+                        "click",
+                        "double_click",
+                        "hover",
+                        "press_key",
+                        "scroll",
+                        "select_option",
+                    ],
+                )
                 unavailable_plan = self.post(
                     base_url,
                     "/api/execution/plans",

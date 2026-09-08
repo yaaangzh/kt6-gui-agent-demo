@@ -13,7 +13,7 @@
 | `eval-ui-tars` | 通用规划模型 API + UI-TARS 截图定位 API |
 | `ui-graph-textflow-cdp` | CDP、多源 UI Graph、操作 DAG 安全校验 |
 | `feature/browser-executor` | 当前 Tab + 自然语言计划经 ScenarioRunner 派发固定 type/click 并验证结果 |
-| `feature/eval-browser-harness` | 日常 Chrome 当前 Tab + Browser Harness，经 ScenarioRunner 派发固定 type/click 并验证结果 |
+| `feature/eval-browser-harness` | 日常 Chrome 当前 Tab + Browser Harness，经 ScenarioRunner 派发固定、有界动作并验证结果 |
 | `br_omniParser` | 历史回归，不纳入当前三方案结论 |
 
 目标测试目录：`D:\04project\FreeStyle_Copilot_KT6_demo`。页面数据、截图、DOM/CDP、
@@ -116,7 +116,7 @@ KT6_MODEL_API_ALLOWED_HOSTS=<获批网关精确主机名>
 ```
 
 规划模型只使用 `KT6_MODEL_API_*`。Browser Harness 提供当前 Tab 的实时 DOM/CDP 感知
-和固定 type/click 传输；Canvas 像素证据需要时才显式启用
+和固定、有界动作传输；Canvas 像素证据需要时才显式启用
 上述 `local_cv_ocr` / `hybrid` / `openai_compatible` 识别，没有 `execution_fixture` 专用识别器。公网
 HTTP(S) 目标无需逐域名配置；每次初始导航、当前页面、重定向和新标签绑定都会重新做
 DNS/网络范围校验，并兼容代理常用的 `198.18.0.0/15` synthetic DNS（仅域名解析结果，
@@ -309,9 +309,11 @@ allowed hosts、token 上限和超时；只配置规划 API 时不会启用视�
 验证轮询使用递增间隔，避免无期限等待时高频重复全页识别；重连仅发生在新绑定边界，
 不重放动作。
 
-当前固定动作词表只测试 `type` 与 `click`，不支持滚动、快捷键、任意 CDP 或 JavaScript。
-`type` 只能操作普通 INPUT/TEXTAREA，拒绝 password/file/hidden、disabled 和 readonly，
-并必须紧跟同目标、同文本的 `input_value` 确定性验证。可使用独立 Python 3.12 环境：
+当前固定动作词表支持 `click`、`double_click`、`hover`、`type`、受限 `press_key`、有界
+`scroll` 和原生 DOM `select_option`。按键只允许 Enter/Escape；滚动只允许 up/down 与
+small/page；选择只允许唯一原生 SELECT option，最多 100 项。`type` 只能操作普通
+INPUT/TEXTAREA，拒绝 password/file/hidden、disabled 和 readonly，并必须紧跟同目标、
+同文本的 `input_value` 确定性验证。可使用独立 Python 3.12 环境：
 
 ```powershell
 py -3.12 -m venv .venv-browser-executor
@@ -336,7 +338,7 @@ python -m unittest `
 ```
 
 实机闭环是“任意公网 URL + 自然语言任务 → 统一页面感知 → LLM 生成 `kt6.action-plan.v1`
-→ 实时 Grounding → 受控 type/click → 重新感知 → 确定性 Verify”。计划中没有 UI Graph、
+→ 实时 Grounding → 受控有界动作 → 重新感知 → 确定性 Verify”。计划中没有 UI Graph、
 backend node id、selector 或坐标，也不再依赖固定测试页或规则解析器：
 
 ```powershell
@@ -375,7 +377,7 @@ runtime_data/execution_scenarios/<run_id>/
   result.json
 ```
 
-`result.json` 必须为 `status=success`，每个 step 均为 `completed`，每个 type/click 的后续
+`result.json` 必须为 `status=success`，每个 step 均为 `completed`，每个浏览器动作的后续
 verify/wait 都必须由新 capture 通过确定性 Verifier。真实浏览器验收只从 Side Panel
 发起；自动化测试覆盖精确 Tab 选择、Browser Harness 适配、计划契约、Grounding、安全
 执行和 Verifier，不维护独立 Runner 页面。
@@ -484,7 +486,7 @@ Side Panel、Action Plan、ScenarioRunner、DOM API 与启动入口共 57 项通
 - 后续
   `Page.getFrameTree`、`DOMSnapshot.captureSnapshot`、`Accessibility.getFullAXTree`、
   `Page.captureScreenshot` 与 `DOM.describeNode`、`DOM.getBoxModel`、
-  `DOM.getNodeForLocation`、type/click 都通过 Browser Harness 已绑定的同一 Tab；KT6
+  `DOM.getNodeForLocation`、所有固定动作都通过 Browser Harness 已绑定的同一 Tab；KT6
   适配器拒绝模型生成的任意按键序列、JavaScript、Python 和 raw CDP。
 
 双 Tab 实机验收至少检查：
@@ -492,7 +494,7 @@ Side Panel、Action Plan、ScenarioRunner、DOM API 与启动入口共 57 项通
 1. Side Panel 所在 Tab 与 Browser Harness 绑定的 Target 唯一对应；
 2. 只有 Side Panel 选中的 Target Tab 被感知和操作；
 3. Capture/UI Graph 中的 URL、DOM、截图都来自该 Target Tab；
-4. BrowserExecutor 的 type/click 真正发生在该 Target Tab；
+4. BrowserExecutor 的固定、有界动作真正发生在该 Target Tab；
 5. click 后重新感知，Verifier 能判断成功或明确失败；
 6. 结果落到 SUCCESS 或明确失败类别，而不是线程卡死 / 状态一直 running。
 

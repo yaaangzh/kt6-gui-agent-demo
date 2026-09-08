@@ -160,8 +160,10 @@ E2E 只替换规划决策，不 Mock 页面世界；不得提交或使用 `mock_
 和确定性 Verifier，只替换浏览器传输层。用户正常打开日常 Chrome，在
 `chrome://inspect/#remote-debugging` 显式允许当前实例后，由本机 Browser Harness daemon
 连接；不得创建专用 profile、固定调试端口或注入 Chrome 启动参数。扩展只选择当前 Tab
-并承载自然语言输入与确认，不 attach、不代发 CDP。Browser Harness 只通过 KT6 固定
-type/click 适配器执行，不允许模型生成的 helper、JavaScript、Python 或 raw CDP 进入主链。
+并承载自然语言输入与确认，不 attach、不代发 CDP。Browser Harness 只通过 KT6 固定、
+有界动作适配器执行；允许 click、double_click、hover、type、Enter/Escape、上下有界滚动
+和原生 select_option，不允许模型生成的 helper、任意快捷键、JavaScript、Python、上传或
+raw CDP 进入主链。
 该执行入口的规划模型使用通用 `KT6_MODEL_API_*`；视觉模型使用独立的
 `KT6_VISION_API_PROVIDER/BASE_URL/KEY/MODEL/ALLOWED_HOSTS/MAX_TOKENS/TIMEOUT_SECONDS`，不得
 回退或复用规划 API。普通 DOM 页面不配置视觉驱动；Canvas 分析可选本地 `local_cv_ocr`、
@@ -189,8 +191,9 @@ type/click 适配器执行，不允许模型生成的 helper、JavaScript、Pyth
 - 原始 `actionable=true`、business_id、element_id 不能绕过候选门禁。
 - 页面 API 只读取显式 `window.__KT6_PAGE_ADAPTER__`，不拦截任意 fetch/XHR。
 - CDP 只允许 `localhost`、`127.0.0.1` 或 `::1`。
-- 浏览器执行默认关闭，只允许固定 `type`/`click`；`type` 仅限普通文本控件并要求
-  输入值确定性验证。禁止自修改 helper、domain skill、任意 raw CDP、任意按键序列和
+- 浏览器执行默认关闭，只允许固定、有界动作词表；`type` 仅限普通文本控件并要求
+  输入值确定性验证，按键仅允许 Enter/Escape，滚动仅允许上下固定档位，选择仅允许唯一
+  原生 SELECT option。禁止自修改 helper、domain skill、任意 raw CDP、任意快捷键和
   JavaScript 进入正式执行链。`feature/browser-executor` 只能由用户点击扩展后 attach
   当前 Tab；`feature/eval-browser-harness` 只能使用用户在 Chrome UI 中显式授权的日常
   Chrome 实例。两条路线都不能依赖专用 profile、固定远程调试端口或运行时注入启动参数。

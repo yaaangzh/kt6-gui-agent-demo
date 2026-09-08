@@ -5,7 +5,7 @@ KT6 / FreeStyleCopilot 是面向无线网络运维场景的工程原型。它把
 
 当前 `feature/eval-browser-harness` 分支复用用户已经打开的日常 Chrome。Chrome Side
 Panel 只选择当前标签页并承载任务输入和确认；Browser Harness 负责连接该标签页、采集
-DOM/CDP/截图以及执行固定 `type`/`click`。系统不会创建专用浏览器 profile，也不依赖固定
+DOM/CDP/截图以及执行 KT6 固定、有界的浏览器动作。系统不会创建专用浏览器 profile，也不依赖固定
 远程调试端口。
 
 ## 当前执行链
@@ -19,12 +19,17 @@ DOM/CDP/截图以及执行固定 `type`/`click`。系统不会创建专用浏览
 → 任务相关的有界 UI Graph → API 生成 kt6.action-plan.v1
 → 用户检查并确认
 → 每步重新采集和 Grounding
-→ 固定 type/click 适配器执行
+→ 固定、有界 Browser Harness 适配器执行
 → 新 capture + OutcomeVerifier 确定性验证
 ```
 
 Action Plan 只保存语义目标，不保存临时 Target ID、backend node id、selector 或坐标。
 点击已派发也不代表业务成功；只有后续新页面证据通过对应 Verifier，任务才进入成功状态。
+
+当前动作词表包括 `click`、`double_click`、`hover`、`type`、受限 `press_key`、有界
+`scroll` 和原生 DOM `select_option`。按键只允许 `Enter` / `Escape`；滚动只允许上下方向
+以及 `small` / `page` 两档。每个动作后必须紧跟 `verify` 或 `wait`。标签页绑定与截图由
+系统内部完成，不作为模型动作；文件上传、任意快捷键、JavaScript 和 raw CDP 不开放。
 
 ## 页面感知
 
@@ -144,7 +149,7 @@ python -m pip install -r requirements-browser-executor.txt
 动作后的 `verify` / `wait` 没有业务截止时间：Runner 会持续 fresh capture，直到确定性
 Verifier 判断成功。需要停止时在 Side Panel 点击“取消执行”；取消会在当前 Browser Harness
 调用返回后生效。Browser Harness 的单次 IPC/CDP 存活超时仍保留，用于识别连接中断，且
-任何超时都不会自动重放 `type` 或 `click`。
+任何超时都不会自动重放已派发动作。
 
 为避免长等待拖慢系统，未满足条件的轮询 capture 只在内存中短暂保留，验证失败立即丢弃
 并删除临时 Canvas 图片；最多同时保留 2 份。只有动作证据和最终验证成功的 capture 落库。
@@ -168,6 +173,8 @@ Invoke-RestMethod http://127.0.0.1:8787/api/execution/health
 - UI Graph 和所有节点始终保持 `safe_for_execution=false`。
 - DOM Grounding 必须得到唯一、可见、未禁用且带正整数 backend node id 的候选。
 - `type` 仅允许普通 textbox/searchbox/combobox，拒绝密码、文件、隐藏和只读控件。
+- `press_key` 只允许对 fresh DOM 目标发送 `Enter` / `Escape`；`scroll` 只能操作当前绑定 viewport。
+- `select_option` 只接受唯一原生 `SELECT` option，最多检查 100 项，并使用固定键序列选择。
 - `click` 前重新校验 URL、frame、节点身份、属性、box model、viewport 和 hit-test。
 - 视觉点击必须绑定当前 Canvas backend node、当前截图坐标空间和唯一高置信目标。
 - 不接受模型生成的 JavaScript、Python、任意按键序列、helper 或 raw CDP。

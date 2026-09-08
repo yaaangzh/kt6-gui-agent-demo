@@ -199,14 +199,32 @@ class ScenarioRunner:
                         "current_step_index": step_index,
                     }
                 )
-                if step["op"] == "click":
-                    result, pending = self._click(
+                if step["op"] in {"click", "double_click", "hover"}:
+                    result, pending = self._pointer_action(
                         step,
                         pending=pending,
                         capture=capture,
                     )
                 elif step["op"] == "type":
                     result, pending = self._type(
+                        step,
+                        pending=pending,
+                        capture=capture,
+                    )
+                elif step["op"] == "press_key":
+                    result, pending = self._press_key(
+                        step,
+                        pending=pending,
+                        capture=capture,
+                    )
+                elif step["op"] == "scroll":
+                    result, pending = self._scroll(
+                        step,
+                        pending=pending,
+                        capture=capture,
+                    )
+                elif step["op"] == "select_option":
+                    result, pending = self._select_option(
                         step,
                         pending=pending,
                         capture=capture,
@@ -286,7 +304,7 @@ class ScenarioRunner:
             raise ScenarioExecutionError("scenario_capture_incomplete")
         return snapshot, graph, dict(ingested.get("summary", {}))
 
-    def _click(
+    def _pointer_action(
         self,
         step: Mapping[str, Any],
         *,
@@ -342,7 +360,7 @@ class ScenarioRunner:
             grounded = fresh_grounded
             before = fresh
             graph = fresh_graph
-        action = BrowserAction("click", grounded)
+        action = BrowserAction(str(step["op"]), grounded)
         token = self.action_guard.authorize(action)
         self.action_guard.consume(token, action)
         execution = self.browser_executor.execute(action)
@@ -362,6 +380,127 @@ class ScenarioRunner:
                 "before": before,
                 "before_graph": graph,
                 "uses_vision": isinstance(grounded, VisualTarget),
+            },
+        )
+
+    def _press_key(
+        self,
+        step: Mapping[str, Any],
+        *,
+        pending: dict[str, Any] | None,
+        capture: Callable[..., tuple[dict[str, Any], dict[str, Any], dict[str, Any]]],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        if pending is not None:
+            raise ScenarioExecutionError("scenario_previous_outcome_unverified")
+        _before, graph, _ = capture(f"{step['id']}-before")
+        grounded = self.grounders.dom.resolve(step["target"], graph)
+        fresh, fresh_graph, _ = capture(f"{step['id']}-fresh")
+        fresh_grounded = self.grounders.dom.resolve(step["target"], fresh_graph)
+        if self.action_guard.target_fingerprint(
+            grounded
+        ) != self.action_guard.target_fingerprint(fresh_grounded):
+            raise ScenarioExecutionError("scenario_grounding_changed")
+        action = BrowserAction("press_key", fresh_grounded, key=step["key"])
+        token = self.action_guard.authorize(action)
+        self.action_guard.consume(token, action)
+        execution = self.browser_executor.execute(action)
+        if not execution.success:
+            raise ScenarioExecutionError(execution.error_code)
+        return (
+            {
+                "grounder": "dom_ui_graph",
+                "capture_id": str(fresh_graph.get("capture_id", "")),
+                "graph_id": str(fresh_graph.get("graph_id", "")),
+                "target_node_id": fresh_grounded.node_id,
+                "key": step["key"],
+                "execution_status": "executed_pending_verification",
+            },
+            {
+                "before": fresh,
+                "before_graph": fresh_graph,
+                "uses_vision": False,
+            },
+        )
+
+    def _scroll(
+        self,
+        step: Mapping[str, Any],
+        *,
+        pending: dict[str, Any] | None,
+        capture: Callable[..., tuple[dict[str, Any], dict[str, Any], dict[str, Any]]],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        if pending is not None:
+            raise ScenarioExecutionError("scenario_previous_outcome_unverified")
+        before, graph, _ = capture(f"{step['id']}-before")
+        action = BrowserAction(
+            "scroll",
+            None,
+            direction=step["direction"],
+            amount=step["amount"],
+        )
+        token = self.action_guard.authorize(action)
+        self.action_guard.consume(token, action)
+        execution = self.browser_executor.execute(action)
+        if not execution.success:
+            raise ScenarioExecutionError(execution.error_code)
+        return (
+            {
+                "grounder": "bound_viewport",
+                "capture_id": str(graph.get("capture_id", "")),
+                "graph_id": str(graph.get("graph_id", "")),
+                "direction": step["direction"],
+                "amount": step["amount"],
+                "execution_status": "executed_pending_verification",
+            },
+            {
+                "before": before,
+                "before_graph": graph,
+                "uses_vision": False,
+            },
+        )
+
+    def _select_option(
+        self,
+        step: Mapping[str, Any],
+        *,
+        pending: dict[str, Any] | None,
+        capture: Callable[..., tuple[dict[str, Any], dict[str, Any], dict[str, Any]]],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        if pending is not None:
+            raise ScenarioExecutionError("scenario_previous_outcome_unverified")
+        _before, graph, _ = capture(f"{step['id']}-before")
+        grounded = self.grounders.dom.resolve(step["target"], graph)
+        if grounded.role not in {"combobox", "listbox"}:
+            raise ScenarioExecutionError("scenario_select_requires_dom_select")
+        fresh, fresh_graph, _ = capture(f"{step['id']}-fresh")
+        fresh_grounded = self.grounders.dom.resolve(step["target"], fresh_graph)
+        if self.action_guard.target_fingerprint(
+            grounded
+        ) != self.action_guard.target_fingerprint(fresh_grounded):
+            raise ScenarioExecutionError("scenario_grounding_changed")
+        action = BrowserAction(
+            "select_option",
+            fresh_grounded,
+            option=step["option"],
+        )
+        token = self.action_guard.authorize(action)
+        self.action_guard.consume(token, action)
+        execution = self.browser_executor.execute(action)
+        if not execution.success:
+            raise ScenarioExecutionError(execution.error_code)
+        return (
+            {
+                "grounder": "dom_ui_graph",
+                "capture_id": str(fresh_graph.get("capture_id", "")),
+                "graph_id": str(fresh_graph.get("graph_id", "")),
+                "target_node_id": fresh_grounded.node_id,
+                "option": step["option"],
+                "execution_status": "executed_pending_verification",
+            },
+            {
+                "before": fresh,
+                "before_graph": fresh_graph,
+                "uses_vision": False,
             },
         )
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import nullcontext
 import os
 from pathlib import Path
 import tempfile
@@ -221,6 +222,100 @@ class TabHarness:
 
 
 class BrowserHarnessClientTest(unittest.TestCase):
+    def test_bounded_key_scroll_double_click_and_native_select_dispatch(self):
+        target_url = "https://nce.example/devices"
+        harness = SingleTargetHarness(target_url)
+        pointer_calls = []
+        input_events = []
+
+        option_nodes = [
+            {
+                "backendNodeId": 702,
+                "nodeName": "OPTION",
+                "attributes": ["value", "today"],
+                "children": [{"nodeName": "#text", "nodeValue": "今天"}],
+            },
+            {
+                "backendNodeId": 703,
+                "nodeName": "OPTION",
+                "attributes": ["value", "last-7-days"],
+                "children": [{"nodeName": "#text", "nodeValue": "近 7 天"}],
+            },
+        ]
+
+        def cdp(method, **params):
+            if method == "Target.getTargets":
+                return {
+                    "targetInfos": [
+                        {"targetId": "target-1", "type": "page", "url": target_url}
+                    ]
+                }
+            if method == "Page.getFrameTree":
+                return {"frameTree": {"frame": {"id": "frame-main", "url": target_url}}}
+            if method == "DOM.describeNode":
+                return {
+                    "node": {
+                        "backendNodeId": 701,
+                        "nodeName": "SELECT",
+                        "attributes": ["id", "time-range"],
+                        "children": option_nodes,
+                    }
+                }
+            if method == "DOM.getBoxModel":
+                return {"model": {"content": [20, 30, 220, 30, 220, 70, 20, 70]}}
+            if method == "Page.getLayoutMetrics":
+                return {"cssVisualViewport": {"clientWidth": 1000, "clientHeight": 800}}
+            if method == "DOM.getNodeForLocation":
+                return {"backendNodeId": 701}
+            if method in {"DOM.focus", "Input.dispatchMouseEvent", "Input.dispatchKeyEvent"}:
+                input_events.append((method, dict(params)))
+                return {}
+            self.fail(f"unexpected CDP method: {method}")
+
+        client = BrowserHarnessClient(
+            cdp_url="http://127.0.0.1:9222",
+            workspace=Path("runtime_data/browser-harness-test"),
+            url_policy=execution_url_policy(),
+            cdp_call=cdp,
+            click_call=lambda x, y, clicks=1: pointer_calls.append((x, y, clicks)),
+            switch_tab_call=harness.switch_tab,
+            current_tab_call=harness.current_tab,
+        )
+        target = BrowserTarget(
+            node_id="cdp:time-range",
+            backend_node_id=701,
+            frame_id="frame-main",
+            frame_url=target_url,
+            page_url=target_url,
+            click_backend_node_id=701,
+            dom_id="time-range",
+            accessible_name="时间范围",
+            role="combobox",
+            expected_attributes=(),
+            owner_business_id="",
+            action_id="",
+        )
+        client.bind_page_target(target_url)
+
+        client.click_backend_node(target, clicks=2)
+        client.press_key_backend_node(target, "Escape")
+        client.scroll_viewport("down", "page")
+        client.select_option_backend_node(target, "近 7 天")
+
+        self.assertEqual(pointer_calls, [(120.0, 50.0, 2)])
+        keys = [
+            params["key"]
+            for method, params in input_events
+            if method == "Input.dispatchKeyEvent" and params["type"] == "keyDown"
+        ]
+        self.assertEqual(keys, ["Escape", "Home", "ArrowDown", "Enter"])
+        wheels = [
+            params
+            for method, params in input_events
+            if method == "Input.dispatchMouseEvent" and params["type"] == "mouseWheel"
+        ]
+        self.assertEqual(wheels[0]["deltaY"], 640.0)
+
     def test_click_revalidates_an_inherited_descendant_accessible_name(self):
         target_url = "https://nce.example/devices"
         harness = SingleTargetHarness(target_url)
@@ -1662,7 +1757,7 @@ class BrowserExecutionBoundaryTest(unittest.TestCase):
             decision.expected_attributes,
         )
 
-    def test_executor_only_accepts_click(self):
+    def test_executor_rejects_an_unsupported_action(self):
         client = BrowserHarnessClient(
             cdp_url="http://127.0.0.1:9222",
             workspace=Path("runtime_data/browser-harness-test"),
@@ -1677,6 +1772,54 @@ class BrowserExecutionBoundaryTest(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, "unsupported_browser_action")
+
+    def test_executor_dispatches_each_bounded_extended_action(self):
+        class Client:
+            exclusive_session = staticmethod(nullcontext)
+
+            def __init__(self):
+                self.calls = []
+
+            def click_backend_node(self, target, *, clicks=1):
+                self.calls.append(("click", target, clicks))
+                return {"backend_node_id": target.backend_node_id}
+
+            def hover_backend_node(self, target):
+                self.calls.append(("hover", target))
+                return {"backend_node_id": target.backend_node_id}
+
+            def press_key_backend_node(self, target, key):
+                self.calls.append(("press_key", target, key))
+                return {"backend_node_id": target.backend_node_id}
+
+            def scroll_viewport(self, direction, amount):
+                self.calls.append(("scroll", direction, amount))
+                return {"backend_node_id": None}
+
+            def select_option_backend_node(self, target, option):
+                self.calls.append(("select_option", target, option))
+                return {"backend_node_id": target.backend_node_id}
+
+        client = Client()
+        executor = HarnessBrowserExecutor(client)
+        target = browser_target()
+        actions = (
+            BrowserAction("double_click", target),
+            BrowserAction("hover", target),
+            BrowserAction("press_key", target, key="Enter"),
+            BrowserAction("scroll", None, direction="down", amount="page"),
+            BrowserAction("select_option", target, option="近 7 天"),
+        )
+
+        for action in actions:
+            with self.subTest(op=action.op):
+                self.assertTrue(executor.execute(action).success)
+
+        self.assertEqual(client.calls[0], ("click", target, 2))
+        self.assertEqual(client.calls[1], ("hover", target))
+        self.assertEqual(client.calls[2], ("press_key", target, "Enter"))
+        self.assertEqual(client.calls[3], ("scroll", "down", "page"))
+        self.assertEqual(client.calls[4], ("select_option", target, "近 7 天"))
 
     def test_resolver_requires_exact_cdp_dom_binding(self):
         resolver = UIGraphTargetResolver()

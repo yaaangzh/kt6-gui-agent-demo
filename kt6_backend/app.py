@@ -585,7 +585,15 @@ class KT6Handler(SimpleHTTPRequestHandler):
                             if services.safe_dom_actions.executor is not None
                             else None
                         ),
-                        "supported_operations": ["type", "click"],
+                        "supported_operations": [
+                            "type",
+                            "click",
+                            "double_click",
+                            "hover",
+                            "press_key",
+                            "scroll",
+                            "select_option",
+                        ],
                         "raw_cdp_exposed": False,
                         "javascript_exposed": False,
                         "live_revalidation": [

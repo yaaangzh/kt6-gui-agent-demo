@@ -324,9 +324,21 @@ class ExecutionScenarioService:
         if step["op"] == "click":
             target = step["target"]
             return f"点击：{target['query']}"
+        if step["op"] == "double_click":
+            return f"双击：{step['target']['query']}"
+        if step["op"] == "hover":
+            return f"悬停到：{step['target']['query']}"
         if step["op"] == "type":
             target = step["target"]
             return f"在“{target['query']}”中输入：{step['text']}"
+        if step["op"] == "press_key":
+            return f"在“{step['target']['query']}”上按：{step['key']}"
+        if step["op"] == "scroll":
+            direction = "向下" if step["direction"] == "down" else "向上"
+            amount = "一页" if step["amount"] == "page" else "少量"
+            return f"{direction}滚动：{amount}"
+        if step["op"] == "select_option":
+            return f"在“{step['target']['query']}”中选择：{step['option']}"
         expected = step["expected"]
         if expected["type"] in {"page_changed", "url_changed"}:
             return "确认页面已经跳转"

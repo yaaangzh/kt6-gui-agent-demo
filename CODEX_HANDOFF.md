@@ -13,7 +13,7 @@
 → KT6 fresh capture + UI Graph
 → OpenAI-compatible API 生成 Action Plan
 → 人在环确认
-→ 固定 type/click
+→ 固定、有界 Browser Harness 动作
 → 新 capture + 确定性结果验证
 ```
 
@@ -91,7 +91,7 @@ DOM、CDP、Canvas、可选 page API 和文本证据融合到统一 UI Graph。
 业务流程不设置页面等待截止时间。`verify` 和 `wait` 持续 fresh capture，直到确定性条件
 成立或用户通过 Side Panel 取消；取消状态依次为 `cancelling`、`cancelled`。Browser Harness
 每次 IPC/CDP 调用仍保留短存活超时，通信失败会明确结束运行，且不会自动重放已经派发的
-`type` / `click`。
+浏览器动作。
 
 任何标签页切换、非预期导航、目标歧义、页面截断、目标遮挡或身份变化都应进入明确失败
 状态；验证暂未满足只继续观察，不得把派发回执当成成功。
@@ -201,7 +201,9 @@ python -m unittest discover -s tests
 - Canvas 视觉识别结果默认是分析证据，生产使用前需要黄金数据准确率评测。
 - 同一后端只接受一个浏览器规划或执行会话；busy 请求不排队。
 - 页面导航、标签页变化或 DOM 重建会使当前绑定失效，必须重新采集或重新生成计划。
-- 后端只支持固定 `type`/`click`；不增加任意 JavaScript、Python、按键序列或 raw CDP。
+- 后端支持固定 `click`、`double_click`、`hover`、`type`、受限 `press_key`、有界
+  `scroll` 和原生 DOM `select_option`。按键仅 `Enter` / `Escape`，滚动仅上下和
+  `small` / `page`；不开放任意 JavaScript、Python、快捷键、上传或 raw CDP。
 
 ## 8. Git 与接手检查
 

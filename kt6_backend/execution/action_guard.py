@@ -56,8 +56,12 @@ class ScenarioActionGuard:
         payload = {
             "op": action.op,
             "text": action.text,
+            "key": action.key,
+            "direction": action.direction,
+            "amount": action.amount,
+            "option": action.option,
             "type": type(action.target).__name__,
-            "target": asdict(action.target),
+            "target": asdict(action.target) if action.target is not None else None,
         }
         return hashlib.sha256(
             json.dumps(

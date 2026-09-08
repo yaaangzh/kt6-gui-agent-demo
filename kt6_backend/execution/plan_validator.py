@@ -21,6 +21,21 @@ class ActionPlanValidator:
 
     MAX_STEPS = 12
     MAX_INPUT_TEXT = 1_000
+    MAX_OPTION_TEXT = 300
+    _ACTION_OPERATIONS = frozenset(
+        {
+            "click",
+            "double_click",
+            "hover",
+            "type",
+            "press_key",
+            "scroll",
+            "select_option",
+        }
+    )
+    _ALLOWED_KEYS = frozenset({"Enter", "Escape"})
+    _SCROLL_DIRECTIONS = frozenset({"up", "down"})
+    _SCROLL_AMOUNTS = frozenset({"small", "page"})
     _PLAN_KEYS = frozenset(
         {"schema_version", "scenario_id", "start_url", "user_request", "steps"}
     )
@@ -86,9 +101,11 @@ class ActionPlanValidator:
         if step_id != f"step-{index}":
             raise ActionPlanValidationError("action_plan_step_sequence_invalid")
         op = compact_text(value.get("op"), 50)
-        if op == "click":
+        if op in {"click", "double_click", "hover"}:
             if set(value) != {"id", "op", "target"}:
-                raise ActionPlanValidationError("action_plan_click_fields_invalid")
+                raise ActionPlanValidationError(
+                    f"action_plan_{op}_fields_invalid"
+                )
             return {"id": step_id, "op": op, "target": self._target(value["target"])}
         if op == "type":
             if set(value) != {"id", "op", "target", "text"}:
@@ -106,6 +123,53 @@ class ActionPlanValidator:
                 "op": op,
                 "target": self._target(value["target"]),
                 "text": text,
+            }
+        if op == "press_key":
+            if set(value) != {"id", "op", "target", "key"}:
+                raise ActionPlanValidationError("action_plan_press_key_fields_invalid")
+            key = compact_text(value.get("key"), 20)
+            if key not in self._ALLOWED_KEYS:
+                raise ActionPlanValidationError("action_plan_press_key_invalid")
+            return {
+                "id": step_id,
+                "op": op,
+                "target": self._target(value["target"]),
+                "key": key,
+            }
+        if op == "scroll":
+            if set(value) != {"id", "op", "direction", "amount"}:
+                raise ActionPlanValidationError("action_plan_scroll_fields_invalid")
+            direction = compact_text(value.get("direction"), 20).casefold()
+            amount = compact_text(value.get("amount"), 20).casefold()
+            if (
+                direction not in self._SCROLL_DIRECTIONS
+                or amount not in self._SCROLL_AMOUNTS
+            ):
+                raise ActionPlanValidationError("action_plan_scroll_invalid")
+            return {
+                "id": step_id,
+                "op": op,
+                "direction": direction,
+                "amount": amount,
+            }
+        if op == "select_option":
+            if set(value) != {"id", "op", "target", "option"}:
+                raise ActionPlanValidationError(
+                    "action_plan_select_option_fields_invalid"
+                )
+            option = value.get("option")
+            if (
+                not isinstance(option, str)
+                or not option.strip()
+                or len(option.strip()) > self.MAX_OPTION_TEXT
+                or any(ord(character) < 32 or ord(character) == 127 for character in option)
+            ):
+                raise ActionPlanValidationError("action_plan_select_option_invalid")
+            return {
+                "id": step_id,
+                "op": op,
+                "target": self._target(value["target"]),
+                "option": option.strip(),
             }
         if op not in {"verify", "wait"}:
             raise ActionPlanValidationError("action_plan_operation_unsupported")
@@ -171,10 +235,10 @@ class ActionPlanValidator:
         for index in range(0, len(steps), 2):
             action = steps[index]
             outcome = steps[index + 1]
-            if action["op"] not in {"click", "type"} or outcome["op"] not in {
-                "verify",
-                "wait",
-            }:
+            if (
+                action["op"] not in ActionPlanValidator._ACTION_OPERATIONS
+                or outcome["op"] not in {"verify", "wait"}
+            ):
                 raise ActionPlanValidationError("action_plan_sequence_invalid")
             expected = outcome["expected"]
             if action["op"] == "type":
@@ -185,8 +249,24 @@ class ActionPlanValidator:
                     or expected["value"] != action["text"]
                 ):
                     raise ActionPlanValidationError("action_plan_type_outcome_invalid")
+            elif action["op"] == "select_option":
+                if (
+                    expected["type"] not in {"element_selected", "selected"}
+                    or compact_text(expected["target"].get("query"), 300).casefold()
+                    != action["option"].casefold()
+                ):
+                    raise ActionPlanValidationError(
+                        "action_plan_select_option_outcome_invalid"
+                    )
+            elif action["op"] == "scroll":
+                if expected["type"] in {
+                    "input_value",
+                    "page_changed",
+                    "url_changed",
+                }:
+                    raise ActionPlanValidationError("action_plan_scroll_outcome_invalid")
             elif expected["type"] == "input_value":
-                raise ActionPlanValidationError("action_plan_click_outcome_invalid")
+                raise ActionPlanValidationError("action_plan_action_outcome_invalid")
 
 
 __all__ = [

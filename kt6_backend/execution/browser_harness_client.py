@@ -83,7 +83,7 @@ class BrowserHarnessClient:
         except ExecutionURLPolicyError as exc:
             raise BrowserHarnessError(exc.error_code) from exc
         try:
-            # Reconnect only at a new binding boundary, never replay a type/click.
+            # Reconnect only at a new binding boundary; never replay an action.
             if self._ready and not self.runtime_health()["ready"]:
                 self._ready = False
                 self._bound_session_id = ""
@@ -150,6 +150,9 @@ class BrowserHarnessClient:
     def click_backend_node(
         self,
         target: BrowserTarget,
+        *,
+        clicks: int = 1,
+        hover_only: bool = False,
     ) -> dict[str, Any]:
         backend_node_id = target.backend_node_id
         click_backend_node_id = target.click_backend_node_id
@@ -162,6 +165,8 @@ class BrowserHarnessClient:
             or click_backend_node_id < 1
         ):
             raise BrowserHarnessError("invalid_backend_node_id")
+        if clicks not in {1, 2} or (hover_only and clicks != 1):
+            raise BrowserHarnessError("browser_click_count_invalid")
         try:
             self._load_runtime()
             self._assert_bound_target(target.page_url)
@@ -171,9 +176,10 @@ class BrowserHarnessClient:
             raise BrowserHarnessError("browser_harness_unavailable") from exc
         try:
             expected_attributes = dict(target.expected_attributes)
-            destination_url = self._destination_url(
-                target.page_url,
-                expected_attributes,
+            destination_url = (
+                ""
+                if hover_only
+                else self._destination_url(target.page_url, expected_attributes)
             )
             popup_url = (
                 destination_url
@@ -256,8 +262,16 @@ class BrowserHarnessClient:
             )
             if hit.get("backendNodeId") not in click_backend_ids:
                 raise BrowserHarnessError("browser_target_occluded")
-            self._click_call(x, y)
-            if popup_url:
+            if hover_only:
+                self._cdp_call(
+                    "Input.dispatchMouseEvent",
+                    type="mouseMoved",
+                    x=x,
+                    y=y,
+                )
+            else:
+                self._dispatch_click(x, y, clicks=clicks)
+            if popup_url and not hover_only:
                 self._bind_popup_target(
                     before_target_ids=targets_before_click,
                     opener_target_id=self._bound_target_id,
@@ -272,6 +286,138 @@ class BrowserHarnessClient:
             "x": x,
             "y": y,
         }
+
+    def hover_backend_node(self, target: BrowserTarget) -> dict[str, Any]:
+        return self.click_backend_node(target, hover_only=True)
+
+    def press_key_backend_node(
+        self,
+        target: BrowserTarget,
+        key: str,
+    ) -> dict[str, Any]:
+        if key not in {"Enter", "Escape"}:
+            raise BrowserHarnessError("browser_key_invalid")
+        receipt = self.click_backend_node(target, hover_only=True)
+        try:
+            self._cdp_call("DOM.focus", backendNodeId=target.backend_node_id)
+            self._dispatch_key(key)
+        except BrowserHarnessError:
+            raise
+        except Exception as exc:
+            raise BrowserHarnessError("browser_harness_key_failed") from exc
+        return receipt
+
+    def scroll_viewport(self, direction: str, amount: str) -> dict[str, Any]:
+        if direction not in {"up", "down"} or amount not in {"small", "page"}:
+            raise BrowserHarnessError("browser_scroll_invalid")
+        try:
+            self._load_runtime()
+            self._assert_bound_target(None)
+            metrics = self._cdp_call("Page.getLayoutMetrics")
+            viewport = metrics.get("cssVisualViewport") or metrics.get(
+                "cssLayoutViewport"
+            )
+            if not isinstance(viewport, Mapping):
+                raise BrowserHarnessError("browser_viewport_unavailable")
+            width = float(viewport.get("clientWidth", 0))
+            height = float(viewport.get("clientHeight", 0))
+            if (
+                not math.isfinite(width)
+                or not math.isfinite(height)
+                or width <= 0
+                or height <= 0
+            ):
+                raise BrowserHarnessError("browser_viewport_unavailable")
+            magnitude = (
+                min(400.0, height * 0.45)
+                if amount == "small"
+                else height * 0.8
+            )
+            delta_y = magnitude if direction == "down" else -magnitude
+            self._cdp_call(
+                "Input.dispatchMouseEvent",
+                type="mouseWheel",
+                x=round(width / 2, 3),
+                y=round(height / 2, 3),
+                deltaX=0,
+                deltaY=round(delta_y, 3),
+            )
+        except BrowserHarnessError:
+            raise
+        except Exception as exc:
+            raise BrowserHarnessError("browser_harness_scroll_failed") from exc
+        return {
+            "backend_node_id": None,
+            "x": round(width / 2, 3),
+            "y": round(height / 2, 3),
+        }
+
+    def select_option_backend_node(
+        self,
+        target: BrowserTarget,
+        option: str,
+    ) -> dict[str, Any]:
+        normalized_option = self._normalized_option_text(option)
+        if not normalized_option or len(option) > 300:
+            raise BrowserHarnessError("browser_select_option_invalid")
+        if target.role not in {"combobox", "listbox"}:
+            raise BrowserHarnessError("browser_select_target_invalid")
+        receipt = self.click_backend_node(target, hover_only=True)
+        try:
+            described = self._cdp_call(
+                "DOM.describeNode",
+                backendNodeId=target.backend_node_id,
+                depth=-1,
+                pierce=True,
+            )
+            live_node = described.get("node")
+            if not isinstance(live_node, Mapping):
+                raise BrowserHarnessError("browser_select_target_invalid")
+            attributes = self._attributes(live_node.get("attributes"))
+            if (
+                str(live_node.get("nodeName", "")).upper() != "SELECT"
+                or "disabled" in attributes
+                or "multiple" in attributes
+                or (target.dom_id and attributes.get("id") != target.dom_id)
+                or any(
+                    attributes.get(name) != value
+                    for name, value in target.expected_attributes
+                )
+                or (
+                    target.owner_business_id
+                    and attributes.get("data-owner-business-id")
+                    != target.owner_business_id
+                )
+                or (
+                    target.action_id
+                    and attributes.get("data-action-id") != target.action_id
+                )
+            ):
+                raise BrowserHarnessError("browser_select_target_invalid")
+            options = self._native_options(live_node)
+            matches = [
+                index
+                for index, labels in enumerate(options)
+                if normalized_option in labels
+            ]
+            if len(matches) != 1:
+                raise BrowserHarnessError(
+                    "browser_select_option_missing"
+                    if not matches
+                    else "browser_select_option_ambiguous"
+                )
+            if len(options) > 100:
+                raise BrowserHarnessError("browser_select_option_limit_exceeded")
+            self._cdp_call("DOM.focus", backendNodeId=target.backend_node_id)
+            self._dispatch_key("Home")
+            for _index in range(matches[0]):
+                self._dispatch_key("ArrowDown")
+            self._dispatch_key("Enter")
+        except BrowserHarnessError:
+            raise
+        except Exception as exc:
+            raise BrowserHarnessError("browser_harness_select_failed") from exc
+        return receipt
 
     def type_backend_node(
         self,
@@ -402,6 +548,101 @@ class BrowserHarnessClient:
         except Exception as exc:
             raise BrowserHarnessError("browser_harness_type_failed") from exc
         return {"backend_node_id": backend_node_id}
+
+    def _dispatch_click(self, x: float, y: float, *, clicks: int) -> None:
+        if self._click_call is None:
+            raise BrowserHarnessError("browser_harness_unavailable")
+        if clicks == 1:
+            self._click_call(x, y)
+            return
+        try:
+            self._click_call(x, y, clicks)
+        except TypeError as exc:
+            raise BrowserHarnessError("browser_double_click_unavailable") from exc
+
+    def _dispatch_key(self, key: str) -> None:
+        definitions = {
+            "Enter": ("Enter", 13, "\r"),
+            "Escape": ("Escape", 27, ""),
+            "Home": ("Home", 36, ""),
+            "ArrowDown": ("ArrowDown", 40, ""),
+        }
+        definition = definitions.get(key)
+        if definition is None:
+            raise BrowserHarnessError("browser_key_invalid")
+        code, virtual_key, text = definition
+        event: dict[str, Any] = {
+            "key": key,
+            "code": code,
+            "modifiers": 0,
+            "windowsVirtualKeyCode": virtual_key,
+            "nativeVirtualKeyCode": virtual_key,
+        }
+        key_down = dict(event)
+        if text:
+            key_down["text"] = text
+        self._cdp_call(
+            "Input.dispatchKeyEvent",
+            type="keyDown",
+            **key_down,
+        )
+        self._cdp_call(
+            "Input.dispatchKeyEvent",
+            type="keyUp",
+            **event,
+        )
+
+    @classmethod
+    def _native_options(cls, root: Mapping[str, Any]) -> list[frozenset[str]]:
+        options: list[frozenset[str]] = []
+        pending = (
+            list(root.get("children", []))
+            if isinstance(root.get("children"), list)
+            else []
+        )
+        inspected = 0
+        while pending and inspected < 512:
+            item = pending.pop(0)
+            inspected += 1
+            if not isinstance(item, Mapping):
+                continue
+            children = item.get("children")
+            nested = (
+                [child for child in children if isinstance(child, Mapping)]
+                if isinstance(children, list)
+                else []
+            )
+            if str(item.get("nodeName", "")).upper() != "OPTION":
+                pending.extend(nested)
+                continue
+            attributes = cls._attributes(item.get("attributes"))
+            text_parts: list[str] = []
+            descendants = list(nested)
+            while descendants and len(text_parts) < 32:
+                child = descendants.pop(0)
+                node_value = str(child.get("nodeValue", "")).strip()
+                if node_value:
+                    text_parts.append(node_value)
+                child_nodes = child.get("children")
+                if isinstance(child_nodes, list):
+                    descendants.extend(
+                        value for value in child_nodes if isinstance(value, Mapping)
+                    )
+            labels = {
+                cls._normalized_option_text(attributes.get("label", "")),
+                cls._normalized_option_text(attributes.get("value", "")),
+                cls._normalized_option_text(" ".join(text_parts)),
+            }
+            options.append(
+                frozenset()
+                if "disabled" in attributes
+                else frozenset(label for label in labels if label)
+            )
+        return options
+
+    @staticmethod
+    def _normalized_option_text(value: Any) -> str:
+        return " ".join(str(value or "").split()).casefold()
 
     def _destination_url(
         self,
@@ -553,7 +794,13 @@ class BrowserHarnessClient:
             return str(value.get("value", "")).strip()
         return str(value or "").strip()
 
-    def click_visual_target(self, target: VisualTarget) -> dict[str, Any]:
+    def click_visual_target(
+        self,
+        target: VisualTarget,
+        *,
+        clicks: int = 1,
+        hover_only: bool = False,
+    ) -> dict[str, Any]:
         backend_node_id = target.canvas_backend_node_id
         if (
             isinstance(backend_node_id, bool)
@@ -563,6 +810,8 @@ class BrowserHarnessClient:
             or not 0 < target.y_ratio < 1
         ):
             raise BrowserHarnessError("invalid_canvas_target")
+        if clicks not in {1, 2} or (hover_only and clicks != 1):
+            raise BrowserHarnessError("browser_click_count_invalid")
         try:
             self._load_runtime()
             self._assert_bound_target(target.page_url)
@@ -606,12 +855,23 @@ class BrowserHarnessClient:
             )
             if hit.get("backendNodeId") != backend_node_id:
                 raise BrowserHarnessError("browser_target_occluded")
-            self._click_call(x, y)
+            if hover_only:
+                self._cdp_call(
+                    "Input.dispatchMouseEvent",
+                    type="mouseMoved",
+                    x=x,
+                    y=y,
+                )
+            else:
+                self._dispatch_click(x, y, clicks=clicks)
         except BrowserHarnessError:
             raise
         except Exception as exc:
             raise BrowserHarnessError("browser_harness_click_failed") from exc
         return {"backend_node_id": backend_node_id, "x": x, "y": y}
+
+    def hover_visual_target(self, target: VisualTarget) -> dict[str, Any]:
+        return self.click_visual_target(target, hover_only=True)
 
     def capture_page_payload(
         self,
@@ -704,7 +964,7 @@ class BrowserHarnessClient:
                     raise BrowserHarnessError("browser_target_binding_failed")
                 self._bound_session_id = session_id
 
-            def click(x: float, y: float) -> None:
+            def click(x: float, y: float, clicks: int = 1) -> None:
                 # Harness 0.1.9 click_at_xy cannot take a session ID. Dispatch
                 # the same fixed pair through its session-aware CDP transport.
                 for event_type in ("mousePressed", "mouseReleased"):
@@ -714,7 +974,7 @@ class BrowserHarnessClient:
                         x=x,
                         y=y,
                         button="left",
-                        clickCount=1,
+                        clickCount=clicks,
                     )
 
             self._cdp_call = bound_cdp
