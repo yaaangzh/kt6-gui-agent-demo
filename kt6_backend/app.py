@@ -64,7 +64,13 @@ from .vision_result_cache import SQLiteVisionResultCacheStore
 ROOT = Path(__file__).resolve().parent.parent
 DEMO_DIR = ROOT / "demo"
 VISION_DRIVER_ENV = "KT6_VISION_DRIVER"
-VISION_MODEL_ENV = "KT6_VISION_MODEL"
+VISION_API_PROVIDER_ENV = "KT6_VISION_API_PROVIDER"
+VISION_API_BASE_URL_ENV = "KT6_VISION_API_BASE_URL"
+VISION_API_KEY_ENV = "KT6_VISION_API_KEY"
+VISION_API_MODEL_ENV = "KT6_VISION_API_MODEL"
+VISION_API_ALLOWED_HOSTS_ENV = "KT6_VISION_API_ALLOWED_HOSTS"
+VISION_API_MAX_TOKENS_ENV = "KT6_VISION_API_MAX_TOKENS"
+VISION_API_TIMEOUT_ENV = "KT6_VISION_API_TIMEOUT_SECONDS"
 UI_GRAPH_REASONER_ENDPOINT_ENV = "KT6_UI_GRAPH_REASONER_ENDPOINT"
 UI_GRAPH_REASONER_API_KEY_ENV = "KT6_UI_GRAPH_REASONER_API_KEY"
 UI_GRAPH_REASONER_ALLOWED_HOSTS_ENV = "KT6_UI_GRAPH_REASONER_ALLOWED_HOSTS"
@@ -111,11 +117,21 @@ def _create_canvas_vision_from_env() -> CanvasVisionAdapter | None:
     """Build the production vision adapter without exposing secret config."""
 
     driver = _optional_env(VISION_DRIVER_ENV)
-    model = _optional_env(VISION_MODEL_ENV)
+    vision_api_values = {
+        VISION_API_PROVIDER_ENV: _optional_env(VISION_API_PROVIDER_ENV),
+        VISION_API_BASE_URL_ENV: _optional_env(VISION_API_BASE_URL_ENV),
+        VISION_API_KEY_ENV: _optional_env(VISION_API_KEY_ENV),
+        VISION_API_MODEL_ENV: _optional_env(VISION_API_MODEL_ENV),
+        VISION_API_ALLOWED_HOSTS_ENV: _optional_env(VISION_API_ALLOWED_HOSTS_ENV),
+        VISION_API_MAX_TOKENS_ENV: _optional_env(VISION_API_MAX_TOKENS_ENV),
+        VISION_API_TIMEOUT_ENV: _optional_env(VISION_API_TIMEOUT_ENV),
+    }
     if driver is None:
-        if model is not None:
+        configured = [name for name, value in vision_api_values.items() if value is not None]
+        if configured:
             raise ValueError(
-                f"{VISION_MODEL_ENV} requires {VISION_DRIVER_ENV}=hybrid or openai_compatible"
+                f"{', '.join(configured)} require {VISION_DRIVER_ENV}=hybrid or "
+                "openai_compatible"
             )
         return None
 
@@ -130,20 +146,17 @@ def _create_canvas_vision_from_env() -> CanvasVisionAdapter | None:
         )
 
     if selected_driver == "local_cv_ocr":
-        if model is not None:
+        configured = [name for name, value in vision_api_values.items() if value is not None]
+        if configured:
             raise ValueError(
-                f"{VISION_MODEL_ENV} must not be configured for local_cv_ocr"
+                f"{', '.join(configured)} must not be configured for local_cv_ocr"
             )
         return LocalCVTopologyVisionAdapter()
 
-    client = _create_model_client_from_env(model_override=model)
-    if client is None:
-        raise ValueError(
-            f"KT6_MODEL_API_* settings are required for {VISION_DRIVER_ENV}={selected_driver}"
-        )
+    client = _create_vision_client_from_env(vision_api_values)
     model_adapter = OpenAICompatibleCanvasVisionAdapter(
         client=client,
-        provider=_optional_env(MODEL_API_PROVIDER_ENV) or "",
+        provider=vision_api_values[VISION_API_PROVIDER_ENV] or "",
     )
     if selected_driver == "hybrid":
         return HybridCanvasVisionAdapter(
@@ -260,9 +273,7 @@ def _create_execution_url_policy_from_env() -> ExecutionURLPolicy:
     )
 
 
-def _create_model_client_from_env(
-    *, model_override: str | None = None,
-) -> OpenAICompatibleChatClient | None:
+def _create_model_client_from_env() -> OpenAICompatibleChatClient | None:
     values = {
         MODEL_API_PROVIDER_ENV: _optional_env(MODEL_API_PROVIDER_ENV),
         MODEL_API_BASE_URL_ENV: _optional_env(MODEL_API_BASE_URL_ENV),
@@ -296,7 +307,52 @@ def _create_model_client_from_env(
     return OpenAICompatibleChatClient(
         base_url=values[MODEL_API_BASE_URL_ENV] or "",
         api_key=values[MODEL_API_KEY_ENV] or "",
-        model=model_override or values[MODEL_API_MODEL_ENV] or "",
+        model=values[MODEL_API_MODEL_ENV] or "",
+        timeout_seconds=timeout_seconds,
+        max_tokens=max_tokens,
+        allowed_hosts=allowed_hosts,
+    )
+
+
+def _create_vision_client_from_env(
+    values: dict[str, str | None] | None = None,
+) -> OpenAICompatibleChatClient:
+    config = (
+        values
+        if values is not None
+        else {
+            VISION_API_PROVIDER_ENV: _optional_env(VISION_API_PROVIDER_ENV),
+            VISION_API_BASE_URL_ENV: _optional_env(VISION_API_BASE_URL_ENV),
+            VISION_API_KEY_ENV: _optional_env(VISION_API_KEY_ENV),
+            VISION_API_MODEL_ENV: _optional_env(VISION_API_MODEL_ENV),
+            VISION_API_ALLOWED_HOSTS_ENV: _optional_env(VISION_API_ALLOWED_HOSTS_ENV),
+            VISION_API_MAX_TOKENS_ENV: _optional_env(VISION_API_MAX_TOKENS_ENV),
+            VISION_API_TIMEOUT_ENV: _optional_env(VISION_API_TIMEOUT_ENV),
+        }
+    )
+    required = (
+        VISION_API_PROVIDER_ENV,
+        VISION_API_BASE_URL_ENV,
+        VISION_API_KEY_ENV,
+        VISION_API_MODEL_ENV,
+    )
+    missing = [name for name in required if config.get(name) is None]
+    if missing:
+        raise ValueError(f"{', '.join(missing)} are required for the vision API")
+    allowed_hosts = tuple(
+        host.strip()
+        for host in (config.get(VISION_API_ALLOWED_HOSTS_ENV) or "").split(",")
+        if host.strip()
+    )
+    try:
+        max_tokens = int(config.get(VISION_API_MAX_TOKENS_ENV) or "4096")
+        timeout_seconds = float(config.get(VISION_API_TIMEOUT_ENV) or "60")
+    except ValueError as exc:
+        raise ValueError("vision API token and timeout settings are invalid") from exc
+    return OpenAICompatibleChatClient(
+        base_url=config.get(VISION_API_BASE_URL_ENV) or "",
+        api_key=config.get(VISION_API_KEY_ENV) or "",
+        model=config.get(VISION_API_MODEL_ENV) or "",
         timeout_seconds=timeout_seconds,
         max_tokens=max_tokens,
         allowed_hosts=allowed_hosts,
@@ -696,6 +752,7 @@ class KT6Handler(SimpleHTTPRequestHandler):
                 "/api/execution/runs",
                 "/api/ui-operations/plan",
             }
+            or (path.startswith("/api/execution/runs/") and path.endswith("/cancel"))
             or (path.startswith("/api/tasks/") and path.endswith("/actions"))
         )
         if not known_path:
@@ -754,6 +811,19 @@ class KT6Handler(SimpleHTTPRequestHandler):
                         "error_category": classify_error(error_code),
                     },
                 )
+                return
+            self._json(202, run)
+            return
+        execution_cancel_prefix = "/api/execution/runs/"
+        if path.startswith(execution_cancel_prefix) and path.endswith("/cancel"):
+            run_id = path[len(execution_cancel_prefix) : -len("/cancel")]
+            if not run_id or "/" in run_id:
+                self._json(404, {"error": "not found"})
+                return
+            try:
+                run = services.execution_scenarios.cancel_run(run_id)
+            except ExecutionScenarioServiceError as exc:
+                self._json(404, {"error": exc.error_code})
                 return
             self._json(202, run)
             return

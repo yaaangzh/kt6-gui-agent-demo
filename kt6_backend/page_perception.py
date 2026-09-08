@@ -10,6 +10,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from contextlib import closing
 from pathlib import Path
 from typing import Any
@@ -232,8 +233,17 @@ class PagePerceptionService:
         self.canvas_vision = canvas_vision
         self.text_recognizer = text_recognizer
         self.vision_cache_coordinator = vision_cache_coordinator
+        self._transient_lock = threading.RLock()
+        self._transient_records: dict[str, dict[str, Any]] = {}
 
-    def ingest(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def ingest(
+        self,
+        payload: dict[str, Any],
+        *,
+        persist: bool = True,
+        include_execution_views: bool = False,
+    ) -> dict[str, Any]:
+        ingest_started = time.perf_counter()
         capture_id = f"capture_{uuid.uuid4().hex[:12]}"
         page = self._normalize_page(payload.get("page", {}))
         cdp_perception = self._normalize_cdp_snapshot_envelope(
@@ -261,13 +271,17 @@ class PagePerceptionService:
 
         if svg_element_texts is not None:
             capture["svg_element_texts"] = svg_element_texts
+        normalized_at = time.perf_counter()
         dom_scene = self._dom_scene(dom, page)
+        canvas_started = time.perf_counter()
         canvas_scene = self._canvas_scene(
             canvases,
             adapter_scene,
             page,
             force_vision_refresh=payload.get("force_vision_refresh") is True,
+            requested_profile=str(payload.get("vision_profile") or "auto"),
         )
+        canvas_finished = time.perf_counter()
         page_api_scene = self._page_api_scene(canvases, adapter_scene, page)
         text_scene = self._text_scene(topology_text, page, canvases)
         selected = self._select_scene(dom_scene, canvas_scene, text_scene)
@@ -312,6 +326,7 @@ class PagePerceptionService:
                 perception_decision=evidence_decision,
             ),
         }
+        ui_graph_started = time.perf_counter()
         ui_graph = build_ui_graph(
             {
                 "capture_id": capture_id,
@@ -320,6 +335,7 @@ class PagePerceptionService:
             }
         )
         perception["ui_graph"] = ui_graph
+        ui_graph_finished = time.perf_counter()
 
         template_hash = self._template_hash(capture, selected)
         content_hash = self._content_hash(capture, selected)
@@ -331,7 +347,10 @@ class PagePerceptionService:
             perception=perception,
             source="live_page_capture",
             source_revision=content_hash[:12],
+            persist=persist,
         )
+        runtime_finished = time.perf_counter()
+        capture_metrics = self._capture_metrics(payload.get("capture_metrics"))
         summary = {
             "dom_element_count": len(dom["elements"]),
             "dom_actionable_element_count": sum(
@@ -374,6 +393,19 @@ class PagePerceptionService:
             "ui_graph_truncated": ui_graph["stats"]["truncated"],
             "ui_graph_analysis_only": True,
             "ui_graph_safe_for_execution": False,
+            "stage_timings_ms": {
+                **capture_metrics,
+                "normalize": round((normalized_at - ingest_started) * 1_000, 2),
+                "canvas_perception": round(
+                    (canvas_finished - canvas_started) * 1_000, 2
+                ),
+                "ui_graph": round(
+                    (ui_graph_finished - ui_graph_started) * 1_000, 2
+                ),
+                "scene_runtime": round(
+                    (runtime_finished - ui_graph_finished) * 1_000, 2
+                ),
+            },
         }
         if adapter_scene and adapter_scene.get("source_metadata"):
             summary["adapter_source_metadata"] = copy.deepcopy(
@@ -393,22 +425,81 @@ class PagePerceptionService:
             "summary": summary,
             "created_at": time.time(),
         }
+        persistence_started = time.perf_counter()
+        if persist:
+            self.store.save(record)
+        else:
+            with self._transient_lock:
+                self._transient_records[capture_id] = record
+                while len(self._transient_records) > 2:
+                    evicted = self._transient_records.pop(
+                        next(iter(self._transient_records))
+                    )
+                    self._discard_record_assets(evicted)
+        summary["stage_timings_ms"]["persistence"] = round(
+            (time.perf_counter() - persistence_started) * 1_000, 2
+        )
+        summary["stage_timings_ms"]["total"] = round(
+            (time.perf_counter() - ingest_started) * 1_000, 2
+        )
+        public = self._public_record(record)
+        if include_execution_views:
+            public["ui_graph"] = copy.deepcopy(ui_graph)
+            public["action_snapshot"] = self._action_snapshot(record)
+        return public
+
+    def persist_capture(self, capture_id: str) -> None:
+        with self._transient_lock:
+            record = self._transient_records.get(capture_id)
+        if record is None:
+            return
         self.store.save(record)
-        return self._public_record(record)
+        with self._transient_lock:
+            self._transient_records.pop(capture_id, None)
+
+    def discard_capture(self, capture_id: str) -> None:
+        with self._transient_lock:
+            record = self._transient_records.pop(str(capture_id), None)
+        if record is not None:
+            self._discard_record_assets(record)
+
+    def _discard_record_assets(self, record: Mapping[str, Any]) -> None:
+        asset_root = self.store.asset_dir.resolve()
+        capture = record.get("capture")
+        canvases = capture.get("canvases", []) if isinstance(capture, Mapping) else []
+        for canvas in canvases if isinstance(canvases, list) else []:
+            if not isinstance(canvas, Mapping):
+                continue
+            raw_path = canvas.get("screenshot_path")
+            if not isinstance(raw_path, str) or not raw_path:
+                continue
+            try:
+                path = Path(raw_path).resolve()
+                if path.is_relative_to(asset_root):
+                    path.unlink(missing_ok=True)
+            except OSError:
+                # Cleanup is best-effort; the capture was already removed from
+                # the live verifier set and cannot authorize a later action.
+                continue
+
+    def _record(self, capture_id: str) -> dict[str, Any] | None:
+        with self._transient_lock:
+            record = self._transient_records.get(str(capture_id))
+        return record if record is not None else self.store.get(capture_id)
 
     def get_capture(self, capture_id: str) -> dict[str, Any] | None:
-        record = self.store.get(capture_id)
+        record = self._record(capture_id)
         return self._public_record(record) if record else None
 
     def list_captures(self, limit: int = 20) -> list[dict[str, Any]]:
         return self.store.list(limit=limit)
 
     def get_result(self, capture_id: str) -> dict[str, Any] | None:
-        record = self.store.get(capture_id)
+        record = self._record(capture_id)
         return copy.deepcopy(record["result"]) if record else None
 
     def get_ui_graph(self, capture_id: str) -> dict[str, Any] | None:
-        record = self.store.get(capture_id)
+        record = self._record(capture_id)
         if not record:
             return None
         graph = record["result"]["perception"].get("ui_graph")
@@ -416,11 +507,15 @@ class PagePerceptionService:
 
     def get_action_snapshot(self, capture_id: str) -> dict[str, Any] | None:
         """Return immutable evidence for asset/action preflight validation."""
-        record = self.store.get(capture_id)
+        record = self._record(capture_id)
         if not record:
             return None
+        return self._action_snapshot(record)
+
+    @staticmethod
+    def _action_snapshot(record: dict[str, Any]) -> dict[str, Any]:
         return {
-            "capture_id": capture_id,
+            "capture_id": str(record["capture_id"]),
             "page": copy.deepcopy(record["capture"]["page"]),
             "dom": copy.deepcopy(record["capture"]["dom"]),
             "created_at": float(record["created_at"]),
@@ -429,7 +524,7 @@ class PagePerceptionService:
         }
 
     def get_topology(self, capture_id: str) -> dict[str, Any] | None:
-        record = self.store.get(capture_id)
+        record = self._record(capture_id)
         if not record:
             return None
         capture = record["capture"]
@@ -503,6 +598,32 @@ class PagePerceptionService:
             ),
             "created_at": record["created_at"],
         }
+
+    @staticmethod
+    def _capture_metrics(value: Any) -> dict[str, float]:
+        if not isinstance(value, dict):
+            return {}
+        allowed = {
+            "frame_tree",
+            "dom_snapshot",
+            "accessibility_tree",
+            "normalize_and_metrics",
+            "canvas_capture",
+            "preview_capture",
+            "total_browser_capture",
+        }
+        metrics: dict[str, float] = {}
+        for key in allowed:
+            raw = value.get(key)
+            if isinstance(raw, bool):
+                continue
+            try:
+                number = float(raw)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if math.isfinite(number) and number >= 0:
+                metrics[key] = round(number, 2)
+        return metrics
 
     @staticmethod
     def _ui_graph_ref(value: Any) -> dict[str, Any]:
@@ -1728,6 +1849,7 @@ class PagePerceptionService:
         page: dict[str, Any],
         *,
         force_vision_refresh: bool = False,
+        requested_profile: str = "auto",
     ) -> dict[str, Any]:
         input_payload = {
             "source": "live_browser_canvas",
@@ -1767,12 +1889,23 @@ class PagePerceptionService:
                         page=copy.deepcopy(page),
                         frames=frames,
                         force_refresh=force_vision_refresh,
+                        requested_profile=requested_profile,
                     )
                 else:
-                    recognized = self.canvas_vision.recognize(
-                        page=copy.deepcopy(page),
-                        frames=frames,
+                    recognize_with_profile = getattr(
+                        self.canvas_vision, "recognize_with_profile", None
                     )
+                    if callable(recognize_with_profile):
+                        recognized = recognize_with_profile(
+                            page=copy.deepcopy(page),
+                            frames=frames,
+                            requested_profile=requested_profile,
+                        )
+                    else:
+                        recognized = self.canvas_vision.recognize(
+                            page=copy.deepcopy(page),
+                            frames=frames,
+                        )
                 if isinstance(recognized, dict) and "vision_routing" in recognized:
                     vision_routing = self._bounded_metadata(
                         recognized.get("vision_routing")

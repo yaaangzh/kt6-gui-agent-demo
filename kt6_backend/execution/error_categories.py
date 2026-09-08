@@ -9,11 +9,13 @@ EXECUTION_FAILED = "execution_failed"
 VERIFY_FAILED = "verify_failed"
 PAGE_CHANGED = "page_changed"
 UNCLASSIFIED = "unclassified"
+CANCELLED = "cancelled"
 
 
 # Ordered longest/most-specific first. A later generic prefix only matches codes
 # that were not already claimed by an earlier, more specific rule.
 _CATEGORY_RULES: tuple[tuple[str, str], ...] = (
+    ("execution_cancelled", CANCELLED),
     ("action_plan_", PLANNER_FAILED),
     ("execution_planner_", PLANNER_FAILED),
     ("execution_request_", PLANNER_FAILED),
@@ -42,8 +44,6 @@ _CATEGORY_RULES: tuple[tuple[str, str], ...] = (
     ("execution_canvas_capture", PERCEPTION_FAILED),
     ("browser_preview_capture_invalid", PERCEPTION_FAILED),
     ("browser_navigation", PERCEPTION_FAILED),
-    ("scenario_expected_outcome_missing", VERIFY_FAILED),
-    ("scenario_wait_timeout", VERIFY_FAILED),
     ("scenario_wait_without_action", VERIFY_FAILED),
     ("scenario_verification_without_action", VERIFY_FAILED),
     ("scenario_outcome_step_missing", VERIFY_FAILED),
@@ -80,6 +80,7 @@ def classify_error(error_code: str) -> str:
 
 
 __all__ = [
+    "CANCELLED",
     "EXECUTION_FAILED",
     "PAGE_CHANGED",
     "PERCEPTION_FAILED",

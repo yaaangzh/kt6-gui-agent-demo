@@ -44,37 +44,55 @@ Canvas 视觉有以下配置状态：
 - `openai_compatible`：直接调用支持图片输入的 Chat Completions 模型；
 - `hybrid`：本地 CV 优先，自适应路由后将截图与 CV/OCR 上下文一起传给模型并融合。
 
-API/Hybrid 视觉复用 `KT6_MODEL_API_*` 网关、密钥、主机限制、超时和 token 上限：
+API/Hybrid 视觉使用独立的 OpenAI-compatible 网关、密钥、模型、主机限制和超时：
 
 ```dotenv
 KT6_VISION_DRIVER=hybrid
-# 可选；未指定时使用 KT6_MODEL_API_MODEL
-KT6_VISION_MODEL=<同一网关下支持image_url和JSON输出的模型名>
+KT6_VISION_API_PROVIDER=<vision-provider-or-internal-gateway>
+KT6_VISION_API_BASE_URL=https://<approved-vision-gateway>/v1
+KT6_VISION_API_KEY=<secret>
+KT6_VISION_API_MODEL=<支持image_url和JSON输出的模型名>
+KT6_VISION_API_ALLOWED_HOSTS=<approved-vision-gateway-host>
+KT6_VISION_API_MAX_TOKENS=4096
+KT6_VISION_API_TIMEOUT_SECONDS=60
 ```
 
-`hybrid` 和 `local_cv_ocr` 都需安装 `requirements-local-vision.txt`。分类/路由仍固定
-`auto`：可信散点和简单结构拓扑跳过模型，复杂或 CV 无效时最多调用一次模型；无修复调用
+`hybrid` 和 `local_cv_ocr` 都需安装 `requirements-local-vision.txt`。分类/路由按任务所需
+能力选择：可信 CV 节点可直接满足 `nodes_only`；只有连通关系或语义能力明确不足时才调用
+模型。CV 无效时最多调用一次模型；无修复调用
 或自动重试。输入图片经过尺寸/哈希校验，CV/OCR 上下文按已有契约限量压缩；不发送路径、
 完整 URL。输出仍用严格拓扑契约和既有确定性融合，保留路由、模型调用和缓存证据。
 缓存指纹包含模型/网关/token 设置；缓存命中不重复计算模型调用与 token，原始用量另标
-`source_call_count` / `source_usage`。原 `http` driver 与专用视觉 HTTP 协议已移除。
+`source_call_count` / `source_usage`。视觉 API 不回退到规划 API；原 `http` driver 与专用
+`/v1/topology` 协议已移除。
 
 远程模型 endpoint 必须经过数据出区审批；真实 key、截图、DOM/CDP、模型原文和真实运行
 证据不能提交 Git。
 
 ## 3. 页面感知与执行
 
-Browser Harness 每次 fresh capture 固定读取 frame tree、DOMSnapshot、Accessibility Tree、
-layout metrics 和页面截图。检测到原生 Canvas 时只截取最大的可见 Canvas 区域。后端将
+Browser Harness 每次 fresh capture 固定读取 frame tree、DOMSnapshot、Accessibility Tree
+和 layout metrics，不再生成未展示的整页预览。普通 DOM 流程不采集 Canvas；任务或
+Grounding 需要视觉时才截取最大的可见 Canvas 区域。后端将
 DOM、CDP、Canvas、可选 page API 和文本证据融合到统一 UI Graph。
+
+规划模型只接收按自然语言任务相关性排序的 48 KiB UI Graph 投影，不再接收通用 256 KiB
+投影。`ingest` 可直接返回 UI Graph 和 Action Snapshot，Runner 不再从 SQLite 重读同一份
+多 MB capture。等待轮询使用最多 2 份内存临时证据，失败即丢弃并清理截图，只有最终成功
+证据落库。API 状态记录浏览器采集、感知、投影和模型调用分段耗时。
 
 计划只包含语义目标。执行时 `TargetGrounderRegistry` 先尝试唯一 DOM/CDP Grounding，找不到
 才尝试配置的 Vision Grounding。点击和输入前重新校验 URL、frame、backend node、属性、
 可访问名称、viewport、box model 和 hit-test。动作后重新采集，由 Verifier Registry 判断
 输入值、选中状态、元素出现或 URL 变化。
 
-任何标签页切换、非预期导航、目标歧义、页面截断、目标遮挡、身份变化或验证不满足都应
-进入明确失败状态，不得把派发回执当成成功。
+业务流程不设置页面等待截止时间。`verify` 和 `wait` 持续 fresh capture，直到确定性条件
+成立或用户通过 Side Panel 取消；取消状态依次为 `cancelling`、`cancelled`。Browser Harness
+每次 IPC/CDP 调用仍保留短存活超时，通信失败会明确结束运行，且不会自动重放已经派发的
+`type` / `click`。
+
+任何标签页切换、非预期导航、目标歧义、页面截断、目标遮挡或身份变化都应进入明确失败
+状态；验证暂未满足只继续观察，不得把派发回执当成成功。
 
 ## 4. 启动方式
 
@@ -143,9 +161,10 @@ scripts/start-browser-executor.ps1
 
 ## 6. 验证命令
 
-2026-09-08 多模态视觉专项 107 项通过（4.406 秒），命令及范围见 `test.md` 第 10 节。
-后端编译和 diff 空白检查通过。此次没有调用真实模型或操作 Chrome，本机 `.env` 仍为
-`local_cv_ocr`，真实多模态识别需配置 `hybrid` 与支持图片的模型后重启验收。
+2026-09-08 多模态视觉专项 107 项通过；独立视觉 URL 配置及关联主链 99 项通过，命令及范围
+见 `test.md` 第 10 节。后端编译和 diff 空白检查通过。此次没有调用真实模型或操作 Chrome，
+本机 `.env` 仍为 `local_cv_ocr`，真实多模态识别需配置 `hybrid` 与完整的
+`KT6_VISION_API_*` 后重启验收。
 
 ```powershell
 python -m unittest `

@@ -129,6 +129,25 @@ class VisionCacheCoordinatorTest(unittest.TestCase):
         self.assertEqual(first["vision_model_call"]["usage"], {"total_tokens": 120})
         self.assert_cached_model_call(second)
 
+    def test_different_capability_profiles_do_not_share_cached_results(self):
+        frame = self.frame("profile.png", b"same-profile-pixels")
+        coordinator = self.coordinator()
+
+        coordinator.recognize(
+            adapter=self.adapter,
+            page=self.page,
+            frames=(frame,),
+            requested_profile="nodes_only",
+        )
+        coordinator.recognize(
+            adapter=self.adapter,
+            page=self.page,
+            frames=(frame,),
+            requested_profile="connectivity_query",
+        )
+
+        self.assertEqual(self.adapter.calls, 2)
+
     def assert_cached_model_call(self, result):
         call = result["vision_model_call"]
         self.assertEqual(call["call_count"], 0)

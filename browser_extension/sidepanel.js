@@ -16,12 +16,14 @@ const elements = {
   runCard: document.querySelector("#run-card"),
   runStatus: document.querySelector("#run-status"),
   runSteps: document.querySelector("#run-steps"),
+  cancelRun: document.querySelector("#cancel-run"),
 };
 
 let currentContext = null;
 let generatedPlan = null;
 let generating = false;
 let executing = false;
+let activeRunId = "";
 
 async function resolveCurrentBrowserContext(
   tabsApi = chrome.tabs,
@@ -191,12 +193,17 @@ async function executePlan() {
         browser_target_id: generatedPlan.browserTargetId,
       }),
     });
+    activeRunId = run.run_id;
+    elements.cancelRun.hidden = false;
+    elements.cancelRun.disabled = false;
     elements.runCard.hidden = false;
     await pollRun(run.run_id);
   } catch (error) {
     elements.runCard.hidden = false;
     setStatus(elements.runStatus, `执行失败：${error.message}`, "error");
   } finally {
+    activeRunId = "";
+    elements.cancelRun.hidden = true;
     executing = false;
     elements.generate.disabled = false;
   }
@@ -215,11 +222,16 @@ async function pollRun(runId) {
       setStatus(elements.runStatus, "流程执行并验证成功", "success");
       return;
     }
+    if (run.status === "cancelled") {
+      setStatus(elements.runStatus, "执行已取消", "neutral");
+      return;
+    }
     if (run.status === "failed") {
       throw new Error(String(run.error_code || "execution_failed"));
     }
     const current = run.current_step ? `，当前 ${run.current_step}` : "";
-    setStatus(elements.runStatus, `执行中${current}`);
+    const statusText = run.status === "cancelling" ? "正在取消" : "执行中";
+    setStatus(elements.runStatus, `${statusText}${current}`);
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
 }
@@ -237,6 +249,20 @@ elements.confirm.addEventListener("change", () => {
   elements.execute.disabled = !elements.confirm.checked || executing;
 });
 elements.execute.addEventListener("click", executePlan);
+elements.cancelRun.addEventListener("click", async () => {
+  if (!activeRunId) return;
+  elements.cancelRun.disabled = true;
+  try {
+    await api(`/api/execution/runs/${encodeURIComponent(activeRunId)}/cancel`, {
+      method: "POST",
+      body: "{}",
+    });
+    setStatus(elements.runStatus, "正在取消；当前 Browser Harness 调用结束后停止");
+  } catch (error) {
+    elements.cancelRun.disabled = false;
+    setStatus(elements.runStatus, `取消失败：${error.message}`, "error");
+  }
+});
 
 globalThis.__KT6_AGENT_PANEL_INTERNALS__ = {
   resolveCurrentBrowserContext,

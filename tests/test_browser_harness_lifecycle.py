@@ -33,7 +33,7 @@ class HarnessLifecycleTest(unittest.TestCase):
         runner = Mock()
         runner.inspect.return_value = {
             "capture_id": "plan-capture", "graph_id": "plan-graph",
-            "ui_graph": graph("plan-capture"), "preview_data_url": "",
+            "ui_graph": graph("plan-capture"), "capture_metrics": {},
         }
         runner.run.return_value = {"steps": []}
         planner = Mock(planner_id="unit", planner_model="unit")
@@ -121,6 +121,24 @@ class HarnessLifecycleTest(unittest.TestCase):
             service.start_run(plan=semantic_plan(), confirmed=True)
         self.assertEqual(service.health()["active_runs"], 0)
         self.assertEqual(service.run_sync(semantic_plan())["status"], "success")
+
+    def test_queued_run_can_be_cancelled_without_starting_browser_actions(self):
+        service = self.make_service()
+        with patch("kt6_backend.execution.scenario_service.threading.Thread.start"):
+            queued = service.start_run(plan=semantic_plan(), confirmed=True)
+
+        cancelling = service.cancel_run(queued["run_id"])
+        self.assertEqual(cancelling["status"], "cancelling")
+        self.assertEqual(service.health()["active_runs"], 1)
+
+        service._run(queued["run_id"], semantic_plan(), "")
+
+        cancelled = service.get_run(queued["run_id"])
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertEqual(cancelled["error_code"], "execution_cancelled")
+        self.assertEqual(cancelled["error_category"], "cancelled")
+        self.assertEqual(service.health()["active_runs"], 0)
+        service.runner.run.assert_not_called()
 
     def test_runner_maps_initial_binding_error_and_releases_session(self):
         client = self.make_client(cdp_call=Mock(), click_call=Mock())

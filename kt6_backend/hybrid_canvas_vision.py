@@ -41,12 +41,26 @@ class HybridCanvasVisionAdapter:
         page: dict[str, Any],
         frames: tuple[CanvasFrame, ...],
     ) -> dict[str, Any] | None:
+        return self.recognize_with_profile(
+            page=page,
+            frames=frames,
+            requested_profile=self.requested_profile,
+        )
+
+    def recognize_with_profile(
+        self,
+        *,
+        page: dict[str, Any],
+        frames: tuple[CanvasFrame, ...],
+        requested_profile: str,
+    ) -> dict[str, Any] | None:
         local_result, local_failed = self._recognize_branch(
             self.local_adapter, page=page, frames=frames
         )
         routing, local_result_usable = self._assess_local_result(
             local_result,
             local_failed=local_failed,
+            requested_profile=requested_profile,
         )
         if not local_result_usable:
             local_result = None
@@ -132,6 +146,7 @@ class HybridCanvasVisionAdapter:
         local_result: dict[str, Any] | None,
         *,
         local_failed: bool,
+        requested_profile: str,
     ) -> tuple[dict[str, Any], bool]:
         provenance = {
             "adapter_id": str(getattr(self.local_adapter, "adapter_id", "")),
@@ -143,7 +158,7 @@ class HybridCanvasVisionAdapter:
         try:
             routing = assess_cv_result(
                 local_result or {"objects": [], "links": []},
-                requested_profile=self.requested_profile,
+                requested_profile=requested_profile,
                 trusted_provenance=provenance,
             )
         except (TopologyCVRoutingError, TypeError, ValueError):
@@ -151,7 +166,7 @@ class HybridCanvasVisionAdapter:
             # bounded artifact and let the model inspect the original pixels.
             routing = assess_cv_result(
                 {"objects": [], "links": []},
-                requested_profile=self.requested_profile,
+                requested_profile=requested_profile,
                 trusted_provenance=provenance,
             )
             routing = self._routing_with_reason(

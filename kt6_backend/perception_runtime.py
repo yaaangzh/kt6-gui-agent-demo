@@ -104,11 +104,28 @@ class PerceptionRuntime:
         source: str,
         source_revision: str | int | None = None,
         focus: dict[str, Any] | None = None,
+        persist: bool = True,
     ) -> dict[str, Any]:
         started_at = time.perf_counter()
         with self._lock:
-            latest = self.store.get_latest(scene_key)
-            if latest and latest.template_hash == template_hash and latest.content_hash == content_hash:
+            latest = self.store.get_latest(scene_key) if persist else None
+            if not persist:
+                # Poll captures exist only long enough to run a deterministic
+                # verifier. Avoid loading and decoding the retained multi-MB
+                # scene merely to assign a revision that will never be saved.
+                selected_perception = copy.deepcopy(perception)
+                revision = 0
+                changes = self.detector.empty()
+                cache_status = "transient"
+                cache_age_ms = 0
+                self._decorate_scene(
+                    selected_perception,
+                    scene_key=scene_key,
+                    revision=revision,
+                    template_hash=template_hash,
+                    content_hash=content_hash,
+                )
+            elif latest and latest.template_hash == template_hash and latest.content_hash == content_hash:
                 # Reuse the semantic revision while retaining this capture's raw DOM/canvas evidence.
                 selected_perception = copy.deepcopy(perception)
                 revision = latest.revision

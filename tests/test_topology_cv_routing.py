@@ -178,9 +178,26 @@ class TopologyCVRoutingTest(unittest.TestCase):
         self.assertEqual(prepared["links"], [])
         self.assertEqual(len(disputed), 1)
         self.assertIn(
-            "scatter_connectivity_intentionally_not_inferred",
+            "unverified_connectivity_intentionally_omitted",
             routing["reason_codes"],
         )
+
+    def test_auto_keeps_trusted_nodes_when_connector_scan_is_partial(self):
+        payload = _payload(
+            20,
+            scan_status="partial",
+            pixel_count=400,
+            component_count=5,
+            line_segment_count=5000,
+        )
+
+        automatic = _assess(payload, "auto")
+        connectivity = _assess(payload, "connectivity_query")
+
+        self.assertEqual(automatic["decision"], "cv_only")
+        self.assertEqual(automatic["effective_profile"], "nodes_only")
+        self.assertTrue(automatic["requirement_satisfied"])
+        self.assertNotEqual(connectivity["decision"], "cv_only")
 
     def test_sparse_weak_scatter_requires_model_for_visible_topology(self):
         payload = _payload(

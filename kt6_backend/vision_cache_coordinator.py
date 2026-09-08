@@ -71,13 +71,30 @@ class VisionCacheCoordinator:
         page: dict[str, Any],
         frames: tuple[CanvasFrame, ...],
         force_refresh: bool = False,
+        requested_profile: str = "auto",
     ) -> dict[str, Any] | None:
         if not frames:
-            return adapter.recognize(page=page, frames=frames)
+            return self._invoke_adapter(
+                adapter,
+                page=page,
+                frames=frames,
+                requested_profile=requested_profile,
+            )
 
-        context = self._cache_context(adapter, page, frames)
+        context = self._cache_context(
+            adapter,
+            page,
+            frames,
+            requested_profile=requested_profile,
+        )
         if force_refresh:
-            return self._recognize_and_store(adapter, page, frames, context)
+            return self._recognize_and_store(
+                adapter,
+                page,
+                frames,
+                context,
+                requested_profile=requested_profile,
+            )
 
         hit = self._safe_get(context["cache_key"])
         if hit is not None:
@@ -129,7 +146,13 @@ class VisionCacheCoordinator:
                 pending.result = copy.deepcopy(reprojected)
                 return reprojected
 
-            result = self._recognize_and_store(adapter, page, frames, context)
+            result = self._recognize_and_store(
+                adapter,
+                page,
+                frames,
+                context,
+                requested_profile=requested_profile,
+            )
             pending.result = copy.deepcopy(result)
             return result
         except BaseException as exc:
@@ -146,10 +169,14 @@ class VisionCacheCoordinator:
         page: dict[str, Any],
         frames: tuple[CanvasFrame, ...],
         context: dict[str, Any],
+        *,
+        requested_profile: str,
     ) -> dict[str, Any] | None:
-        recognized = adapter.recognize(
+        recognized = self._invoke_adapter(
+            adapter,
             page=copy.deepcopy(page),
             frames=frames,
+            requested_profile=requested_profile,
         )
         if recognized is None:
             return None
@@ -275,6 +302,8 @@ class VisionCacheCoordinator:
         adapter: CanvasVisionAdapter,
         page: Mapping[str, Any],
         frames: tuple[CanvasFrame, ...],
+        *,
+        requested_profile: str,
     ) -> dict[str, Any]:
         page_url = str(page.get("url", "")).strip() or "about:blank"
         ui_version = str(page.get("ui_version", "")).strip()
@@ -291,6 +320,7 @@ class VisionCacheCoordinator:
             "page_url": page_url,
             "ui_version": ui_version,
             "adapter_fingerprint": fingerprint,
+            "requested_profile": str(requested_profile),
             "frames": [self._frame_identity(item) for item in descriptors],
         }
         cache_key = "sha256:" + hashlib.sha256(
@@ -303,6 +333,23 @@ class VisionCacheCoordinator:
             "adapter_version": selector_version,
             "frames": descriptors,
         }
+
+    @staticmethod
+    def _invoke_adapter(
+        adapter: CanvasVisionAdapter,
+        *,
+        page: dict[str, Any],
+        frames: tuple[CanvasFrame, ...],
+        requested_profile: str,
+    ) -> dict[str, Any] | None:
+        recognize_with_profile = getattr(adapter, "recognize_with_profile", None)
+        if callable(recognize_with_profile):
+            return recognize_with_profile(
+                page=page,
+                frames=frames,
+                requested_profile=requested_profile,
+            )
+        return adapter.recognize(page=page, frames=frames)
 
     def _adapter_fingerprint(self, adapter: CanvasVisionAdapter) -> str:
         def describe(value: Any, depth: int = 0) -> dict[str, Any]:

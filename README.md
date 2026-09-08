@@ -14,9 +14,9 @@ DOM/CDP/截图以及执行固定 `type`/`click`。系统不会创建专用浏览
 当前 Chrome 标签页
 → 扩展提交精确 Target ID + URL
 → Browser Harness 绑定同一 Tab/session
-→ fresh DOMSnapshot + AXTree + 页面截图
+→ fresh DOMSnapshot + AXTree；仅按需采集 Canvas
 → PagePerceptionService 生成多源 UI Graph
-→ OpenAI-compatible API 生成 kt6.action-plan.v1
+→ 任务相关的有界 UI Graph → API 生成 kt6.action-plan.v1
 → 用户检查并确认
 → 每步重新采集和 Grounding
 → 固定 type/click 适配器执行
@@ -28,14 +28,14 @@ Action Plan 只保存语义目标，不保存临时 Target ID、backend node id�
 
 ## 页面感知
 
-Browser Harness 主路径每次采集：
+Browser Harness 主路径每次采集 DOM/CDP 证据：
 
 - `Page.getFrameTree` 和当前 URL；
 - `DOMSnapshot.captureSnapshot`；
 - 每个 frame 的 `Accessibility.getFullAXTree`；
 - viewport 和浏览器版本；
-- 当前可见区域的低质量预览截图；
-- 检测到原生 Canvas 时，对最大的可见 Canvas 生成精确区域截图。
+- 不再生成 Side Panel 未使用的整页预览截图；
+- 只有任务或 Grounding 需要视觉时，才对最大的可见 Canvas 生成精确区域截图。
 
 后端把 `dom`、`cdp`、`page_api`、`vision`、`text` 证据统一放入 UI Graph，同时保留
 来源、frame、父子关系、可访问名称、backend node id、业务声明和交互候选状态。
@@ -68,21 +68,27 @@ KT6_MODEL_API_MAX_TOKENS=4096
 KT6_MODEL_API_TIMEOUT_SECONDS=60
 ```
 
-Canvas 视觉复用上述 API 网关、密钥、获批主机、token 上限和超时。要启用
-“本地 CV/OCR → 自动分类 → 按需模型补充 → 确定性融合”，增加：
+Canvas 视觉使用另一套独立的 OpenAI-compatible API。要启用“本地 CV/OCR → 自动分类 →
+按需模型补充 → 确定性融合”，配置：
 
 ```dotenv
 KT6_VISION_DRIVER=hybrid
-# 可选：同一网关下单独指定视觉模型；省略时使用 KT6_MODEL_API_MODEL
-KT6_VISION_MODEL=<支持图片输入和JSON输出的模型名>
+KT6_VISION_API_PROVIDER=<vision-provider-or-internal-gateway>
+KT6_VISION_API_BASE_URL=https://<approved-vision-gateway>/v1
+KT6_VISION_API_KEY=<secret>
+KT6_VISION_API_MODEL=<支持图片输入和JSON输出的模型名>
+KT6_VISION_API_ALLOWED_HOSTS=<approved-vision-gateway-host>
+KT6_VISION_API_MAX_TOKENS=4096
+KT6_VISION_API_TIMEOUT_SECONDS=60
 ```
 
 模型需要支持 Chat Completions 的 `image_url` 内容块与 JSON 输出。一次请求包含经过哈希、
 尺寸校验的 Canvas 截图及有界 CV 节点、连线、OCR 标识候选；不发送本地图片路径或完整页面
-URL。不再使用 `/v1/topology` 专用视觉协议及其独立 endpoint/key 配置。
+URL。视觉 API 不会复用或回退到规划模型的 URL、Key、模型或主机配置。
 
-Hybrid 的 `auto` 分类规则保持不变：高质量散点只保留节点；清晰结构拓扑直接使用 CV；
-复杂或无有效 CV 结果时最多调用模型一次，随后严格校验结果并融合。模型调用失败按既有逻辑
+Hybrid 按任务需要的能力分类：只需要节点且本地 CV 结果可信时直接采用 CV，即使连接线扫描
+不完整也不会为此调用模型；明确查询连接关系时才要求可靠连线，明确要求语义解释时才要求
+模型补充。CV 无有效节点或缺少任务必需能力时最多调用模型一次，随后严格校验结果并融合。模型调用失败按既有逻辑
 保留可用 CV 证据，`vision_routing.execution_status` 会标明降级。相同截图可使用缓存，模型、
 网关或 token 设置改变后不会复用旧模型结果。`vision_model_call` 记录当次调用与用量；
 缓存命中时调用数为 0，原始信息放在 `source_call_count` / `source_usage`，不重复计费统计。
@@ -95,7 +101,7 @@ python -m pip install -r requirements-local-vision.txt
 ```
 
 只调用视觉模型可将 driver 改为 `openai_compatible`。普通 DOM 页面无需视觉驱动；只配
-`KT6_MODEL_API_*` 不会启用截图发送。
+`KT6_MODEL_API_*` 不会启用截图发送，配置视觉 driver 但缺少 `KT6_VISION_API_*` 会拒绝启动。
 
 配置统一放在根目录 `.env`：
 
@@ -133,6 +139,16 @@ python -m pip install -r requirements-browser-executor.txt
 5. 输入自然语言任务，生成计划，检查后确认执行。
 6. Browser Harness 第一次连接时，在 Chrome 提示中点击 Allow。
 
+动作后的 `verify` / `wait` 没有业务截止时间：Runner 会持续 fresh capture，直到确定性
+Verifier 判断成功。需要停止时在 Side Panel 点击“取消执行”；取消会在当前 Browser Harness
+调用返回后生效。Browser Harness 的单次 IPC/CDP 存活超时仍保留，用于识别连接中断，且
+任何超时都不会自动重放 `type` 或 `click`。
+
+为避免长等待拖慢系统，未满足条件的轮询 capture 只在内存中短暂保留，验证失败立即丢弃
+并删除临时 Canvas 图片；最多同时保留 2 份。只有动作证据和最终验证成功的 capture 落库。
+规划模型接收按用户任务排序后的 UI Graph 投影，上限 48 KiB；捕获、感知、投影和模型调用
+耗时分别记录在 `planning_metrics` / `capture_metrics`，便于直接定位慢点。
+
 健康检查：
 
 ```powershell
@@ -154,6 +170,7 @@ Invoke-RestMethod http://127.0.0.1:8787/api/execution/health
 - 视觉点击必须绑定当前 Canvas backend node、当前截图坐标空间和唯一高置信目标。
 - 不接受模型生成的 JavaScript、Python、任意按键序列、helper 或 raw CDP。
 - 每个动作后都必须重新采集页面并由确定性 Verifier 判断结果。
+- 页面结果未就绪不会按固定时长判失败；运行只在验证成功、用户取消或发生连接/安全错误时结束。
 
 ## 主要代码
 

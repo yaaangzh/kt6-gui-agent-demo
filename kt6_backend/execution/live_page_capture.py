@@ -25,8 +25,15 @@ def capture_live_page_payload(
     *,
     url_policy: ExecutionURLPolicy,
     include_canvas: bool = True,
+    include_preview: bool = True,
 ) -> dict[str, Any]:
+    capture_started = time.perf_counter()
+    stage_timings: dict[str, float] = {}
+    stage_started = time.perf_counter()
     page = cdp_call("Page.getFrameTree")
+    stage_timings["frame_tree"] = round(
+        (time.perf_counter() - stage_started) * 1_000, 2
+    )
     frame_tree = page.get("frameTree")
     main_frame = frame_tree.get("frame") if isinstance(frame_tree, Mapping) else None
     if not isinstance(main_frame, Mapping):
@@ -37,14 +44,19 @@ def capture_live_page_payload(
     except ExecutionURLPolicyError as exc:
         raise LivePageCaptureError(exc.error_code) from exc
     frames = _flatten_frames(frame_tree)
+    stage_started = time.perf_counter()
     snapshot = cdp_call(
         "DOMSnapshot.captureSnapshot",
         computedStyles=[],
         includePaintOrder=True,
         includeDOMRects=True,
     )
+    stage_timings["dom_snapshot"] = round(
+        (time.perf_counter() - stage_started) * 1_000, 2
+    )
     ax_nodes: list[Mapping[str, Any]] = []
     frame_errors = []
+    stage_started = time.perf_counter()
     for frame in frames:
         try:
             result = cdp_call(
@@ -66,6 +78,10 @@ def capture_live_page_payload(
                 for node in values
                 if isinstance(node, Mapping)
             )
+    stage_timings["accessibility_tree"] = round(
+        (time.perf_counter() - stage_started) * 1_000, 2
+    )
+    stage_started = time.perf_counter()
     normalized = normalize_cdp_snapshot(snapshot, {"nodes": ax_nodes})
     version = cdp_call("Browser.getVersion")
     metrics = cdp_call("Page.getLayoutMetrics")
@@ -78,6 +94,9 @@ def capture_live_page_payload(
     height = int(float(viewport.get("clientHeight", 0)))
     if width < 1 or height < 1:
         raise LivePageCaptureError("browser_viewport_unavailable")
+    stage_timings["normalize_and_metrics"] = round(
+        (time.perf_counter() - stage_started) * 1_000, 2
+    )
     title = "Browser Page"
     for document in normalized.get("frames", []):
         if (
@@ -104,13 +123,21 @@ def capture_live_page_payload(
         "actionable_grounding": False,
         "safe_for_execution": False,
     }
+    stage_started = time.perf_counter()
     canvases = (
         _capture_canvases(cdp_call, normalized, page_url=page_url)
         if include_canvas
         else []
     )
-    preview_data_url = _capture_preview(cdp_call)
-    return {
+    stage_timings["canvas_capture"] = round(
+        (time.perf_counter() - stage_started) * 1_000, 2
+    )
+    stage_started = time.perf_counter()
+    preview_data_url = _capture_preview(cdp_call) if include_preview else ""
+    stage_timings["preview_capture"] = round(
+        (time.perf_counter() - stage_started) * 1_000, 2
+    )
+    result = {
         "page": {
             "url": page_url,
             "title": title,
@@ -127,8 +154,16 @@ def capture_live_page_payload(
         "adapter_scene": None,
         "cdp_snapshot": envelope,
         "captured_at": time.time(),
-        "preview_data_url": preview_data_url,
+        "capture_metrics": {
+            **stage_timings,
+            "total_browser_capture": round(
+                (time.perf_counter() - capture_started) * 1_000, 2
+            ),
+        },
     }
+    if preview_data_url:
+        result["preview_data_url"] = preview_data_url
+    return result
 
 
 def _capture_canvases(

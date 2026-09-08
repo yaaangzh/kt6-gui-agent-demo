@@ -617,6 +617,7 @@ class BrowserHarnessClient:
         self,
         *,
         include_canvas: bool = True,
+        include_preview: bool = True,
     ) -> dict[str, Any]:
         """Capture the live page through fixed CDP methods for the E2E harness."""
 
@@ -627,6 +628,7 @@ class BrowserHarnessClient:
                 self._cdp_call,
                 url_policy=self.url_policy,
                 include_canvas=include_canvas,
+                include_preview=include_preview,
             )
         except BrowserHarnessError:
             raise

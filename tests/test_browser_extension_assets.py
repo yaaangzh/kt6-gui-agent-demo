@@ -53,6 +53,8 @@ class BrowserExtensionAssetsTest(unittest.TestCase):
         self.assertNotIn("kt6.prepareRuntime", panel_script)
         self.assertIn("/api/execution/plans", panel_script)
         self.assertIn("/api/execution/runs", panel_script)
+        self.assertIn("/cancel", panel_script)
+        self.assertIn('id="cancel-run"', panel_html)
         self.assertNotIn("chrome.debugger.attach", panel_script)
         self.assertNotIn("chrome.debugger.sendCommand", panel_script)
 

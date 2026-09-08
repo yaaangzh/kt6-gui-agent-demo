@@ -14,6 +14,7 @@ from kt6_backend.execution.action_planner import OpenAIActionPlanner
 from kt6_backend.execution.browser_executor import HarnessBrowserExecutor
 from kt6_backend.execution.browser_harness_client import BrowserHarnessError
 from kt6_backend.execution.error_categories import (
+    CANCELLED,
     EXECUTION_FAILED,
     PAGE_CHANGED,
     PERCEPTION_FAILED,
@@ -369,6 +370,19 @@ class URLAndPlanContractTest(unittest.TestCase):
             "https://example.test/#assistant",
         )
 
+    def test_wait_has_no_business_deadline(self):
+        plan = semantic_plan()
+        plan["steps"][1]["op"] = "wait"
+        validated = ActionPlanValidator().validate(plan)
+        self.assertNotIn("timeout_ms", validated["steps"][1])
+
+        plan["steps"][1]["timeout_ms"] = 30_000
+        with self.assertRaisesRegex(
+            ActionPlanValidationError,
+            "action_plan_condition_fields_invalid",
+        ):
+            ActionPlanValidator().validate(plan)
+
     def test_type_requires_exact_input_value_verification(self):
         validator = ActionPlanValidator()
         validated = validator.validate(type_plan())
@@ -405,6 +419,9 @@ class PlannerAndServiceTest(unittest.TestCase):
 
         self.assertEqual(result["schema_version"], ACTION_PLAN_SCHEMA_VERSION)
         self.assertIn("untrusted page data", client.messages[0]["content"])
+        self.assertEqual(planner.last_plan_metrics["model_calls"], 1)
+        self.assertLessEqual(planner.last_plan_metrics["projection_bytes"], 48 * 1024)
+        self.assertGreater(planner.last_plan_metrics["projection_nodes"], 0)
 
     def test_deepseek_planner_disables_thinking_for_json_plan(self):
         class Result:
@@ -461,6 +478,7 @@ class PlannerAndServiceTest(unittest.TestCase):
 
         self.assertEqual(result["schema_version"], ACTION_PLAN_SCHEMA_VERSION)
         self.assertEqual(len(client.calls), 2)
+        self.assertEqual(planner.last_plan_metrics["model_calls"], 2)
         self.assertIn(
             "previous response violated",
             client.calls[1]["messages"][-1]["content"],
@@ -468,13 +486,14 @@ class PlannerAndServiceTest(unittest.TestCase):
 
     def test_service_checks_public_network_policy_before_model_planning(self):
         class Runner:
-            def inspect(self, start_url):
+            def inspect(self, start_url, *, user_request=""):
                 self.start_url = start_url
+                self.user_request = user_request
                 return {
                     "capture_id": "capture-plan",
                     "graph_id": "uig:capture-plan",
                     "ui_graph": graph("capture-plan"),
-                    "preview_data_url": "data:image/jpeg;base64,/9j/2Q==",
+                    "capture_metrics": {"total": 12.5},
                 }
 
         class Planner:
@@ -499,7 +518,10 @@ class PlannerAndServiceTest(unittest.TestCase):
         generated = service.generate_plan(start_url=URL, user_request=TASK)
 
         self.assertEqual(runner.start_url, URL)
+        self.assertEqual(runner.user_request, TASK)
         self.assertEqual(generated["planning_graph_id"], "uig:capture-plan")
+        self.assertNotIn("planning_preview", generated)
+        self.assertEqual(generated["planning_metrics"]["capture"]["total"], 12.5)
         self.assertEqual(generated["planner"]["model"], "test-model")
         another = service.generate_plan(
             start_url="https://other.test/",
@@ -573,6 +595,21 @@ class UnifiedGroundingTest(unittest.TestCase):
 
 
 class GenericScenarioRunnerTest(unittest.TestCase):
+    def test_visual_capture_profile_is_selected_by_requested_capability(self):
+        self.assertIsNone(ScenarioRunner._vision_profile("输入 ainfrra，点击百度一下"))
+        self.assertEqual(
+            ScenarioRunner._vision_profile("点击拓扑节点 AP-1"),
+            "nodes_only",
+        )
+        self.assertEqual(
+            ScenarioRunner._vision_profile("分析 AP-1 和网关的连接关系"),
+            "connectivity_query",
+        )
+        self.assertEqual(
+            ScenarioRunner._vision_profile("解释图中的设备类型"),
+            "semantic_enrichment",
+        )
+
     def test_inspection_maps_harness_startup_failure_to_scenario_error(self):
         class Client:
             exclusive_session = staticmethod(nullcontext)
@@ -613,26 +650,39 @@ class GenericScenarioRunnerTest(unittest.TestCase):
             def open_or_bind_target(self, page_url):
                 return {"target_id": "target-1", "page_url": page_url}
 
-            def capture_page_payload(self, *, include_canvas=True):
+            def capture_page_payload(
+                self, *, include_canvas=True, include_preview=True
+            ):
                 self.sequence += 1
                 return {
                     "sequence": self.sequence,
                     "page_url": URL,
-                    "preview_data_url": "data:image/jpeg;base64,/9j/2Q==",
                 }
 
         class Perception:
             def __init__(self):
                 self.snapshots = {}
 
-            def ingest(self, payload):
+            def ingest(self, payload, *, persist=True, include_execution_views=False):
                 capture_id = f"capture-{payload['sequence']}"
                 self.snapshots[capture_id] = {
                     "capture_id": capture_id,
                     "created_at": float(payload["sequence"]),
                     "dom": {"elements": []},
                 }
-                return {"capture_id": capture_id}
+                sequence = int(capture_id.rsplit("-", 1)[1])
+                return {
+                    "capture_id": capture_id,
+                    "summary": {},
+                    "ui_graph": graph(capture_id, include_result=sequence >= 3),
+                    "action_snapshot": copy.deepcopy(self.snapshots[capture_id]),
+                }
+
+            def persist_capture(self, _capture_id):
+                return None
+
+            def discard_capture(self, _capture_id):
+                return None
 
             def get_ui_graph(self, capture_id):
                 sequence = int(capture_id.rsplit("-", 1)[1])
@@ -684,7 +734,9 @@ class GenericScenarioRunnerTest(unittest.TestCase):
             def open_or_bind_target(self, page_url):
                 return {"target_id": "target-input", "page_url": page_url}
 
-            def capture_page_payload(self, *, include_canvas=True):
+            def capture_page_payload(
+                self, *, include_canvas=True, include_preview=True
+            ):
                 self.sequence += 1
                 return {"sequence": self.sequence, "page_url": URL}
 
@@ -692,10 +744,47 @@ class GenericScenarioRunnerTest(unittest.TestCase):
             def __init__(self):
                 self.snapshots = {}
 
-            def ingest(self, payload):
+            def ingest(self, payload, *, persist=True, include_execution_views=False):
                 capture_id = f"capture-type-{payload['sequence']}"
                 self.snapshots[capture_id] = {"capture_id": capture_id}
-                return {"capture_id": capture_id}
+                sequence = int(capture_id.rsplit("-", 1)[1])
+                value = graph(capture_id)
+                value["nodes"] = [
+                    {
+                        "id": "cdp:search",
+                        "kind": "control",
+                        "name": "当前动态热词",
+                        "role": "textbox",
+                        "disabled": False,
+                        "actionable": False,
+                        "can_click_now": False,
+                        "safe_for_execution": False,
+                        "bbox": [10, 10, 180, 30],
+                        "attributes": {
+                            "id": "search-input",
+                            "value": "找一个前端开源项目" if sequence >= 3 else "",
+                        },
+                        "source": {
+                            "kind": "cdp",
+                            "backend_node_id": 303,
+                            "frame_id": "main",
+                            "frame_url": URL,
+                        },
+                        "interaction": {"candidate": True, "status": "candidate_only"},
+                    }
+                ]
+                return {
+                    "capture_id": capture_id,
+                    "summary": {},
+                    "ui_graph": value,
+                    "action_snapshot": self.snapshots[capture_id],
+                }
+
+            def persist_capture(self, _capture_id):
+                return None
+
+            def discard_capture(self, _capture_id):
+                return None
 
             def get_ui_graph(self, capture_id):
                 sequence = int(capture_id.rsplit("-", 1)[1])
@@ -764,6 +853,74 @@ class GenericScenarioRunnerTest(unittest.TestCase):
         self.assertEqual(executor.actions[0].op, "type")
         self.assertEqual(executor.actions[0].text, "找一个前端开源项目")
 
+    def test_verification_keeps_observing_until_success(self):
+        attempts = []
+        waits = []
+
+        class Verifiers:
+            def verify_expected(self, **_kwargs):
+                attempts.append(len(attempts) + 1)
+                return len(attempts) == 3, "unit-verifier"
+
+        runner = ScenarioRunner(
+            page_perception=object(),
+            browser_executor=type("Executor", (), {"client": object()})(),
+            grounders=TargetGrounderRegistry(),
+            verifiers=Verifiers(),
+            url_policy=public_url_policy(),
+            wait=waits.append,
+        )
+        capture_number = 0
+
+        def capture(_label, **_kwargs):
+            nonlocal capture_number
+            capture_number += 1
+            value = graph(f"verify-{capture_number}")
+            return {"capture_id": f"verify-{capture_number}"}, value, {}
+
+        result, pending = runner._verify(
+            semantic_plan()["steps"][1],
+            pending={"before": {}, "before_graph": graph("before")},
+            capture=capture,
+            cancelled=lambda: False,
+        )
+
+        self.assertTrue(result["outcome_verified"])
+        self.assertEqual(result["attempts"], 3)
+        self.assertEqual(len(waits), 2)
+        self.assertIsNone(pending)
+
+    def test_wait_stops_only_when_cancelled(self):
+        cancelled = False
+
+        class Verifiers:
+            @staticmethod
+            def verify_expected(**_kwargs):
+                return False, "unit-verifier"
+
+        def mark_cancelled(_seconds):
+            nonlocal cancelled
+            cancelled = True
+
+        runner = ScenarioRunner(
+            page_perception=object(),
+            browser_executor=type("Executor", (), {"client": object()})(),
+            grounders=TargetGrounderRegistry(),
+            verifiers=Verifiers(),
+            url_policy=public_url_policy(),
+            wait=mark_cancelled,
+        )
+        step = semantic_plan()["steps"][1]
+        step["op"] = "wait"
+
+        with self.assertRaisesRegex(ScenarioExecutionError, "execution_cancelled"):
+            runner._wait_for(
+                step,
+                pending={"before": {}, "before_graph": graph("before")},
+                capture=lambda _label, **_kwargs: ({}, graph("after"), {}),
+                cancelled=lambda: cancelled,
+            )
+
 
 class FailureCategoryAndGenericVerifierTest(unittest.TestCase):
     def test_classify_error_maps_loop_failures_to_stable_categories(self):
@@ -776,7 +933,7 @@ class FailureCategoryAndGenericVerifierTest(unittest.TestCase):
             "browser_page_changed": PAGE_CHANGED,
             "browser_target_occluded": EXECUTION_FAILED,
             "browser_session_target_changed": EXECUTION_FAILED,
-            "scenario_expected_outcome_missing": VERIFY_FAILED,
+            "execution_cancelled": CANCELLED,
         }
         for code, category in cases.items():
             with self.subTest(code=code):

@@ -630,8 +630,10 @@ class BrowserHarnessClientTest(unittest.TestCase):
         page_url = "https://example.test/topology?capture=1"
         envelope = cdp_envelope(page_url)
         harness = SingleTargetHarness(page_url)
+        calls = []
 
         def cdp(method, **_kwargs):
+            calls.append(method)
             if method == "Target.getTargets":
                 return {
                     "targetInfos": [
@@ -671,9 +673,12 @@ class BrowserHarnessClientTest(unittest.TestCase):
             current_tab_call=harness.current_tab,
         )
         client.bind_page_target(page_url)
-        payload = client.capture_page_payload()
+        payload = client.capture_page_payload(include_preview=False)
 
         self.assertEqual(payload["page"]["url"], page_url)
+        self.assertNotIn("preview_data_url", payload)
+        self.assertNotIn("Page.captureScreenshot", calls)
+        self.assertIn("total_browser_capture", payload["capture_metrics"])
         self.assertEqual(
             payload["cdp_snapshot"]["schema_version"],
             "kt6.cdp-page-snapshot.v1",

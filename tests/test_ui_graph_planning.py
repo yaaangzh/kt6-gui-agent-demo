@@ -216,7 +216,7 @@ class UIGraphPlanningServiceTest(unittest.TestCase):
 
         result = service.plan(
             capture_id="capture-1",
-            instruction="locate the outside-budget node",
+            instruction="locate an unrelated item",
         )
 
         sent_node_ids = {
@@ -228,6 +228,49 @@ class UIGraphPlanningServiceTest(unittest.TestCase):
             "target_node_not_found",
             {error["code"] for error in result["validation"]["errors"]},
         )
+
+    def test_task_relevant_candidate_outranks_generic_candidates(self):
+        value = graph()
+        value["nodes"] = [
+            {
+                "id": f"candidate-{index:03d}",
+                "kind": "control",
+                "role": "button",
+                "name": "无关按钮" + ("很长" * 40),
+                "source": {"kind": "dom", "source_ref": f"#item-{index}"},
+                "interaction": {"candidate": True, "status": "candidate_only"},
+            }
+            for index in range(30)
+        ]
+        value["nodes"].append(
+            {
+                "id": "export-button",
+                "kind": "control",
+                "role": "button",
+                "name": "导出",
+                "source": {"kind": "dom", "source_ref": "#export"},
+                "interaction": {"candidate": True, "status": "candidate_only"},
+            }
+        )
+        reasoner = FakeReasoner(
+            {
+                "schema_version": OPERATION_SCHEMA_VERSION,
+                "steps": [
+                    {"id": "click-export", "op": "click", "target_node_id": "export-button"}
+                ],
+            }
+        )
+        reasoner.MAX_GRAPH_TEXT_BYTES = 1_400
+        service = UIGraphPlanningService(FakePagePerception(value), reasoner)
+
+        result = service.plan(capture_id="capture-1", instruction="点击导出")
+
+        sent_node_ids = {
+            node["id"]
+            for node in json.loads(reasoner.calls[0]["ui_graph_text"])["nodes"]
+        }
+        self.assertIn("export-button", sent_node_ids)
+        self.assertEqual(result["status"], "planned")
 
     def test_missing_graph_and_unconfigured_reasoner_fail_explicitly(self):
         service = UIGraphPlanningService(FakePagePerception(None))

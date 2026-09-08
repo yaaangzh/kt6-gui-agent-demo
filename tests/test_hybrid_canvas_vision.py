@@ -196,6 +196,40 @@ class HybridCanvasVisionAdapterTest(unittest.TestCase):
             "local_cv",
         )
 
+    def test_runtime_profile_uses_cv_for_nodes_but_model_for_connectivity(self):
+        local_payload = trusted_structured_local_result()
+        local_payload["links"] = []
+        local_payload["diagnostics"]["connector_scan"].update(
+            {
+                "status": "partial",
+                "budget_exhausted": True,
+                "line_segment_count": 5000,
+            }
+        )
+        local = TrustedLocalAdapter(local_payload)
+        model = ContextAwareAdapter(model_result())
+        adapter = HybridCanvasVisionAdapter(
+            local_adapter=local,
+            model_adapter=model,
+        )
+
+        nodes = adapter.recognize_with_profile(
+            page={"url": "test"},
+            frames=(),
+            requested_profile="nodes_only",
+        )
+        connectivity = adapter.recognize_with_profile(
+            page={"url": "test"},
+            frames=(),
+            requested_profile="connectivity_query",
+        )
+
+        self.assertEqual(nodes["vision_routing"]["decision"], "cv_only")
+        self.assertFalse(nodes["vision_routing"]["model_invoked"])
+        self.assertEqual(connectivity["vision_routing"]["decision"], "model_assist")
+        self.assertTrue(connectivity["vision_routing"]["model_invoked"])
+        self.assertEqual(model.calls, 1)
+
     def test_untrusted_cv_never_skips_model(self):
         local = StaticAdapter(trusted_structured_local_result())
         model = ContextAwareAdapter(model_result())

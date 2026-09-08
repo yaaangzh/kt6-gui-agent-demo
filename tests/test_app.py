@@ -103,11 +103,23 @@ class AppFactoryTest(unittest.TestCase):
             "KT6_MODEL_API_MAX_TOKENS": "8192",
         }
 
-    def test_hybrid_shares_api_config_but_can_use_a_distinct_vision_model(self):
+    @staticmethod
+    def vision_environment():
+        return {
+            "KT6_VISION_API_PROVIDER": "vision-gateway",
+            "KT6_VISION_API_BASE_URL": "https://vision.internal/v1",
+            "KT6_VISION_API_KEY": "vision-secret-must-not-appear-in-health",
+            "KT6_VISION_API_MODEL": "image-model",
+            "KT6_VISION_API_ALLOWED_HOSTS": "vision.internal",
+            "KT6_VISION_API_TIMEOUT_SECONDS": "45",
+            "KT6_VISION_API_MAX_TOKENS": "3072",
+        }
+
+    def test_hybrid_uses_a_fully_separate_vision_api(self):
         environment = {
             **self.model_environment(),
+            **self.vision_environment(),
             "KT6_VISION_DRIVER": "hybrid",
-            "KT6_VISION_MODEL": "image-model",
         }
         with patch.dict(os.environ, environment, clear=True), tempfile.TemporaryDirectory() as temp_dir:
             services = app.create_services(Path(temp_dir))
@@ -118,28 +130,32 @@ class AppFactoryTest(unittest.TestCase):
         self.assertIsInstance(vision.local_adapter, app.LocalCVTopologyVisionAdapter)
         self.assertEqual(vision.requested_profile, "auto")
         self.assertIsInstance(vision.model_adapter, app.OpenAICompatibleCanvasVisionAdapter)
-        self.assertEqual(vision.model_adapter.client.endpoint, "https://models.internal/v1/chat/completions")
-        self.assertEqual(vision.model_adapter.client.api_key, environment["KT6_MODEL_API_KEY"])
+        self.assertEqual(vision.model_adapter.client.endpoint, "https://vision.internal/v1/chat/completions")
+        self.assertEqual(vision.model_adapter.client.api_key, environment["KT6_VISION_API_KEY"])
         self.assertEqual(vision.model_adapter.model, "image-model")
-        self.assertEqual(vision.model_adapter.timeout_seconds, 75)
-        self.assertEqual(vision.model_adapter.max_tokens, 8192)
+        self.assertEqual(vision.model_adapter.timeout_seconds, 45)
+        self.assertEqual(vision.model_adapter.max_tokens, 3072)
         self.assertEqual(planner.client.model, "planner-model")
+        self.assertEqual(planner.client.endpoint, "https://models.internal/v1/chat/completions")
+        self.assertEqual(planner.client.api_key, environment["KT6_MODEL_API_KEY"])
         health = app._canvas_vision_health(vision)
         self.assertEqual(health["routing_mode"], "cv_first_adaptive")
         self.assertEqual(health["model"], "image-model")
-        self.assertEqual(health["provider"], "test-gateway")
+        self.assertEqual(health["provider"], "vision-gateway")
         self.assertNotIn(environment["KT6_MODEL_API_KEY"], str(health))
-        self.assertNotIn("models.internal", str(health))
+        self.assertNotIn(environment["KT6_VISION_API_KEY"], str(health))
+        self.assertNotIn("vision.internal", str(health))
 
-    def test_direct_vision_uses_the_configured_general_model_when_not_overridden(self):
+    def test_direct_vision_uses_only_the_dedicated_vision_api(self):
         environment = {
-            **self.model_environment(),
+            **self.vision_environment(),
             "KT6_VISION_DRIVER": "openai_compatible",
         }
         with patch.dict(os.environ, environment, clear=True):
             adapter = app._create_canvas_vision_from_env()
         self.assertIsInstance(adapter, app.OpenAICompatibleCanvasVisionAdapter)
-        self.assertEqual(adapter.model, "planner-model")
+        self.assertEqual(adapter.model, "image-model")
+        self.assertEqual(adapter.client.endpoint, "https://vision.internal/v1/chat/completions")
         self.assertFalse(adapter.supports_actionable_grounding)
 
     def test_general_model_config_does_not_enable_image_transmission(self):
@@ -149,19 +165,19 @@ class AppFactoryTest(unittest.TestCase):
     def test_local_cv_does_not_construct_a_model_client(self):
         with (
             patch.dict(os.environ, {"KT6_VISION_DRIVER": "local_cv_ocr"}, clear=True),
-            patch.object(app, "_create_model_client_from_env") as model_factory,
+            patch.object(app, "_create_vision_client_from_env") as model_factory,
         ):
             adapter = app._create_canvas_vision_from_env()
         self.assertIsInstance(adapter, app.LocalCVTopologyVisionAdapter)
         model_factory.assert_not_called()
 
-    def test_vision_model_override_requires_an_explicit_model_driver(self):
+    def test_vision_api_configuration_requires_an_explicit_model_driver(self):
         for driver in (None, "local_cv_ocr"):
-            environment = {"KT6_VISION_MODEL": "image-model"}
+            environment = self.vision_environment()
             if driver:
                 environment["KT6_VISION_DRIVER"] = driver
             with self.subTest(driver=driver), patch.dict(os.environ, environment, clear=True):
-                with self.assertRaisesRegex(ValueError, "KT6_VISION_MODEL"):
+                with self.assertRaisesRegex(ValueError, "KT6_VISION_API_PROVIDER"):
                     app._create_canvas_vision_from_env()
 
     def test_unknown_and_removed_drivers_are_rejected(self):
@@ -173,26 +189,40 @@ class AppFactoryTest(unittest.TestCase):
 
     def test_model_vision_missing_api_configuration_fails_before_runtime_creation(self):
         for driver in ("hybrid", "openai_compatible"):
-            for config in ({}, {"KT6_MODEL_API_KEY": "secret-never-in-errors"}):
-                environment = {**config, "KT6_VISION_DRIVER": driver}
+            for config in ({}, {"KT6_VISION_API_KEY": "secret-never-in-errors"}):
+                environment = {
+                    **self.model_environment(),
+                    **config,
+                    "KT6_VISION_DRIVER": driver,
+                }
                 with (
                     self.subTest(driver=driver, config=tuple(config)),
                     patch.dict(os.environ, environment, clear=True),
                     tempfile.TemporaryDirectory() as temp_dir,
                 ):
-                    with self.assertRaisesRegex(ValueError, "KT6_MODEL_API") as raised:
+                    with self.assertRaisesRegex(ValueError, "KT6_VISION_API") as raised:
                         app.create_services(Path(temp_dir))
                     self.assertNotIn("secret-never-in-errors", str(raised.exception))
                     self.assertFalse((Path(temp_dir) / "runtime_data").exists())
 
-    def test_vision_uses_the_shared_api_host_boundary(self):
+    def test_vision_uses_its_own_api_host_boundary(self):
         environment = {
             **self.model_environment(),
+            **self.vision_environment(),
             "KT6_VISION_DRIVER": "hybrid",
-            "KT6_MODEL_API_ALLOWED_HOSTS": "other.internal",
+            "KT6_VISION_API_ALLOWED_HOSTS": "other.internal",
         }
         with patch.dict(os.environ, environment, clear=True):
             with self.assertRaisesRegex(ValueError, "allowed_hosts"):
+                app._create_canvas_vision_from_env()
+
+    def test_vision_api_does_not_fall_back_to_planner_configuration(self):
+        environment = {
+            **self.model_environment(),
+            "KT6_VISION_DRIVER": "hybrid",
+        }
+        with patch.dict(os.environ, environment, clear=True):
+            with self.assertRaisesRegex(ValueError, "KT6_VISION_API"):
                 app._create_canvas_vision_from_env()
 
     def test_request_body_is_json_only_and_bounded(self):

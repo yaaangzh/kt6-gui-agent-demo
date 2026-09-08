@@ -35,6 +35,7 @@ class ExecutionScenarioService:
         self.url_policy = url_policy
         self.validator = ActionPlanValidator()
         self._runs: dict[str, dict[str, Any]] = {}
+        self._cancel_events: dict[str, threading.Event] = {}
         self._lock = threading.RLock()
         # Reserve before starting a worker so queued runs also exclude planning.
         self._operation_lock = threading.Lock()
@@ -61,9 +62,13 @@ class ExecutionScenarioService:
                 inspection = self.runner.inspect(
                     target_url,
                     browser_target_id=browser_target_id,
+                    user_request=request,
                 )
             else:
-                inspection = self.runner.inspect(target_url)
+                inspection = self.runner.inspect(
+                    target_url,
+                    user_request=request,
+                )
             validated = self.planner.plan(
                 start_url=target_url,
                 user_request=request,
@@ -85,6 +90,9 @@ class ExecutionScenarioService:
             raise ExecutionScenarioServiceError(exc.error_code) from exc
         finally:
             self._operation_lock.release()
+        planner_metrics = getattr(self.planner, "last_plan_metrics", {})
+        if not isinstance(planner_metrics, Mapping):
+            planner_metrics = {}
         return {
             "plan": validated,
             "readable_steps": [
@@ -98,7 +106,10 @@ class ExecutionScenarioService:
             },
             "planning_capture_id": inspection["capture_id"],
             "planning_graph_id": inspection["graph_id"],
-            "planning_preview": inspection["preview_data_url"],
+            "planning_metrics": {
+                "capture": copy.deepcopy(inspection.get("capture_metrics", {})),
+                "planner": copy.deepcopy(planner_metrics),
+            },
             "browser_target_id": str(
                 inspection.get("browser_session", {}).get("target_id", "")
             ),
@@ -126,6 +137,7 @@ class ExecutionScenarioService:
             run_id = f"run_{uuid.uuid4().hex[:16]}"
             record = self._new_record(run_id, validated)
             self._runs[run_id] = record
+            self._cancel_events[run_id] = threading.Event()
         thread = threading.Thread(
             target=self._run,
             args=(run_id, validated, browser_target_id),
@@ -160,6 +172,7 @@ class ExecutionScenarioService:
         run_id = f"run_{uuid.uuid4().hex[:16]}"
         with self._lock:
             self._runs[run_id] = self._new_record(run_id, validated)
+            self._cancel_events[run_id] = threading.Event()
         self._run(
             run_id,
             validated,
@@ -177,10 +190,23 @@ class ExecutionScenarioService:
                 raise ExecutionScenarioServiceError("execution_run_not_found")
             return copy.deepcopy(record)
 
+    def cancel_run(self, run_id: str) -> dict[str, Any]:
+        normalized = str(run_id).strip()
+        with self._lock:
+            record = self._runs.get(normalized)
+            cancel_event = self._cancel_events.get(normalized)
+            if record is None or cancel_event is None:
+                raise ExecutionScenarioServiceError("execution_run_not_found")
+            if record["status"] in {"success", "failed", "cancelled"}:
+                return copy.deepcopy(record)
+            cancel_event.set()
+            record["status"] = "cancelling"
+            return copy.deepcopy(record)
+
     def health(self) -> dict[str, Any]:
         with self._lock:
             active = sum(
-                item["status"] in {"queued", "running"}
+                item["status"] in {"queued", "running", "cancelling"}
                 for item in self._runs.values()
             )
         return {
@@ -223,6 +249,7 @@ class ExecutionScenarioService:
     ) -> None:
         out_dir = self.root / "runtime_data" / "execution_scenarios" / run_id
         with self._lock:
+            cancel_event = self._cancel_events[run_id]
             self._runs[run_id]["status"] = "running"
             self._runs[run_id]["output_dir"] = str(out_dir)
 
@@ -230,9 +257,13 @@ class ExecutionScenarioService:
             with self._lock:
                 record = self._runs[run_id]
                 for key, value in delta.items():
+                    if key == "status" and cancel_event.is_set():
+                        continue
                     record[key] = copy.deepcopy(value)
 
         try:
+            if cancel_event.is_set():
+                raise ScenarioExecutionError("execution_cancelled")
             result = self.runner.run(
                 plan,
                 run_id=run_id,
@@ -240,6 +271,7 @@ class ExecutionScenarioService:
                 confirmed=True,
                 browser_target_id=browser_target_id,
                 update=update,
+                cancelled=cancel_event.is_set,
             )
             with self._lock:
                 record = self._runs[run_id]
@@ -252,12 +284,19 @@ class ExecutionScenarioService:
             error_code = getattr(exc, "error_code", "execution_scenario_failed")
             with self._lock:
                 record = self._runs[run_id]
-                record["status"] = "failed"
+                record["status"] = (
+                    "cancelled" if error_code == "execution_cancelled" else "failed"
+                )
                 record["error_code"] = str(error_code)
                 record["error_category"] = classify_error(str(error_code))
             try:
                 if out_dir.exists():
-                    _write_json(out_dir / "failed-result.json", self.get_run(run_id))
+                    result_name = (
+                        "cancelled-result.json"
+                        if error_code == "execution_cancelled"
+                        else "failed-result.json"
+                    )
+                    _write_json(out_dir / result_name, self.get_run(run_id))
             except OSError:
                 with self._lock:
                     record["evidence_error_code"] = "execution_evidence_write_failed"
@@ -275,7 +314,6 @@ class ExecutionScenarioService:
             "current_step": "",
             "current_step_index": 0,
             "steps": [],
-            "latest_preview": "",
             "capture_id": "",
             "graph_id": "",
             "output_dir": "",

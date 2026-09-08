@@ -65,19 +65,24 @@ KT6_VISION_DRIVER=local_cv_ocr
 这条本地补充链不调用大模型；所有模型能力都通过 API 配置。
 
 `feature/eval-browser-harness` 要启用 CV＋图片模型自适应识别，先安装
-`requirements-local-vision.txt`，然后复用 3.1 的 API 配置，增加：
+`requirements-local-vision.txt`，然后配置独立的视觉 API：
 
 ```dotenv
 KT6_VISION_DRIVER=hybrid
-# 可选；同一网关下的图片模型。省略时使用 KT6_MODEL_API_MODEL。
-KT6_VISION_MODEL=<支持image_url内容块和JSON输出的模型名>
+KT6_VISION_API_PROVIDER=<视觉供应商或内网网关标识>
+KT6_VISION_API_BASE_URL=https://<获批视觉网关>/v1
+KT6_VISION_API_KEY=<本机视觉密钥>
+KT6_VISION_API_MODEL=<支持image_url内容块和JSON输出的模型名>
+KT6_VISION_API_ALLOWED_HOSTS=<获批视觉网关精确主机名>
+KT6_VISION_API_MAX_TOKENS=4096
+KT6_VISION_API_TIMEOUT_SECONDS=60
 ```
 
 视觉请求包含 Canvas 截图和有界 CV/OCR 上下文，不含本地路径、完整页面 URL；普通规划
 请求仍是文本。直接图片识别可选 `openai_compatible`，无需本地 CV。旧 `http` driver 和
-`KT6_VISION_ENDPOINT` / `KT6_VISION_API_KEY` / `KT6_VISION_TIMEOUT_SECONDS` 已移除，
-网关、密钥、超时和 token 上限统一由 `KT6_MODEL_API_*` 配置。图片发送需显式启用视觉
-driver；`eval-current` 的模型仍只接收 CV JSON，不因本分支增加图片输入而改变。
+旧 `KT6_VISION_MODEL`、`KT6_VISION_ENDPOINT`、`KT6_VISION_TIMEOUT_SECONDS` 已移除，
+视觉网关使用 `KT6_VISION_API_*`，不复用、不回退到规划用的 `KT6_MODEL_API_*`。图片发送需
+显式启用视觉 driver；`eval-current` 的模型仍只接收 CV JSON，不因本分支增加图片输入而改变。
 
 ### 3.3 UI-TARS API
 
@@ -270,6 +275,11 @@ python -m unittest `
 当前本机配置仍为 `local_cv_ocr`；需要按 3.2 节改为 `hybrid`，指定支持图片的模型并重启后端，
 才能验收真实截图识别。
 
+2026-09-08 独立视觉 URL 配置复核：配置工厂、视觉请求、Hybrid 路由、融合、缓存和环境加载
+共 99 项通过（4.474 秒）。验证了规划与视觉使用不同 Base URL、Key、provider、model、
+allowed hosts、token 上限和超时；只配置规划 API 时不会启用视觉，启用模型视觉但缺少
+`KT6_VISION_API_*` 时启动失败。本轮仍未访问真实 API 或 Chrome。
+
 2026-09-07 生命周期修复的最小定向回归（不访问真实浏览器或模型）：
 
 ```powershell
@@ -288,10 +298,12 @@ python -m unittest `
 1. 一个面板正在规划/执行时，从另一个面板提交任务，应立即提示 busy，原任务的目标不变。
 2. Chrome 连接失败时，任务应结束为 failed，下一次新任务可重新连接，不持续占用 running。
 3. 相同输入或相同菜单选项再次执行，新 capture 仍满足目标时应验证通过。
-4. 有延迟的页面跳转应先观察到 URL 改变，再采集验证；未跳转仍应明确失败。
+4. 有延迟的页面跳转应持续重新采集，直到 URL/页面变化通过验证；未跳转时保持运行，用户
+   可在 Side Panel 主动取消，不应出现业务等待超时。
 
 互斥不会增加模型调用；DOM 动作仍保留两次动作前 capture 和一次动作后验证。
-导航等待只读 `Page.getFrameTree`，不重复全页识别；重连仅发生在新绑定边界，不重放动作。
+验证轮询使用递增间隔，避免无期限等待时高频重复全页识别；重连仅发生在新绑定边界，
+不重放动作。
 
 当前固定动作词表只测试 `type` 与 `click`，不支持滚动、快捷键、任意 CDP 或 JavaScript。
 `type` 只能操作普通 INPUT/TEXTAREA，拒绝 password/file/hidden、disabled 和 readonly，
@@ -379,8 +391,11 @@ URL。临时 Target ID 不进入 Action Plan。
 3. `POST /api/execution/runs` 必须带 `confirmed=true`，Side Panel 再次确认当前 Tab 的
    URL/Target ID 未变，立即返回 run_id；前端轮询
    `GET /api/execution/runs/{run_id}`，避免阻塞页面。
-4. 每个 click 执行“capture → Grounding（DOM/CDP 优先，缺失时回退 Vision）→
-   fresh capture → live frame/identity/hit-test → click”；随后用 verify/wait 再次感知。
+   页面验证不设业务超时；需要停止时调用
+   `POST /api/execution/runs/{run_id}/cancel`，状态从 `cancelling` 进入 `cancelled`。
+4. 每个 click 先做不含 Canvas 的 DOM/CDP capture 与 Grounding；DOM 缺失时才按
+   `nodes_only` 采集 Canvas，并由 Hybrid 优先使用可信 CV。随后 fresh capture → live
+   frame/identity/hit-test → click，再由 verify/wait 重新感知。
    无 DOM `id` 的 CDP 候选必须有正整数 backend node id 和语义/属性指纹；0×0 可点击
    容器只能落到唯一可见直接子节点，live hit-test 命中也必须仍在同一授权 DOM 子树。
    链接还需在点击前校验解析后的目标 `href`；`target=_blank` 把本次新增且 URL/opener
@@ -390,11 +405,20 @@ URL。临时 Target ID 不进入 Action Plan。
    `attributes.value` 做 `input_value` 验证。模型不能生成按键序列。
 6. Vision 目标使用本次截图识别的 bbox 比例，点击前重新读取 live Canvas box 并
    做 hit-test，不复用第一步坐标。
-7. 最后新 capture 必须满足对应 Verifier（element_visible、element_disappeared、
+7. Runner 持续生成新 capture，直到满足对应 Verifier（element_visible、element_disappeared、
    element_selected、selected、text_present、input_value、url_changed 或 page_changed），才能返回
-   SUCCESS。失败会按 planner_failed / target_not_found / target_ambiguous /
+   SUCCESS；不会因为页面在固定秒数内未变化而报验证超时。Browser Harness 单次通信仍有
+   存活超时，通信失败不会自动重放动作。失败会按 planner_failed / target_not_found / target_ambiguous /
    perception_failed / execution_failed / verify_failed / page_changed 归类，便于统计
    KT6 GUI Agent 具体卡在哪个环节。
+8. 规划响应的 `planning_metrics` 应包含 capture 与 planner 分段耗时；模型侧 UI Graph
+   `projection_bytes` 不超过 49152。未满足验证条件的轮询 capture 不应出现在 SQLite 或
+   evidence 目录，最终验证成功的 capture 才保留。
+
+2026-09-08 性能链路专项：页面感知、任务相关 UI Graph 投影、Hybrid 能力路由、视觉缓存
+隔离和 Scenario Runner 共 67 项通过；另验证 transient capture 的落库/清理行为。普通 DOM
+规划不再采集 Canvas 或整页预览，可信 CV 的 `nodes_only` 不调用视觉模型，而连接关系查询
+保持严格能力门禁。
 
 2026-08-20 本机实机复核：严格语义计划 `点击百度热搜 → verify url_changed` 运行成功；
 移除执行目标逐域名白名单后，`example.com → 点击 Learn more → IANA` 的跨域实机运行也

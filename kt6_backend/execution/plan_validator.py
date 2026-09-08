@@ -110,23 +110,13 @@ class ActionPlanValidator:
         if op not in {"verify", "wait"}:
             raise ActionPlanValidationError("action_plan_operation_unsupported")
         allowed = {"id", "op", "expected"}
-        if op == "wait":
-            allowed.add("timeout_ms")
         if set(value) != allowed:
             raise ActionPlanValidationError("action_plan_condition_fields_invalid")
         expected = self._expected(value["expected"])
         result: dict[str, Any] = {"id": step_id, "op": op, "expected": expected}
         if op == "wait":
-            timeout = value.get("timeout_ms")
-            if (
-                isinstance(timeout, bool)
-                or not isinstance(timeout, int)
-                or not 100 <= timeout <= 30_000
-            ):
-                raise ActionPlanValidationError("action_plan_wait_timeout_invalid")
             if expected["type"] in {"page_changed", "url_changed"}:
                 raise ActionPlanValidationError("action_plan_wait_expected_invalid")
-            result["timeout_ms"] = timeout
         return result
 
     def _target(self, value: Any) -> dict[str, str]:

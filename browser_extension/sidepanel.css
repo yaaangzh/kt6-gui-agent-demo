@@ -23,6 +23,7 @@ button { width: 100%; padding: 10px 12px; border: 0; border-radius: 10px; font: 
 button:disabled { cursor: not-allowed; opacity: .48; }
 .primary { color: #fff; background: #356ae6; }
 .danger { color: #fff; background: #c33f4a; }
+.secondary { color: #9e2834; background: #fdecef; }
 .text-button { width: auto; padding: 4px 6px; color: #356ae6; background: transparent; }
 .status { margin: 10px 0 0; padding: 8px 10px; border-radius: 8px; font-size: 12px; line-height: 1.45; }
 .neutral { color: #5c6678; background: #f2f5f9; }

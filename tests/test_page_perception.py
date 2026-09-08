@@ -271,6 +271,33 @@ class PagePerceptionTest(unittest.TestCase):
         self.assertTrue(screenshot_path.exists())
         self.assertGreater(screenshot_path.stat().st_size, 0)
 
+    def test_transient_capture_is_retained_only_on_success_and_discards_assets(self):
+        transient = self.service.ingest(
+            live_capture_payload(),
+            persist=False,
+            include_execution_views=True,
+        )
+        capture_id = transient["capture_id"]
+        screenshot_path = Path(
+            self.service._record(capture_id)["capture"]["canvases"][0][
+                "screenshot_path"
+            ]
+        )
+
+        self.assertIsNone(self.store.get(capture_id))
+        self.assertIsNotNone(transient["ui_graph"])
+        self.assertTrue(screenshot_path.exists())
+
+        self.service.discard_capture(capture_id)
+
+        self.assertIsNone(self.service.get_capture(capture_id))
+        self.assertFalse(screenshot_path.exists())
+
+        retained = self.service.ingest(live_capture_payload(), persist=False)
+        retained_id = retained["capture_id"]
+        self.service.persist_capture(retained_id)
+        self.assertIsNotNone(self.store.get(retained_id))
+
     def test_unknown_canvas_is_marked_for_vision_model(self):
         payload = live_capture_payload()
         payload["dom"] = {"elements": []}

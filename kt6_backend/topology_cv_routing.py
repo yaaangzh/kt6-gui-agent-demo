@@ -308,20 +308,24 @@ def assess_cv_result(
             "cv_empty_requires_model_fallback"
         ]
     elif profile == "auto":
-        if scene_type == "scatter_nodes":
-            effective_profile = "nodes_only"
-            decision = "cv_only"
-            requirement_satisfied = True
-            reason_codes = scene_reasons + [
-                "auto_selected_nodes_only_for_scatter_scene",
-                "scatter_connectivity_intentionally_not_inferred",
-            ]
-        elif scene_type == "structured_topology":
+        if scene_type == "structured_topology":
             effective_profile = "visible_topology"
             decision = "cv_only"
             requirement_satisfied = True
             reason_codes = scene_reasons + [
                 "auto_selected_visible_topology_for_structured_scene"
+            ]
+        elif node_quality_sufficient and trusted_local_cv:
+            # A partial connector layer does not invalidate a high-quality CV
+            # node inventory. Connectivity-sensitive callers request that
+            # capability explicitly; the default route keeps proven nodes and
+            # omits uncertain links without invoking the model.
+            effective_profile = "nodes_only"
+            decision = "cv_only"
+            requirement_satisfied = True
+            reason_codes = scene_reasons + [
+                "auto_selected_nodes_only_from_trusted_cv",
+                "unverified_connectivity_intentionally_omitted",
             ]
         else:
             effective_profile = "visible_topology"

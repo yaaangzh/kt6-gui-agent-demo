@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -109,7 +110,27 @@ def _compact_edge(edge: Mapping[str, Any]) -> dict[str, Any] | None:
     return result
 
 
-def _node_priority(node: Mapping[str, Any]) -> tuple[Any, ...]:
+def _search_terms(instruction: str) -> tuple[str, ...]:
+    normalized = str(instruction).casefold()
+    terms = {
+        item
+        for item in re.findall(r"[\w\u4e00-\u9fff]+", normalized)
+        if len(item) >= 2
+    }
+    # Chinese workflow text often has no spaces. Keep bounded character n-grams
+    # so a target label such as “百度一下” can still outrank unrelated nodes.
+    chinese = "".join(re.findall(r"[\u4e00-\u9fff]", normalized))
+    for size in (2, 3, 4):
+        terms.update(
+            chinese[index : index + size]
+            for index in range(max(0, len(chinese) - size + 1))
+        )
+    return tuple(sorted(terms, key=lambda item: (-len(item), item))[:64])
+
+
+def _node_priority(
+    node: Mapping[str, Any], instruction_terms: tuple[str, ...]
+) -> tuple[Any, ...]:
     source = node.get("source")
     source_kind = (
         str(source.get("kind", "")).casefold() if isinstance(source, Mapping) else ""
@@ -118,16 +139,27 @@ def _node_priority(node: Mapping[str, Any]) -> tuple[Any, ...]:
     candidate = (
         isinstance(interaction, Mapping) and interaction.get("candidate") is True
     )
-    if candidate and source_kind in {"dom", "cdp"}:
+    searchable = " ".join(
+        str(node.get(key, "")).casefold()
+        for key in ("name", "role", "business_id", "owner_business_id", "action_id")
+    )
+    relevant = any(term in searchable for term in instruction_terms)
+    if relevant and candidate and source_kind in {"dom", "cdp"}:
         rank = 0
-    elif candidate:
+    elif relevant and candidate:
         rank = 1
-    elif node.get("kind") in {"business_object", "action_claim"}:
+    elif relevant:
         rank = 2
-    elif node.get("name"):
+    elif candidate and source_kind in {"dom", "cdp"}:
         rank = 3
-    else:
+    elif candidate:
         rank = 4
+    elif node.get("kind") in {"business_object", "action_claim"}:
+        rank = 5
+    elif node.get("name"):
+        rank = 6
+    else:
+        rank = 7
     return (rank, source_kind, str(node.get("id", "")))
 
 
@@ -135,6 +167,7 @@ def _reasoning_graph_text(
     graph: Mapping[str, Any],
     *,
     max_bytes: int,
+    instruction: str = "",
 ) -> tuple[str, dict[str, Any]]:
     if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 512:
         raise UIGraphProjectionError("reasoner graph byte budget must be at least 512")
@@ -157,7 +190,8 @@ def _reasoning_graph_text(
         for compact in [_compact_edge(raw)]
         if compact is not None
     ]
-    nodes.sort(key=_node_priority)
+    instruction_terms = _search_terms(instruction)
+    nodes.sort(key=lambda node: _node_priority(node, instruction_terms))
     node_by_id = {node["id"]: node for node in nodes}
     parent_edges = sorted(
         (edge for edge in edges if edge["type"] == "parent_of"),
@@ -248,7 +282,7 @@ def _reasoning_graph_text(
                 "truncated": (
                     len(included_nodes) < len(nodes) or len(included_edges) < len(edges)
                 ),
-                "selection": "interaction_candidates_business_nodes_then_parent_closure",
+                "selection": "task_relevant_nodes_then_candidates_then_parent_closure",
                 "max_utf8_bytes": max_bytes,
             },
         }
@@ -294,10 +328,15 @@ def project_ui_graph_for_reasoning(
     graph: Mapping[str, Any],
     *,
     max_bytes: int = 256 * 1024,
+    instruction: str = "",
 ) -> str:
     """Return the existing bounded model view for another validated planner."""
 
-    text, _projection = _reasoning_graph_text(graph, max_bytes=max_bytes)
+    text, _projection = _reasoning_graph_text(
+        graph,
+        max_bytes=max_bytes,
+        instruction=instruction,
+    )
     return text
 
 class UIGraphPlanningService:
@@ -369,7 +408,9 @@ class UIGraphPlanningService:
         except (TypeError, ValueError, OverflowError) as exc:
             raise UIGraphProjectionError("reasoner graph byte budget is invalid") from exc
         graph_text, model_projection = _reasoning_graph_text(
-            graph, max_bytes=graph_byte_budget
+            graph,
+            max_bytes=graph_byte_budget,
+            instruction=normalized_instruction,
         )
         model_output = reasoner.plan(
             instruction=normalized_instruction, ui_graph_text=graph_text, graph_id=graph_id

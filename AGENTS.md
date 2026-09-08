@@ -90,6 +90,16 @@ KT6_MODEL_API_MODEL
 KT6_MODEL_API_ALLOWED_HOSTS
 ```
 
+支持图片的视觉模型使用独立配置，不得回退到规划模型配置：
+
+```text
+KT6_VISION_API_PROVIDER
+KT6_VISION_API_BASE_URL
+KT6_VISION_API_KEY
+KT6_VISION_API_MODEL
+KT6_VISION_API_ALLOWED_HOSTS
+```
+
 UI-TARS 另用：
 
 ```text
@@ -150,11 +160,16 @@ E2E 只替换规划决策，不 Mock 页面世界；不得提交或使用 `mock_
 连接；不得创建专用 profile、固定调试端口或注入 Chrome 启动参数。扩展只选择当前 Tab
 并承载自然语言输入与确认，不 attach、不代发 CDP。Browser Harness 只通过 KT6 固定
 type/click 适配器执行，不允许模型生成的 helper、JavaScript、Python 或 raw CDP 进入主链。
-该执行入口的规划及视觉模型复用通用 `KT6_MODEL_API_*`，`KT6_VISION_MODEL` 可覆盖同一
-网关下的视觉模型名称。普通 DOM 页面不配置视觉驱动；Canvas 分析可选本地 `local_cv_ocr`、
+该执行入口的规划模型使用通用 `KT6_MODEL_API_*`；视觉模型使用独立的
+`KT6_VISION_API_PROVIDER/BASE_URL/KEY/MODEL/ALLOWED_HOSTS/MAX_TOKENS/TIMEOUT_SECONDS`，不得
+回退或复用规划 API。普通 DOM 页面不配置视觉驱动；Canvas 分析可选本地 `local_cv_ocr`、
 直接多模态 API `openai_compatible`，或 CV 优先的自适应 `hybrid`。后两者允许发送经过
 验证的截图和有界 CV/OCR 上下文，必须使用支持图片的获批模型；不发送路径或完整页面 URL。
 此图片输入仅属于本功能分支，不改变 `eval-current` 的纯 CV JSON 模型输入边界。
+普通 DOM 规划/执行不得生成未消费的页面预览或默认采集 Canvas；先走 DOM/CDP，只有任务
+能力或 Grounding 明确需要时才进入 Canvas。Hybrid 的 `nodes_only` 在可信 CV 节点足够时
+不得调用模型；连接关系和语义补充使用各自显式 profile。规划模型只接收按任务相关性排序
+的有界 UI Graph。无限业务等待的失败轮询证据不得持续落库，最终成功证据仍需保留。
 
 ### 4.7 `br_omniParser`
 
